@@ -20,6 +20,11 @@ std::vector<uint8_t> RenderWaveformThumb(const PcmData& pcm, int w, int h);
 // Writes frames [f0, f1) as a 16-bit PCM WAV file.
 bool WriteWav16(const std::wstring& path, const PcmData& pcm, uint64_t f0, uint64_t f1);
 
+// Overlaps the end of [f0, f1) with its beginning to produce a standalone,
+// seamlessly repeatable clip. The result is crossfadeFrames shorter.
+PcmData BuildSeamlessLoop(const PcmData& pcm, uint64_t f0, uint64_t f1,
+                          uint64_t crossfadeFrames);
+
 struct AudioSystem {
     bool Init();
     void Shutdown();
@@ -28,9 +33,12 @@ struct AudioSystem {
     void Toggle(int assetIndex, const std::wstring& path);
     // Play only [startSec, endSec) of the file (auto-stops at the end mark).
     void PlayRange(int assetIndex, const std::wstring& path, float startSec, float endSec);
+    // Takes ownership of processed PCM and repeats it until stopped.
+    void PlayLoop(int assetIndex, PcmData loopPcm);
     void Stop();
 
     bool IsPlaying(int assetIndex) const;
+    bool IsLooping(int assetIndex) const;
     bool AnyPlaying() const;
     int  PlayingIndex() const { return playingIndex; }
 
@@ -40,6 +48,7 @@ struct AudioSystem {
     void  Update(); // clear playing state when the sound reaches its end
 
 private:
+    bool LoadPcm(PcmData&& data);
     void ReleaseSound();
 
     ma_engine engine{};
@@ -49,5 +58,6 @@ private:
     bool hasSound = false;
     PcmData pcm;
     int playingIndex = -1;
+    bool looping = false;
     ma_uint64 stopAtFrame = 0; // 0 = play to end
 };

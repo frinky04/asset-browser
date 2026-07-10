@@ -71,7 +71,7 @@ void App::Frame() {
     if (ImGui::IsKeyPressed(ImGuiKey_Space, false) && !io.WantTextInput &&
         previewIndex >= 0 && previewIndex < (int)db.entries.size() &&
         db.entries[previewIndex].type == AssetType::Audio)
-        audio.Toggle(previewIndex, db.entries[previewIndex].path);
+        TogglePreviewAudio();
 
     float menuH = 0;
     DrawMenuBar(menuH);
@@ -363,22 +363,66 @@ std::wstring App::ExportAudioSelection() {
     const AssetEntry& e = db.entries[previewIndex];
     if (e.type != AssetType::Audio || !previewPcm.valid) return L"";
 
+    uint64_t f0 = 0, f1 = 0;
+    bool hasSel = AudioSelectionFrames(f0, f1);
+
+    wchar_t suffix[80];
+    if (hasSel) {
+        double sr = (double)previewPcm.sampleRate;
+        swprintf_s(suffix, audioTuneLoop ? L"_%.0f-%.0fms_loop.wav" : L"_%.0f-%.0fms.wav",
+                   f0 / sr * 1000.0, f1 / sr * 1000.0);
+    } else {
+        wcscpy_s(suffix, audioTuneLoop ? L"_loop.wav" : L".wav");
+    }
+    std::wstring outPath = exportDir + L"\\" + Utf8ToWide(e.name) + suffix;
+    if (audioTuneLoop) {
+        PcmData loop = BuildTunedAudioLoop();
+        if (!loop.valid || !WriteWav16(outPath, loop, 0, loop.frames)) return L"";
+    } else if (!WriteWav16(outPath, previewPcm, f0, f1)) {
+        return L"";
+    }
+    return outPath;
+}
+
+void App::TogglePreviewAudio() {
+    if (previewIndex < 0 || previewIndex >= (int)db.entries.size() || !previewPcm.valid) return;
+    const AssetEntry& e = db.entries[previewIndex];
+    if (e.type != AssetType::Audio) return;
+    if (audio.IsPlaying(previewIndex)) { audio.Stop(); return; }
+
+    uint64_t f0 = 0, f1 = 0;
+    bool hasSel = AudioSelectionFrames(f0, f1);
+    if (audioTuneLoop) {
+        PcmData loop = BuildTunedAudioLoop();
+        if (loop.valid) audio.PlayLoop(previewIndex, std::move(loop));
+    } else if (hasSel) {
+        float startSec = (float)f0 / previewPcm.sampleRate;
+        float endSec = (float)f1 / previewPcm.sampleRate;
+        audio.PlayRange(previewIndex, e.path, startSec, endSec);
+    } else {
+        audio.Toggle(previewIndex, e.path);
+    }
+}
+
+bool App::AudioSelectionFrames(uint64_t& f0, uint64_t& f1) const {
     float a = audioSelA, b = audioSelB;
     if (a > b) std::swap(a, b);
     bool hasSel = (a >= 0.0f && (b - a) > 0.001f);
-    uint64_t f0 = hasSel ? (uint64_t)((double)a * previewPcm.frames) : 0;
-    uint64_t f1 = hasSel ? (uint64_t)((double)b * previewPcm.frames) : previewPcm.frames;
+    f0 = hasSel ? (uint64_t)((double)a * previewPcm.frames) : 0;
+    f1 = hasSel ? (uint64_t)((double)b * previewPcm.frames) : previewPcm.frames;
+    return hasSel;
+}
 
-    wchar_t suffix[64];
-    if (hasSel) {
-        double sr = (double)previewPcm.sampleRate;
-        swprintf_s(suffix, L"_%.0f-%.0fms.wav", f0 / sr * 1000.0, f1 / sr * 1000.0);
-    } else {
-        wcscpy_s(suffix, L".wav");
-    }
-    std::wstring outPath = exportDir + L"\\" + Utf8ToWide(e.name) + suffix;
-    if (!WriteWav16(outPath, previewPcm, f0, f1)) return L"";
-    return outPath;
+uint64_t App::AudioLoopCrossfadeFrames(uint64_t f0, uint64_t f1) const {
+    uint64_t frames = (uint64_t)((double)audioLoopCrossfadeMs * previewPcm.sampleRate / 1000.0 + 0.5);
+    return (std::min)(frames, (f1 - f0) / 2);
+}
+
+PcmData App::BuildTunedAudioLoop() const {
+    uint64_t f0 = 0, f1 = 0;
+    AudioSelectionFrames(f0, f1);
+    uint64_t crossfadeFrames = AudioLoopCrossfadeFrames(f0, f1);
+    return BuildSeamlessLoop(previewPcm, f0, f1, crossfadeFrames);
 }
 
 std::vector<std::wstring> App::DragPathsFor(int index) {

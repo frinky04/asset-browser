@@ -37,6 +37,8 @@ struct App {
     PcmData previewPcm;                                // decoded audio for waveform/selection
     ID3D11ShaderResourceView* previewWaveSRV = nullptr;
     float audioSelA = -1.0f, audioSelB = -1.0f;        // selection as fractions, <0 = none
+    bool audioTuneLoop = false;
+    float audioLoopCrossfadeMs = 50.0f;
     GpuModel previewModel;
     bool previewModelValid = false;
     OrbitCamera previewCam;
@@ -70,11 +72,15 @@ struct App {
     void DrawStatusBar(float h);
 
     void SetPreview(int index);     // ui_preview.cpp
+    void TogglePreviewAudio();
     void HandleTileClick(int index, bool ctrl, bool shift);
     void BeginDragOfSelection(int draggedIndex);
     std::vector<std::wstring> DragPathsFor(int index);
     std::wstring ExportResizedTexture(const AssetEntry& e); // returns path to drag ("" = use original)
     std::wstring ExportAudioSelection();                    // selection (or whole clip) as wav
+    bool AudioSelectionFrames(uint64_t& f0, uint64_t& f1) const;
+    uint64_t AudioLoopCrossfadeFrames(uint64_t f0, uint64_t f1) const;
+    PcmData BuildTunedAudioLoop() const;
     bool DragDims(int w, int h, int& nw, int& nh) const;    // texDragOpt applied; true if downscaled
     void BuildTexturePreview();                             // ui_preview.cpp
     void OpenInExplorer(int index);

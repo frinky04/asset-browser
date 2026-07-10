@@ -12,6 +12,7 @@ namespace fs = std::filesystem;
 
 void App::SetPreview(int index) {
     if (index == previewIndex) return;
+    if (audio.IsLooping(previewIndex)) audio.Stop();
     previewIndex = index;
     texZoom = 0.0f;
     texPanX = texPanY = 0.0f;
@@ -21,6 +22,7 @@ void App::SetPreview(int index) {
     SafeRelease(previewWaveSRV);
     previewPcm = PcmData{};
     audioSelA = audioSelB = -1.0f;
+    audioTuneLoop = false;
     previewModel.Release();
     previewModelValid = false;
     if (index < 0 || index >= (int)db.entries.size()) return;
@@ -268,24 +270,39 @@ void App::DrawPreview() {
                 return (std::max)(0.0f, (std::min)(1.0f, (x - a0.x) / (a1.x - a0.x)));
             };
 
-            if (ImGui::IsItemActive()) {
-                audioSelA = fracAt(ImGui::GetIO().MouseClickedPos[0].x);
-                audioSelB = fracAt(ImGui::GetIO().MousePos.x);
+            float dragA = fracAt(ImGui::GetIO().MouseClickedPos[0].x);
+            float dragB = fracAt(ImGui::GetIO().MousePos.x);
+            if (ImGui::IsItemActive() && fabsf(dragB - dragA) >= 0.005f) {
+                if (audio.IsPlaying(previewIndex)) audio.Stop();
+                audioSelA = dragA;
+                audioSelB = dragB;
             }
             if (ImGui::IsItemDeactivated()) {
-                // a plain click (no drag) clears the selection and seeks
-                if (fabsf(audioSelB - audioSelA) < 0.005f) {
-                    if (audio.IsPlaying(previewIndex))
-                        audio.SeekSeconds(audioSelA * lenSec);
-                    audioSelA = audioSelB = -1.0f;
+                // A plain click preserves the selection and starts/seeks the source audio.
+                if (fabsf(dragB - dragA) < 0.005f) {
+                    float seekSec = dragA * lenSec;
+                    if (audio.IsPlaying(previewIndex) && !audio.IsLooping(previewIndex)) {
+                        audio.SeekSeconds(seekSec);
+                    } else {
+                        if (audio.IsPlaying(previewIndex)) audio.Stop();
+                        audio.PlayRange(previewIndex, e.path, seekSec, -1.0f);
+                    }
                 }
             }
-            if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+            if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                if (audio.IsPlaying(previewIndex)) audio.Stop();
                 audioSelA = audioSelB = -1.0f;
+            }
 
             // selection overlay
             float sa = (std::min)(audioSelA, audioSelB), sb = (std::max)(audioSelA, audioSelB);
-            bool hasSel = sa >= 0.0f && (sb - sa) > 0.001f;
+            uint64_t loopF0 = 0, loopF1 = 0;
+            bool hasSel = AudioSelectionFrames(loopF0, loopF1);
+            uint64_t loopRegionFrames = loopF1 - loopF0;
+            uint64_t loopFadeFrames = AudioLoopCrossfadeFrames(loopF0, loopF1);
+            bool canTuneLoop = loopRegionFrames >= 4 && loopFadeFrames >= 2;
+            float tunedLenSec = canTuneLoop
+                ? (float)(loopRegionFrames - loopFadeFrames) / previewPcm.sampleRate : 0.0f;
             if (hasSel) {
                 float x0 = a0.x + sa * (a1.x - a0.x);
                 float x1 = a0.x + sb * (a1.x - a0.x);
@@ -295,35 +312,75 @@ void App::DrawPreview() {
             }
             // playback cursor
             if (audio.IsPlaying(previewIndex) && lenSec > 0.0f) {
-                float cx = a0.x + (audio.CursorSeconds() / lenSec) * (a1.x - a0.x);
+                float cursorSec = audio.CursorSeconds();
+                if (audio.IsLooping(previewIndex))
+                    cursorSec += (float)(loopF0 + loopFadeFrames) / previewPcm.sampleRate;
+                float cx = a0.x + (cursorSec / lenSec) * (a1.x - a0.x);
                 dl->AddLine(ImVec2(cx, a0.y), ImVec2(cx, a1.y), IM_COL32(233, 233, 236, 200), 1.0f);
             }
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("drag: select region  |  click: seek  |  right-click: clear");
+                ImGui::SetTooltip("drag: select region  |  click: play/seek  |  right-click: clear");
 
             // --- controls ---
             bool playing = audio.IsPlaying(previewIndex);
-            if (ImGui::Button(playing ? "Stop" : "Play", ImVec2(70, 0))) {
-                if (playing) audio.Stop();
-                else audio.Toggle(previewIndex, e.path);
-            }
+            const char* playLabel = playing ? "Stop" : audioTuneLoop ? "Play loop" :
+                                    hasSel ? "Play selection" : "Play";
+            if (audioTuneLoop && !canTuneLoop) ImGui::BeginDisabled();
+            if (ImGui::Button(playLabel, ImVec2(120, 0))) TogglePreviewAudio();
+            if (audioTuneLoop && !canTuneLoop) ImGui::EndDisabled();
             ImGui::SameLine();
-            if (hasSel) {
-                if (ImGui::Button("Play selection"))
-                    audio.PlayRange(previewIndex, e.path, sa * lenSec, sb * lenSec);
-                ImGui::SameLine();
-            }
+            float contextLenSec = audioTuneLoop ? tunedLenSec :
+                                  hasSel ? (sb - sa) * lenSec : lenSec;
+            float contextCursorSec = audio.CursorSeconds();
+            if (playing && hasSel && !audio.IsLooping(previewIndex))
+                contextCursorSec -= sa * lenSec;
             if (playing)
-                ImGui::Text("%.2f / %.2f s", audio.CursorSeconds(), lenSec);
+                ImGui::Text("%.2f / %.2f s", contextCursorSec, contextLenSec);
             else
-                ImGui::TextDisabled("%.2f s", lenSec);
+                ImGui::TextDisabled("%.2f s", contextLenSec);
+
+            // --- seamless loop tuning ---
+            float tuneLoopWidth = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x +
+                                  ImGui::CalcTextSize("Tune loop").x;
+            ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x -
+                            tuneLoopWidth);
+            if (ImGui::Checkbox("Tune loop", &audioTuneLoop)) {
+                if (audio.IsPlaying(previewIndex)) audio.Stop();
+            }
+            if (audioTuneLoop) {
+                float maxCrossfadeMs = (std::min)(2000.0f,
+                    (float)((double)(loopRegionFrames / 2) * 1000.0 / previewPcm.sampleRate));
+                if (canTuneLoop) {
+                    float minCrossfadeMs = (std::min)(1.0f, maxCrossfadeMs);
+                    float displayedCrossfadeMs = (std::max)(minCrossfadeMs,
+                        (std::min)(audioLoopCrossfadeMs, maxCrossfadeMs));
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::SliderFloat("##loopfade", &displayedCrossfadeMs,
+                                           minCrossfadeMs, maxCrossfadeMs, "Crossfade %.1f ms",
+                                           ImGuiSliderFlags_Logarithmic))
+                        audioLoopCrossfadeMs = displayedCrossfadeMs;
+                    if (ImGui::IsItemDeactivatedAfterEdit() && audio.IsLooping(previewIndex)) {
+                        PcmData loop = BuildTunedAudioLoop();
+                        if (loop.valid) audio.PlayLoop(previewIndex, std::move(loop));
+                    }
+                    ImGui::TextDisabled("Tuned length: %.2f s", tunedLenSec);
+                } else {
+                    ImGui::TextDisabled("Selection is too short to tune");
+                }
+            }
 
             // --- drag-out export ---
             char dragLbl[64];
-            if (hasSel)
+            if (audioTuneLoop && hasSel)
+                snprintf(dragLbl, sizeof(dragLbl), "Drag out tuned loop (%.2fs, wav)",
+                         tunedLenSec);
+            else if (audioTuneLoop)
+                snprintf(dragLbl, sizeof(dragLbl), "Drag out tuned loop (wav)");
+            else if (hasSel)
                 snprintf(dragLbl, sizeof(dragLbl), "Drag out selection (%.2fs, wav)", (sb - sa) * lenSec);
             else
                 snprintf(dragLbl, sizeof(dragLbl), "Drag out full clip (wav)");
+            if (audioTuneLoop && !canTuneLoop) ImGui::BeginDisabled();
             ImGui::Button(dragLbl, ImVec2(-1, 0));
             if (ImGui::IsItemActive() && pendingDrag.empty() &&
                 ImGui::IsMouseDragging(ImGuiMouseButton_Left, 6.0f)) {
@@ -332,7 +389,9 @@ void App::DrawPreview() {
             }
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Drag this button into another app to export%s as 16-bit WAV",
+                                  audioTuneLoop ? " the tuned loop" :
                                   hasSel ? " the selected region" : " the whole clip");
+            if (audioTuneLoop && !canTuneLoop) ImGui::EndDisabled();
         } else {
             ImGui::TextDisabled("Failed to decode audio");
         }

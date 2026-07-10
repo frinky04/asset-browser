@@ -1,5 +1,6 @@
 #include "audio.h"
 #include "util.h"
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -146,6 +147,46 @@ bool WriteWav16(const std::wstring& path, const PcmData& pcm, uint64_t f0, uint6
     return true;
 }
 
+PcmData BuildSeamlessLoop(const PcmData& pcm, uint64_t f0, uint64_t f1,
+                          uint64_t crossfadeFrames) {
+    PcmData out;
+    if (!pcm.valid || pcm.channels == 0 || pcm.sampleRate == 0) return out;
+    f0 = (std::min)(f0, pcm.frames);
+    f1 = (std::min)(f1, pcm.frames);
+    if (f1 <= f0) return out;
+
+    uint64_t frames = f1 - f0;
+    crossfadeFrames = (std::min)(crossfadeFrames, frames / 2);
+    if (crossfadeFrames < 2) return out;
+
+    out.channels = pcm.channels;
+    out.sampleRate = pcm.sampleRate;
+    out.frames = frames - crossfadeFrames;
+    out.samples.resize((size_t)out.frames * out.channels);
+
+    // Begin after the head consumed by the overlap, retain the untouched middle,
+    // then blend the tail into that head. On wrap, head[F-1] flows into head[F].
+    uint64_t middleFrames = frames - crossfadeFrames * 2;
+    const float* middle = pcm.samples.data() + (size_t)(f0 + crossfadeFrames) * pcm.channels;
+    std::copy(middle, middle + (size_t)middleFrames * pcm.channels, out.samples.begin());
+
+    float* dst = out.samples.data() + (size_t)middleFrames * pcm.channels;
+    const float* tail = pcm.samples.data() + (size_t)(f1 - crossfadeFrames) * pcm.channels;
+    const float* head = pcm.samples.data() + (size_t)f0 * pcm.channels;
+    constexpr float pi = 3.14159265358979323846f;
+    for (uint64_t i = 0; i < crossfadeFrames; ++i) {
+        float t = (float)i / (float)(crossfadeFrames - 1);
+        float headGain = 0.5f - 0.5f * cosf(pi * t);
+        float tailGain = 1.0f - headGain;
+        for (uint32_t c = 0; c < pcm.channels; ++c)
+            dst[(size_t)i * pcm.channels + c] =
+                tail[(size_t)i * pcm.channels + c] * tailGain +
+                head[(size_t)i * pcm.channels + c] * headGain;
+    }
+    out.valid = true;
+    return out;
+}
+
 // ---------------------------------------------------------------- AudioSystem
 
 bool AudioSystem::Init() {
@@ -167,7 +208,26 @@ void AudioSystem::ReleaseSound() {
     }
     pcm = PcmData{};
     playingIndex = -1;
+    looping = false;
     stopAtFrame = 0;
+}
+
+bool AudioSystem::LoadPcm(PcmData&& data) {
+    ReleaseSound();
+    if (!data.valid) return false;
+    pcm = std::move(data);
+
+    ma_audio_buffer_config cfg = ma_audio_buffer_config_init(
+        ma_format_f32, pcm.channels, pcm.frames, pcm.samples.data(), nullptr);
+    cfg.sampleRate = pcm.sampleRate;
+    if (ma_audio_buffer_init(&cfg, &buffer) != MA_SUCCESS) { pcm = PcmData{}; return false; }
+    if (ma_sound_init_from_data_source(&engine, &buffer, 0, nullptr, &sound) != MA_SUCCESS) {
+        ma_audio_buffer_uninit(&buffer);
+        pcm = PcmData{};
+        return false;
+    }
+    hasSound = true;
+    return true;
 }
 
 void AudioSystem::Toggle(int assetIndex, const std::wstring& path) {
@@ -178,21 +238,7 @@ void AudioSystem::Toggle(int assetIndex, const std::wstring& path) {
 
 void AudioSystem::PlayRange(int assetIndex, const std::wstring& path, float startSec, float endSec) {
     if (!engineOk) return;
-    ReleaseSound();
-
-    pcm = DecodeAudioFile(path);
-    if (!pcm.valid) return;
-
-    ma_audio_buffer_config cfg = ma_audio_buffer_config_init(
-        ma_format_f32, pcm.channels, pcm.frames, pcm.samples.data(), nullptr);
-    cfg.sampleRate = pcm.sampleRate;
-    if (ma_audio_buffer_init(&cfg, &buffer) != MA_SUCCESS) { pcm = PcmData{}; return; }
-    if (ma_sound_init_from_data_source(&engine, &buffer, 0, nullptr, &sound) != MA_SUCCESS) {
-        ma_audio_buffer_uninit(&buffer);
-        pcm = PcmData{};
-        return;
-    }
-    hasSound = true;
+    if (!LoadPcm(DecodeAudioFile(path))) return;
     if (startSec > 0.0f) {
         ma_uint64 frame = (ma_uint64)((double)startSec * pcm.sampleRate);
         if (frame < pcm.frames) ma_sound_seek_to_pcm_frame(&sound, frame);
@@ -206,12 +252,24 @@ void AudioSystem::PlayRange(int assetIndex, const std::wstring& path, float star
     playingIndex = assetIndex;
 }
 
+void AudioSystem::PlayLoop(int assetIndex, PcmData loopPcm) {
+    if (!engineOk || !LoadPcm(std::move(loopPcm))) return;
+    ma_sound_set_looping(&sound, MA_TRUE);
+    looping = true;
+    ma_sound_start(&sound);
+    playingIndex = assetIndex;
+}
+
 void AudioSystem::Stop() {
     ReleaseSound();
 }
 
 bool AudioSystem::IsPlaying(int assetIndex) const {
     return playingIndex == assetIndex;
+}
+
+bool AudioSystem::IsLooping(int assetIndex) const {
+    return looping && playingIndex == assetIndex;
 }
 
 bool AudioSystem::AnyPlaying() const { return playingIndex >= 0; }
@@ -233,11 +291,12 @@ void AudioSystem::SeekSeconds(float t) {
     ma_uint64 frame = (ma_uint64)((double)t * pcm.sampleRate);
     if (frame >= pcm.frames) frame = pcm.frames ? pcm.frames - 1 : 0;
     ma_sound_seek_to_pcm_frame(&sound, frame);
+    stopAtFrame = 0;
 }
 
 void AudioSystem::Update() {
     if (!hasSound) return;
-    if (ma_sound_at_end(&sound)) { ReleaseSound(); return; }
+    if (!looping && ma_sound_at_end(&sound)) { ReleaseSound(); return; }
     if (stopAtFrame > 0) {
         ma_uint64 cur = 0;
         if (ma_sound_get_cursor_in_pcm_frames(&sound, &cur) == MA_SUCCESS && cur >= stopAtFrame)

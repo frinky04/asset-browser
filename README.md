@@ -27,9 +27,12 @@ Default asset root is `C:\Users\cuddl\Documents\Dev\Games\Assets`; override with
   formats on disk). Right-click → *Drag models as* to hand over FBX/OBJ/DAE instead;
   right-click also offers *Copy path* for each format.
 - **Audio**: click a tile to play/stop. In the preview panel, drag across the waveform to
-  select a region ("Play selection" to audition, right-click to clear), then drag the
+  select a region (right-click to clear), then drag the
   "Drag out selection" button into another app to export it as a 16-bit WAV. With no
-  selection it exports the whole clip (handy for OGG → WAV).
+  selection it exports the whole clip (handy for OGG → WAV). Enable **Tune loop** to
+  crossfade the end into the beginning and drag out a standalone WAV that repeats
+  seamlessly; the crossfade length is adjustable. The single Play button and Space bar
+  contextually play the tuned loop, selection, or full clip in that order.
 - **Downres texture export**: right-click a texture → *Drag textures at* (half/quarter or
   a max pixel size). Drags then hand over a downscaled PNG instead of the original; the
   active mode shows in the status bar. Exported files land in
