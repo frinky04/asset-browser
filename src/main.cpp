@@ -56,9 +56,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
 
     ImGui_ImplWin32_EnableDpiAwareness();
 
+    HICON appIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(1));
     WNDCLASSEXW wc{ sizeof(wc), CS_CLASSDC, WndProc, 0, 0, hInstance,
-                    LoadIconW(nullptr, IDI_APPLICATION), LoadCursorW(nullptr, IDC_ARROW),
-                    nullptr, nullptr, L"AssetBrowserWnd", nullptr };
+                    appIcon, LoadCursorW(nullptr, IDC_ARROW),
+                    nullptr, nullptr, L"AssetBrowserWnd", appIcon };
     RegisterClassExW(&wc);
     HWND hwnd = CreateWindowW(wc.lpszClassName, L"Asset Browser",
                               WS_OVERLAPPEDWINDOW, 100, 100, 1600, 950,

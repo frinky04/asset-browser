@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Style 1: Flat geometric app tile -->
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="#2D63ED"/>
+  <!-- asset grid: 2x2 tiles, bottom-right is a "selected" asset -->
+  <rect x="56" y="56" width="66" height="66" rx="14" fill="#FFFFFF" opacity="0.92"/>
+  <rect x="134" y="56" width="66" height="66" rx="14" fill="#FFFFFF" opacity="0.55"/>
+  <rect x="56" y="134" width="66" height="66" rx="14" fill="#FFFFFF" opacity="0.55"/>
+  <!-- highlighted tile with cube glyph -->
+  <rect x="134" y="134" width="66" height="66" rx="14" fill="#FFC531"/>
+  <!-- cube glyph in top-left tile -->
+  <g transform="translate(89,89)">
+    <path d="M0,-27 L23,-13.5 L23,13.5 L0,27 L-23,13.5 L-23,-13.5 Z" fill="#2D63ED"/>
+    <path d="M0,-27 L23,-13.5 L0,0 L-23,-13.5 Z" fill="#6E95F5"/>
+    <path d="M0,0 L23,-13.5 L23,13.5 L0,27 Z" fill="#173FA8"/>
+  </g>
+  <!-- image glyph (mountains) in bottom-right yellow tile -->
+  <g transform="translate(134,134)">
+    <circle cx="21" cy="17" r="8" fill="#2D63ED"/>
+    <path d="M5,54 L24,28 L37,44 L47,31 L61,54 Z" fill="#2D63ED"/>
+  </g>
+</svg>

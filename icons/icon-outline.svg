@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Style 2: Line art — folder with 3D asset cube, two-tone stroke -->
+  <g fill="none" stroke-width="12" stroke-linecap="round" stroke-linejoin="round">
+    <!-- folder body with tab, one clean silhouette -->
+    <path stroke="#64748B" d="M32 196 V64 a14 14 0 0 1 14-14 h50 a14 14 0 0 1 11 5.4 L122 74 h88 a14 14 0 0 1 14 14 v108 a14 14 0 0 1 -14 14 H46 a14 14 0 0 1 -14-14 Z"/>
+    <!-- accent cube centered in folder body -->
+    <g stroke="#3B82F6">
+      <path d="M128 104 l30 17 v34 l-30 17 l-30-17 v-34 Z"/>
+      <path d="M98 121 l30 17 l30-17 M128 138 v34"/>
+    </g>
+  </g>
+</svg>
