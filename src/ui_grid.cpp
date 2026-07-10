@@ -44,6 +44,9 @@ void App::DrawGrid() {
 
     // --- virtualized tile grid ---
     ImGui::BeginChild("grid", ImVec2(0, 0), ImGuiChildFlags_None);
+    ImGuiIO& io = ImGui::GetIO();
+    if (ImGui::IsWindowHovered() && io.KeyCtrl && io.MouseWheel != 0.0f)
+        tileSize = (std::max)(72.0f, (std::min)(tileSize + io.MouseWheel * 8.0f, 220.0f));
 
     const float pad = 8.0f;
     const float labelH = ImGui::GetTextLineHeight() + 4.0f;
@@ -64,7 +67,6 @@ void App::DrawGrid() {
     int lastRow = (std::min)(rows - 1, (int)((scrollY + viewH) / cellH) + 1);
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImGuiIO& io = ImGui::GetIO();
 
     for (int r = firstRow; r <= lastRow; ++r) {
         for (int c = 0; c < cols; ++c) {

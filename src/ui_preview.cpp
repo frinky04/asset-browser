@@ -126,6 +126,12 @@ void App::DrawPreview() {
                 texDragOpt != 0)
                 ImGui::TextColored(Theme::Accent(0.9f), "Previewing export size %dx%d (source %dx%d)",
                                    previewTexW, previewTexH, previewTexSrcW, previewTexSrcH);
+            ImGui::Button("Drag out image", ImVec2(-1, 0));
+            if (ImGui::IsItemActive() && pendingDrag.empty() &&
+                ImGui::IsMouseDragging(ImGuiMouseButton_Left, 6.0f))
+                pendingDrag = DragPathsFor(previewIndex);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Drag this button into another app using the current texture export size");
             avail = ImGui::GetContentRegionAvail();
             float areaH = avail.y - 4;
             ImVec2 areaSize(avail.x, areaH);
@@ -149,8 +155,13 @@ void App::DrawPreview() {
             fit = (std::min)(fit, 4.0f);
             float zoom = (texZoom <= 0.0f) ? fit : texZoom;
             if (ImGui::IsItemHovered() && ImGui::GetIO().MouseWheel != 0) {
-                zoom *= powf(1.15f, ImGui::GetIO().MouseWheel);
-                zoom = (std::max)(0.05f, (std::min)(zoom, 32.0f));
+                float oldZoom = zoom;
+                zoom = (std::max)(0.05f, (std::min)(zoom * powf(1.15f, ImGui::GetIO().MouseWheel), 32.0f));
+                float scale = zoom / oldZoom;
+                ImVec2 center((a0.x + a1.x) * 0.5f, (a0.y + a1.y) * 0.5f);
+                ImVec2 mouse = ImGui::GetIO().MousePos;
+                texPanX = scale * texPanX + (1.0f - scale) * (mouse.x - center.x);
+                texPanY = scale * texPanY + (1.0f - scale) * (mouse.y - center.y);
                 texZoom = zoom;
             }
             if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0)) {
@@ -184,6 +195,24 @@ void App::DrawPreview() {
             if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                 texZoom = 0;
                 texPanX = texPanY = 0;
+            }
+            if (ImGui::BeginPopupContextItem("texpreviewctx")) {
+                if (ImGui::BeginMenu("Drag textures at")) {
+                    auto radio = [&](const char* label, int opt) {
+                        if (ImGui::MenuItem(label, nullptr, texDragOpt == opt))
+                            texDragOpt = opt;
+                    };
+                    radio("Original size", 0);
+                    radio("Half size", -2);
+                    radio("Quarter size", -4);
+                    ImGui::Separator();
+                    radio("Max 512 px", 512);
+                    radio("Max 256 px", 256);
+                    radio("Max 128 px", 128);
+                    radio("Max 64 px", 64);
+                    ImGui::EndMenu();
+                }
+                ImGui::EndPopup();
             }
         } else {
             ImGui::TextDisabled("Loading...");

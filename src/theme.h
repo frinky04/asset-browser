@@ -73,7 +73,7 @@ inline void Apply(ImGuiStyle& s) {
     c[ImGuiCol_ButtonHovered] = frameHov;
     c[ImGuiCol_ButtonActive] = frameAct;
     c[ImGuiCol_Header] = Accent(0.16f);          // selected Selectables (sidebar toggles)
-    c[ImGuiCol_HeaderHovered] = Accent(0.24f);
+    c[ImGuiCol_HeaderHovered] = frameHov;
     c[ImGuiCol_HeaderActive] = Accent(0.32f);
     c[ImGuiCol_Separator] = border;
     c[ImGuiCol_SeparatorHovered] = Accent(0.6f);

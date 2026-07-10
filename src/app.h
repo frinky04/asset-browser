@@ -21,6 +21,8 @@ struct App {
     char searchBuf[256] = "";
     bool typeSel[3] = { false, false, false };  // indexed by AssetType
     std::set<std::string> selectedPacks;
+    int lastTypeClicked = -1;
+    std::string lastPackClicked;
     bool filterDirty = true;
     std::vector<int> filtered;      // indices into db.entries, display order
 
@@ -47,8 +49,8 @@ struct App {
     std::vector<std::wstring> pendingDrag;
 
     // settings
-    float tileSize = 116.0f;
-    float previewW = 420.0f;        // preview panel width (user-resizable splitter)
+    float tileSize = 200.0f;
+    float previewRatio = 0.35f;      // preview share of the grid/preview area
     bool focusSearch = false;
     std::string dragFormatExt;      // preferred model format for drag-out ("" = canonical/GLB)
     int texDragOpt = 0;             // texture drag size: 0=original, -2=half, -4=quarter, >0=max side px

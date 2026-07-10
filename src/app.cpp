@@ -95,10 +95,11 @@ void App::Frame() {
     ImGui::EndChild();
     ImGui::SameLine();
 
-    float maxPreview = ImGui::GetContentRegionAvail().x * 0.6f;
-    previewW = (std::max)(260.0f, (std::min)(previewW, maxPreview));
+    float paneW = ImGui::GetContentRegionAvail().x;
+    previewRatio = (std::max)(0.2f, (std::min)(previewRatio, 0.6f));
+    float previewW = paneW * previewRatio;
 
-    float gridW = ImGui::GetContentRegionAvail().x - previewW - splitterW -
+    float gridW = paneW - previewW - splitterW -
                   2.0f * ImGui::GetStyle().ItemSpacing.x;
     ImGui::BeginChild("gridpane", ImVec2(gridW, 0), ImGuiChildFlags_None);
     DrawGrid();
@@ -110,7 +111,7 @@ void App::Frame() {
     if (ImGui::IsItemHovered() || ImGui::IsItemActive())
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
     if (ImGui::IsItemActive())
-        previewW -= ImGui::GetIO().MouseDelta.x;
+        previewRatio -= ImGui::GetIO().MouseDelta.x / paneW;
     {
         ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
         float cx = (a.x + b.x) * 0.5f;
@@ -173,31 +174,70 @@ void App::DrawMenuBar(float& menuH) {
 }
 
 void App::DrawSidebar() {
-    // Toggle filters: nothing selected in a group = that group doesn't filter.
+    // Nothing selected in a group means that group doesn't filter.
     ImGui::SeparatorText("Type");
     const char* names[3] = { "Textures", "Models", "Audio" };
     for (int i = 0; i < 3; ++i) {
         char label[64];
         snprintf(label, sizeof(label), "%s (%d)##type%d", names[i], db.typeCounts[i], i);
-        if (ImGui::Selectable(label, typeSel[i])) {
-            typeSel[i] = !typeSel[i];
+        if (typeSel[i]) ImGui::PushStyleColor(ImGuiCol_Text, Theme::Accent());
+        bool clicked = ImGui::Selectable(label, typeSel[i]);
+        if (typeSel[i]) ImGui::PopStyleColor();
+        if (clicked) {
+            const ImGuiIO& io = ImGui::GetIO();
+            if (io.KeyAlt) {
+                typeSel[0] = typeSel[1] = typeSel[2] = false;
+            } else if (io.KeyShift && lastTypeClicked >= 0) {
+                if (!io.KeyCtrl)
+                    typeSel[0] = typeSel[1] = typeSel[2] = false;
+                int a = std::min(lastTypeClicked, i);
+                int b = std::max(lastTypeClicked, i);
+                for (int j = a; j <= b; ++j) typeSel[j] = true;
+            } else if (io.KeyCtrl) {
+                typeSel[i] = !typeSel[i];
+                lastTypeClicked = i;
+            } else {
+                bool wasSelected = typeSel[i];
+                typeSel[0] = typeSel[1] = typeSel[2] = false;
+                typeSel[i] = !wasSelected;
+                lastTypeClicked = i;
+            }
             filterDirty = true;
         }
     }
 
     ImGui::SeparatorText("Packs");
-    if (!selectedPacks.empty() && ImGui::SmallButton("Clear pack filter")) {
-        selectedPacks.clear();
-        filterDirty = true;
-    }
     ImGui::BeginChild("packs", ImVec2(0, 0), ImGuiChildFlags_None);
-    for (const PackInfo& p : db.packs) {
+    for (size_t i = 0; i < db.packs.size(); ++i) {
+        const PackInfo& p = db.packs[i];
         char label[512];
         snprintf(label, sizeof(label), "%s (%d)", p.name.c_str(), p.count);
         bool on = selectedPacks.count(p.name) > 0;
-        if (ImGui::Selectable(label, on)) {
-            if (on) selectedPacks.erase(p.name);
-            else selectedPacks.insert(p.name);
+        if (on) ImGui::PushStyleColor(ImGuiCol_Text, Theme::Accent());
+        bool clicked = ImGui::Selectable(label, on);
+        if (on) ImGui::PopStyleColor();
+        if (clicked) {
+            const ImGuiIO& io = ImGui::GetIO();
+            auto anchor = std::find_if(db.packs.begin(), db.packs.end(), [&](const PackInfo& candidate) {
+                return candidate.name == lastPackClicked;
+            });
+            if (io.KeyAlt) {
+                selectedPacks.clear();
+            } else if (io.KeyShift && anchor != db.packs.end()) {
+                if (!io.KeyCtrl) selectedPacks.clear();
+                size_t anchorIndex = (size_t)std::distance(db.packs.begin(), anchor);
+                size_t a = std::min(anchorIndex, i);
+                size_t b = std::max(anchorIndex, i);
+                for (size_t j = a; j <= b; ++j) selectedPacks.insert(db.packs[j].name);
+            } else if (io.KeyCtrl) {
+                if (on) selectedPacks.erase(p.name);
+                else selectedPacks.insert(p.name);
+                lastPackClicked = p.name;
+            } else {
+                selectedPacks.clear();
+                if (!on) selectedPacks.insert(p.name);
+                lastPackClicked = p.name;
+            }
             filterDirty = true;
         }
     }
