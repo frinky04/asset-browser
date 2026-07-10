@@ -4,9 +4,11 @@
 #include "thumbs.h"
 #include "audio.h"
 #include "model.h"
+#include "search.h"
 #include <set>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 struct App {
     // systems
@@ -25,6 +27,14 @@ struct App {
     std::string lastPackClicked;
     bool filterDirty = true;
     std::vector<int> filtered;      // indices into db.entries, display order
+    std::string lastQuery;
+    std::vector<int> lastCandidates;
+    bool lastTypeSel[3] = { false, false, false };
+    std::set<std::string> lastSelectedPacks;
+    size_t totalFilterMatches = 0;
+    ParsedQuery parsedQuery;
+    int resultTypeCounts[3] = { 0, 0, 0 };
+    std::unordered_map<std::string, int> resultExtCounts;
 
     // selection / preview
     std::set<int> selection;
@@ -55,6 +65,11 @@ struct App {
     float tileSize = 200.0f;
     float previewRatio = 0.35f;      // preview share of the grid/preview area
     bool focusSearch = false;
+    bool searchHasFocus = false;
+    bool selectSearchAll = false;
+    bool focusGrid = false;
+    int scrollToIndex = -1;
+    int sortMode = 0;               // 0 relevance, 1 name, 2 newest, 3 largest
     std::string dragFormatExt;      // preferred model format for drag-out ("" = canonical/GLB)
     int texDragOpt = 0;             // texture drag size: 0=original, -2=half, -4=quarter, >0=max side px
 

@@ -134,7 +134,10 @@ void App::Frame() {
     RebuildFilterIfDirty();
 
     ImGuiIO& io = ImGui::GetIO();
-    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F, false)) focusSearch = true;
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F, false)) {
+        if (searchHasFocus) selectSearchAll = true;
+        else focusSearch = true;
+    }
     if (ImGui::IsKeyPressed(ImGuiKey_Space, false) && !io.WantTextInput &&
         previewIndex >= 0 && previewIndex < (int)db.entries.size() &&
         db.entries[previewIndex].type == AssetType::Audio)
@@ -334,7 +337,10 @@ void App::DrawStatusBar(float h) {
     else
         ImGui::Text("%d assets", (int)db.entries.size());
     ImGui::SameLine(0, 24);
-    ImGui::Text("Showing %d", (int)filtered.size());
+    if (totalFilterMatches > filtered.size())
+        ImGui::Text("Showing top %d of %zu", (int)filtered.size(), totalFilterMatches);
+    else
+        ImGui::Text("Showing %d", (int)filtered.size());
     int pending = thumbs.PendingJobs();
     if (pending > 0) {
         ImGui::SameLine(0, 24);

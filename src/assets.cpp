@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <unordered_map>
 #include <algorithm>
+#include <chrono>
 
 namespace fs = std::filesystem;
 
@@ -63,7 +64,9 @@ std::wstring ModelDedupeKey(const fs::path& relToRoot) {
 uint64_t MtimeU64(const fs::directory_entry& de, std::error_code& ec) {
     auto t = de.last_write_time(ec);
     if (ec) return 0;
-    return (uint64_t)t.time_since_epoch().count();
+    auto systemTime = std::chrono::time_point_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now() + (t - fs::file_time_type::clock::now()));
+    return (uint64_t)systemTime.time_since_epoch().count();
 }
 
 } // namespace
@@ -120,6 +123,8 @@ void AssetDatabase::ScanWorker() {
         e.name = WideToUtf8(p.stem().wstring());
         fs::path rel = p.lexically_relative(rootPath); // lexical: avoids per-file syscalls
         e.relPath = WideToUtf8(rel.empty() ? p.filename().wstring() : rel.generic_wstring());
+        e.nameLower = ToLowerAscii(e.name);
+        e.relPathLower = ToLowerAscii(e.relPath);
         // pack = first component of the relative path
         size_t slash = e.relPath.find('/');
         e.pack = (slash == std::string::npos) ? std::string("(root)") : e.relPath.substr(0, slash);

@@ -12,6 +12,8 @@ struct AssetEntry {
     std::wstring path;       // absolute path of canonical file
     std::string  relPath;    // utf8, relative to root, forward slashes (search target)
     std::string  name;       // filename stem, utf8 (display)
+    std::string  relPathLower;
+    std::string  nameLower;
     std::string  ext;        // lowercase canonical extension incl. dot, utf8 (".glb")
     std::string  pack;       // top-level folder name, utf8
     AssetType    type = AssetType::Texture;

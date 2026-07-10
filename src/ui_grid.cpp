@@ -4,6 +4,8 @@
 #include "imgui.h"
 #include <filesystem>
 #include <algorithm>
+#include <cctype>
+#include <cstring>
 
 namespace fs = std::filesystem;
 
@@ -21,6 +23,69 @@ ImU32 TypeColor(AssetType t) {
 const char* ExtBadge(const AssetEntry& e) {
     if (e.ext.size() > 1) return e.ext.c_str() + 1; // skip the dot
     return "?";
+}
+
+int SearchInputCallback(ImGuiInputTextCallbackData* data) {
+    bool* selectAll = static_cast<bool*>(data->UserData);
+    if (*selectAll) {
+        data->SelectAll();
+        *selectAll = false;
+    }
+    return 0;
+}
+
+void SetQuery(char* buffer, size_t size, const std::string& query) {
+    strncpy_s(buffer, size, query.c_str(), _TRUNCATE);
+}
+
+void ToggleExtensionQuery(char* buffer, size_t size, const std::string& extension) {
+    std::string input = buffer;
+    std::string output;
+    bool removed = false;
+    for (size_t pos = 0; pos < input.size();) {
+        while (pos < input.size() && std::isspace((unsigned char)input[pos])) ++pos;
+        if (pos == input.size()) break;
+        size_t end = input.find_first_of(" \t\r\n", pos);
+        if (end == std::string::npos) end = input.size();
+        std::string token = input.substr(pos, end - pos);
+        if (ToLowerAscii(token).starts_with("ext:")) {
+            std::string kept;
+            size_t valuePos = 4;
+            while (valuePos <= token.size()) {
+                size_t comma = token.find(',', valuePos);
+                if (comma == std::string::npos) comma = token.size();
+                std::string value = token.substr(valuePos, comma - valuePos);
+                if (ToLowerAscii(value) == extension) removed = true;
+                else {
+                    if (!kept.empty()) kept += ',';
+                    kept += value;
+                }
+                valuePos = comma + 1;
+            }
+            token = kept.empty() ? "" : "ext:" + kept;
+        }
+        if (!token.empty()) {
+            if (!output.empty()) output += ' ';
+            output += token;
+        }
+        pos = end;
+    }
+    if (!removed) {
+        if (!output.empty()) output += ' ';
+        output += "ext:" + extension;
+    }
+    SetQuery(buffer, size, output);
+}
+
+void SelectResult(App& app, int slot) {
+    if (app.filtered.empty()) return;
+    slot = (std::max)(0, (std::min)(slot, (int)app.filtered.size() - 1));
+    int index = app.filtered[slot];
+    app.selection.clear();
+    app.selection.insert(index);
+    app.lastClicked = index;
+    app.scrollToIndex = index;
+    app.SetPreview(index);
 }
 
 } // namespace
@@ -48,13 +113,34 @@ void App::DrawGrid() {
     // --- search bar ---
     if (focusSearch) {
         ImGui::SetKeyboardFocusHere();
+        selectSearchAll = true;
         focusSearch = false;
     }
     float clearW = ImGui::CalcTextSize("Clear").x + ImGui::GetStyle().FramePadding.x * 2.0f;
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - clearW - ImGui::GetStyle().ItemSpacing.x);
-    if (ImGui::InputTextWithHint("##search", "Search assets...  (Ctrl+F)", searchBuf, sizeof(searchBuf))) {
+    float sortW = 122.0f;
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - clearW - sortW - ImGui::GetStyle().ItemSpacing.x * 2.0f);
+    if (ImGui::InputTextWithHint("##search", "Search assets...  (Ctrl+F)", searchBuf, sizeof(searchBuf),
+                                 ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_EscapeClearsAll |
+                                 ImGuiInputTextFlags_CallbackAlways,
+                                 SearchInputCallback, &selectSearchAll)) {
         thumbs.FlushPending();
         filterDirty = true;
+    }
+    searchHasFocus = ImGui::IsItemActive();
+    if (searchHasFocus && (ImGui::IsKeyPressed(ImGuiKey_DownArrow, false) ||
+                           (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_N, false)))) {
+        int slot = 0;
+        if (!selection.empty()) {
+            auto it = std::find(filtered.begin(), filtered.end(), *selection.begin());
+            if (it != filtered.end()) slot = (int)(it - filtered.begin()) + 1;
+        }
+        SelectResult(*this, slot);
+    }
+    if (searchHasFocus && ImGui::IsKeyPressed(ImGuiKey_Enter, false)) {
+        bool selectedResult = !selection.empty() &&
+            std::find(filtered.begin(), filtered.end(), *selection.begin()) != filtered.end();
+        if (!selectedResult) SelectResult(*this, 0);
+        focusGrid = true;
     }
     ImGui::SameLine();
     if (ImGui::Button("Clear") && searchBuf[0]) {
@@ -62,14 +148,54 @@ void App::DrawGrid() {
         thumbs.FlushPending();
         filterDirty = true;
     }
-    ImGui::Dummy(ImVec2(0, 2.0f));
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(sortW);
+    static const char* sortNames[] = { "Relevance", "Name", "Newest", "Largest" };
+    if (ImGui::Combo("##sort", &sortMode, sortNames, IM_ARRAYSIZE(sortNames))) filterDirty = true;
+    if (!searchBuf[0] && sortMode == 0 && ImGui::IsItemHovered())
+        ImGui::SetTooltip("Relevance applies when searching");
 
     // Sidebar and search changes happen during this frame, after App::Frame's
     // normal filter rebuild. Apply them before requesting visible thumbnails.
     RebuildFilterIfDirty();
 
+    ImGui::TextDisabled("%zu results", totalFilterMatches);
+    static const char* typeNames[] = { "textures", "models", "audio" };
+    for (int i = 0; i < 3; ++i) {
+        ImGui::SameLine(0, 8);
+        ImGui::TextColored(typeSel[i] ? Theme::Accent() : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled),
+                           "\xC2\xB7 %d %s", resultTypeCounts[i], typeNames[i]);
+        if (ImGui::IsItemClicked()) {
+            typeSel[i] = !typeSel[i];
+            filterDirty = true;
+        }
+    }
+
+    std::vector<std::pair<std::string, int>> extensions(resultExtCounts.begin(), resultExtCounts.end());
+    std::sort(extensions.begin(), extensions.end(), [](const auto& a, const auto& b) {
+        return a.second != b.second ? a.second > b.second : a.first < b.first;
+    });
+    int shownExtensions = (std::min)(8, (int)extensions.size());
+    for (int i = 0; i < shownExtensions; ++i) {
+        if (i) ImGui::SameLine();
+        std::string label = extensions[i].first + "  " + std::to_string(extensions[i].second);
+        ImGui::PushID(extensions[i].first.c_str());
+        if (ImGui::Button(label.c_str())) {
+            ToggleExtensionQuery(searchBuf, sizeof(searchBuf), extensions[i].first);
+            thumbs.FlushPending();
+            filterDirty = true;
+        }
+        ImGui::PopID();
+    }
+    if (shownExtensions) ImGui::Dummy(ImVec2(0, 2.0f));
+    RebuildFilterIfDirty();
+
     // --- virtualized tile grid ---
     ImGui::BeginChild("grid", ImVec2(0, 0), ImGuiChildFlags_None);
+    if (focusGrid) {
+        ImGui::SetWindowFocus();
+        focusGrid = false;
+    }
     ImGuiIO& io = ImGui::GetIO();
     if (ImGui::IsWindowHovered() && io.KeyCtrl && io.MouseWheel != 0.0f)
         tileSize = (std::max)(72.0f, (std::min)(tileSize + io.MouseWheel * 8.0f, 220.0f));
@@ -84,6 +210,26 @@ void App::DrawGrid() {
     const float cellW = availW / cols;
     int count = (int)filtered.size();
     int rows = (count + cols - 1) / cols;
+
+    if (ImGui::IsWindowFocused() && !filtered.empty()) {
+        int slot = 0;
+        if (!selection.empty()) {
+            auto it = std::find(filtered.begin(), filtered.end(), *selection.begin());
+            if (it != filtered.end()) slot = (int)(it - filtered.begin());
+        }
+        int next = slot;
+        if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, false)) --next;
+        if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, false)) ++next;
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, false)) next -= cols;
+        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, false)) next += cols;
+        if (next != slot) SelectResult(*this, next);
+    }
+
+    if (scrollToIndex >= 0) {
+        auto it = std::find(filtered.begin(), filtered.end(), scrollToIndex);
+        if (it != filtered.end()) ImGui::SetScrollY(((int)(it - filtered.begin()) / cols) * cellH);
+        scrollToIndex = -1;
+    }
 
     ImGui::Dummy(ImVec2(0, rows * cellH)); // establish scroll extent
 
@@ -163,9 +309,20 @@ void App::DrawGrid() {
 
             // label (clipped)
             ImVec4 clip(p0.x, imgP1.y, p1.x, p1.y);
-            dl->AddText(nullptr, 0.0f, ImVec2(p0.x + 4, imgP1.y + 2),
+            ImVec2 labelPos(p0.x + 4, imgP1.y + 2);
+            dl->AddText(nullptr, 0.0f, labelPos,
                         hovered || selected ? Theme::kTextPrimary : Theme::kTextDim,
                         e.name.c_str(), nullptr, 0.0f, &clip);
+            std::vector<int> matchPositions;
+            if (SearchNameMatchPositions(parsedQuery, e.nameLower, matchPositions)) {
+                for (int pos : matchPositions) {
+                    const char* begin = e.name.c_str() + pos;
+                    if (!*begin) continue;
+                    float x = ImGui::CalcTextSize(e.name.c_str(), begin).x;
+                    dl->AddText(nullptr, 0.0f, ImVec2(labelPos.x + x, labelPos.y), Theme::kAccent,
+                                begin, begin + 1, 0.0f, &clip);
+                }
+            }
 
             // interactions
             if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
