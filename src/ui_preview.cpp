@@ -105,9 +105,9 @@ void App::DrawPreview() {
         ImGui::TextDisabled("%.2f MB", e.size / (1024.0 * 1024.0));
     else
         ImGui::TextDisabled("%.1f KB", e.size / 1024.0);
-    if (ImGui::SmallButton("Copy path")) CopyPathToClipboard(previewIndex);
+    if (ImGui::Button("Copy path", ImVec2(120, 0))) CopyPathToClipboard(previewIndex);
     ImGui::SameLine();
-    if (ImGui::SmallButton("Explorer")) OpenInExplorer(previewIndex);
+    if (ImGui::Button("Explorer", ImVec2(120, 0))) OpenInExplorer(previewIndex);
     ImGui::Separator();
 
     ImVec2 avail = ImGui::GetContentRegionAvail();

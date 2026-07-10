@@ -214,7 +214,7 @@ void App::DrawSidebar() {
         snprintf(label, sizeof(label), "%s (%d)", p.name.c_str(), p.count);
         bool on = selectedPacks.count(p.name) > 0;
         if (on) ImGui::PushStyleColor(ImGuiCol_Text, Theme::Accent());
-        bool clicked = ImGui::Selectable(label, on);
+        bool clicked = ImGui::Selectable(label, on, ImGuiSelectableFlags_SpanAllColumns);
         if (on) ImGui::PopStyleColor();
         if (clicked) {
             const ImGuiIO& io = ImGui::GetIO();
