@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
-project(asset_browser LANGUAGES C CXX)
+project(asset_browser VERSION 0.1.0 LANGUAGES C CXX)
+
+set(ASSET_BROWSER_VERSION "${PROJECT_VERSION}" CACHE STRING "Version embedded in release builds")
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -50,6 +53,10 @@ add_executable(asset-browser WIN32
   src/dragdrop.cpp
   src/third_party_impl.cpp
   src/stb_vorbis_impl.c)
+
+string(REPLACE "." "," ASSET_BROWSER_VERSION_COMMA "${ASSET_BROWSER_VERSION}")
+configure_file(src/version.rc.in version.rc @ONLY)
+target_sources(asset-browser PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/version.rc")
 
 target_include_directories(asset-browser PRIVATE
   src

@@ -49,6 +49,7 @@ struct App {
 
     // drag-out (executed by main.cpp after the ImGui frame)
     std::vector<std::wstring> pendingDrag;
+    bool requestFolderPicker = false;
 
     // settings
     float tileSize = 200.0f;
@@ -63,6 +64,7 @@ struct App {
     void Init(Gfx* g, HWND wnd, const std::wstring& root);
     void Shutdown();
     void Frame();                   // build the whole UI (between NewFrame/Render)
+    void SetAssetRoot(const std::wstring& root);
 
     // internals
     void DrawMenuBar(float& menuH);
@@ -87,3 +89,6 @@ struct App {
     void CopyPathToClipboard(int index);
     void RebuildFilterIfDirty();    // search.cpp
 };
+
+std::wstring LoadSavedAssetRoot();
+bool PickAssetRoot(HWND owner, std::wstring& root);

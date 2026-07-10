@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (for example, v1.2.3)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate version
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v(\d+\.\d+\.\d+)$') {
+            throw "Release tag must use vMAJOR.MINOR.PATCH"
+          }
+          "VERSION=$($Matches[1])" >> $env:GITHUB_ENV
+
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 "-DASSET_BROWSER_VERSION=$env:VERSION"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "asset-browser-$env:RELEASE_TAG-windows-x64"
+          New-Item -ItemType Directory -Path $name | Out-Null
+          Copy-Item build/Release/asset-browser.exe, README.md -Destination $name
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+          $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash *$name.zip" | Set-Content "$name.zip.sha256" -Encoding ascii
+          "PACKAGE_NAME=$name" >> $env:GITHUB_ENV
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE_NAME }}
+          path: |
+            ${{ env.PACKAGE_NAME }}.zip
+            ${{ env.PACKAGE_NAME }}.zip.sha256
+
+      - name: Publish GitHub release
+        shell: pwsh
+        run: >-
+          gh release create "$env:RELEASE_TAG"
+          "$env:PACKAGE_NAME.zip"
+          "$env:PACKAGE_NAME.zip.sha256"
+          --title "Asset Browser $env:RELEASE_TAG"
+          --generate-notes
+          --target "$env:GITHUB_SHA"

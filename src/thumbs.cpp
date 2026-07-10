@@ -139,11 +139,39 @@ void Thumbs::Request(int index, const AssetEntry& entry) {
     job.path = entry.path;
     job.mtime = entry.mtime;
     job.size = entry.size;
+    job.generation = generation.load();
     {
         std::lock_guard<std::mutex> lock(jobMutex);
+        if (jobs.size() >= kMaxQueuedJobs) {
+            int staleIndex = jobs.front().index;
+            jobs.pop_front();
+            if (staleIndex >= 0 && staleIndex < (int)thumbs.size() &&
+                thumbs[staleIndex].state == ThumbState::Pending)
+                thumbs[staleIndex].state = ThumbState::None;
+        }
         jobs.push_back(std::move(job));
     }
     jobCv.notify_one();
+}
+
+void Thumbs::FlushPending() {
+    ++generation;
+    {
+        std::lock_guard<std::mutex> lock(jobMutex);
+        jobs.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(doneMutex);
+        done.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(bakeMutex);
+        bakes.clear();
+    }
+    for (Thumb& thumb : thumbs) {
+        if (thumb.state == ThumbState::Pending)
+            thumb.state = ThumbState::None;
+    }
 }
 
 int Thumbs::PendingJobs() {
@@ -165,9 +193,11 @@ void Thumbs::WorkerLoop() {
         std::wstring cachePath = CachePathFor(job.path);
         Done d;
         d.index = job.index;
+        d.generation = job.generation;
 
         // Cache hit covers every asset type, including baked GLB renders.
         if (LoadCacheFile(cachePath, job.mtime, job.size, d.w, d.h, d.rgba)) {
+            if (job.generation != generation.load()) continue;
             std::lock_guard<std::mutex> lock(doneMutex);
             done.push_back(std::move(d));
             continue;
@@ -196,6 +226,8 @@ void Thumbs::WorkerLoop() {
                 b.cachePath = std::move(cachePath);
                 b.mtime = job.mtime;
                 b.size = job.size;
+                b.generation = job.generation;
+                if (job.generation != generation.load()) continue;
                 std::lock_guard<std::mutex> lock(bakeMutex);
                 bakes.push_back(std::move(b));
                 continue;
@@ -203,6 +235,7 @@ void Thumbs::WorkerLoop() {
             d.failed = true;
         }
 
+        if (job.generation != generation.load()) continue;
         std::lock_guard<std::mutex> lock(doneMutex);
         done.push_back(std::move(d));
     }
@@ -215,9 +248,10 @@ void Thumbs::Pump() {
         {
             std::lock_guard<std::mutex> lock(doneMutex);
             if (done.empty()) break;
-            d = std::move(done.front());
-            done.pop_front();
+            d = std::move(done.back());
+            done.pop_back();
         }
+        if (d.generation != generation.load()) continue;
         if (d.index < 0 || d.index >= (int)thumbs.size()) continue;
         Thumb& t = thumbs[d.index];
         if (d.failed || d.rgba.empty()) {
@@ -236,9 +270,10 @@ void Thumbs::Pump() {
         {
             std::lock_guard<std::mutex> lock(bakeMutex);
             if (bakes.empty()) break;
-            b = std::move(bakes.front());
-            bakes.pop_front();
+            b = std::move(bakes.back());
+            bakes.pop_back();
         }
+        if (b.generation != generation.load()) continue;
         if (b.index < 0 || b.index >= (int)thumbs.size()) continue;
         Thumb& t = thumbs[b.index];
 

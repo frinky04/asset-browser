@@ -26,6 +26,7 @@ struct Thumb {
 class Thumbs {
 public:
     static constexpr int kThumbSize = 256;
+    static constexpr size_t kMaxQueuedJobs = 256;
 
     void Init(Gfx* gfx, ModelRenderer* renderer, const std::wstring& cacheDir);
     void Shutdown();
@@ -33,6 +34,7 @@ public:
     void EnsureCount(size_t n);
     void Request(int index, const AssetEntry& entry); // no-op unless state == None
     const Thumb& Get(int index) const { return thumbs[index]; }
+    void FlushPending(); // discard queued work after the visible asset set changes
 
     void Pump(); // main thread: drain completed uploads + bake queued GLB thumbs
     void ClearCacheDisk();
@@ -46,18 +48,21 @@ private:
         bool isGlb = false;
         std::wstring path;
         uint64_t mtime = 0, size = 0;
+        uint64_t generation = 0;
     };
     struct Done {
         int index = -1;
         int w = 0, h = 0;
         std::vector<uint8_t> rgba;
         bool failed = false;
+        uint64_t generation = 0;
     };
     struct Bake {
         int index = -1;
         CpuModel model;
         std::wstring cachePath;
         uint64_t mtime = 0, size = 0;
+        uint64_t generation = 0;
     };
 
     void WorkerLoop();
@@ -78,6 +83,7 @@ private:
     std::deque<Job> jobs;
     std::vector<std::thread> workers;
     std::atomic<bool> quit{false};
+    std::atomic<uint64_t> generation{0};
 
     std::mutex doneMutex;
     std::deque<Done> done;

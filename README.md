@@ -10,13 +10,31 @@ miniaudio) are fetched automatically by CMake — no vcpkg needed.
 ## Build
 
 ```powershell
-cmake -S . -B build -G "Visual Studio 18 2026" -A x64
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 .\build\Release\asset-browser.exe
 ```
 
-Default asset root is `C:\Users\cuddl\Documents\Dev\Games\Assets`; override with
-`asset-browser.exe --root "D:\SomeOtherFolder"`.
+On first launch, Asset Browser opens without a folder selected. Use the in-app
+**Choose asset folder...** button to select your library; Asset Browser remembers that
+choice. Use **File → Change asset folder...** to switch later. For a one-off session,
+override the saved folder with `asset-browser.exe --root "D:\SomeOtherFolder"`.
+
+## Releases
+
+Tagged releases include a self-contained 64-bit Windows executable and a SHA-256 checksum.
+Windows 10 or newer with a Direct3D 11-capable GPU is recommended; no Visual C++ runtime
+installation is required.
+
+Maintainers can publish a release by pushing a semantic-version tag:
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow can also be started manually from GitHub Actions with a
+`vMAJOR.MINOR.PATCH` tag.
 
 ## Usage
 

@@ -39,14 +39,15 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
-    // Default asset root; override with: asset-browser.exe --root <dir>
-    std::wstring root = L"C:\\Users\\cuddl\\Documents\\Dev\\Games\\Assets";
+    // A command-line root is a session override; otherwise use the saved choice.
+    std::wstring root = LoadSavedAssetRoot();
     {
         int argc = 0;
         LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
         for (int i = 1; i + 1 < argc; ++i)
-            if (wcscmp(argv[i], L"--root") == 0)
+            if (wcscmp(argv[i], L"--root") == 0) {
                 root = argv[i + 1];
+            }
         if (argv) LocalFree(argv);
     }
 
@@ -116,6 +117,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
         g_gfx.ctx->ClearRenderTargetView(g_gfx.backbufferRTV, clear);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
         g_gfx.swap->Present(1, 0);
+
+        // Native dialogs run between ImGui frames. Opening one while a menu is
+        // active can re-enter the Win32 backend and leave the app unresponsive.
+        if (g_app.requestFolderPicker) {
+            g_app.requestFolderPicker = false;
+            std::wstring root = g_app.db.root;
+            if (PickAssetRoot(hwnd, root))
+                g_app.SetAssetRoot(root);
+        }
 
         // Deferred OLE drag: DoDragDrop blocks and pumps a modal message loop,
         // so it must run between ImGui frames.

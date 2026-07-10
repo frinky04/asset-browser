@@ -26,6 +26,25 @@ const char* ExtBadge(const AssetEntry& e) {
 } // namespace
 
 void App::DrawGrid() {
+    if (db.root.empty()) {
+        ImGui::BeginChild("empty-grid", ImVec2(0, 0), ImGuiChildFlags_None);
+        ImVec2 avail = ImGui::GetContentRegionAvail();
+        ImGui::SetCursorPosY((std::max)(24.0f, avail.y * 0.35f));
+
+        const char* title = "No asset folder selected";
+        float titleW = ImGui::CalcTextSize(title).x;
+        ImGui::SetCursorPosX((std::max)(0.0f, (avail.x - titleW) * 0.5f));
+        ImGui::TextUnformatted(title);
+
+        ImGui::Dummy(ImVec2(0, 8.0f));
+        const char* button = "Choose asset folder...";
+        float buttonW = ImGui::CalcTextSize(button).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+        ImGui::SetCursorPosX((std::max)(0.0f, (avail.x - buttonW) * 0.5f));
+        if (ImGui::Button(button)) requestFolderPicker = true;
+        ImGui::EndChild();
+        return;
+    }
+
     // --- search bar ---
     if (focusSearch) {
         ImGui::SetKeyboardFocusHere();
@@ -33,14 +52,21 @@ void App::DrawGrid() {
     }
     float clearW = ImGui::CalcTextSize("Clear").x + ImGui::GetStyle().FramePadding.x * 2.0f;
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - clearW - ImGui::GetStyle().ItemSpacing.x);
-    if (ImGui::InputTextWithHint("##search", "Search assets...  (Ctrl+F)", searchBuf, sizeof(searchBuf)))
+    if (ImGui::InputTextWithHint("##search", "Search assets...  (Ctrl+F)", searchBuf, sizeof(searchBuf))) {
+        thumbs.FlushPending();
         filterDirty = true;
+    }
     ImGui::SameLine();
     if (ImGui::Button("Clear") && searchBuf[0]) {
         searchBuf[0] = 0;
+        thumbs.FlushPending();
         filterDirty = true;
     }
     ImGui::Dummy(ImVec2(0, 2.0f));
+
+    // Sidebar and search changes happen during this frame, after App::Frame's
+    // normal filter rebuild. Apply them before requesting visible thumbnails.
+    RebuildFilterIfDirty();
 
     // --- virtualized tile grid ---
     ImGui::BeginChild("grid", ImVec2(0, 0), ImGuiChildFlags_None);

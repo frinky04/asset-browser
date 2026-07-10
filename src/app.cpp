@@ -6,6 +6,7 @@
 #include <shellapi.h>
 #include <filesystem>
 #include <chrono>
+#include <fstream>
 
 #include "stb_image.h"
 #include "stb_image_resize2.h"
@@ -21,6 +22,49 @@ static std::wstring AppDataDir(const wchar_t* sub) {
         CoTaskMemFree(base);
     }
     return dir + L"\\AssetBrowser\\" + sub;
+}
+
+static fs::path RootSettingsPath() {
+    return fs::path(AppDataDir(L"")) / L"asset-root.txt";
+}
+
+std::wstring LoadSavedAssetRoot() {
+    std::ifstream in(RootSettingsPath(), std::ios::binary);
+    std::string utf8((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    while (!utf8.empty() && (utf8.back() == '\n' || utf8.back() == '\r')) utf8.pop_back();
+    return Utf8ToWide(utf8);
+}
+
+static void SaveAssetRoot(const std::wstring& root) {
+    std::error_code ec;
+    fs::create_directories(RootSettingsPath().parent_path(), ec);
+    std::ofstream out(RootSettingsPath(), std::ios::binary | std::ios::trunc);
+    out << WideToUtf8(root);
+}
+
+static int CALLBACK BrowseCallback(HWND dialog, UINT message, LPARAM, LPARAM data) {
+    if (message == BFFM_INITIALIZED && data)
+        SendMessageW(dialog, BFFM_SETSELECTIONW, TRUE, data);
+    return 0;
+}
+
+bool PickAssetRoot(HWND owner, std::wstring& root) {
+    BROWSEINFOW info{};
+    info.hwndOwner = owner;
+    info.lpszTitle = L"Choose the folder containing your asset library";
+    info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    info.lpfn = BrowseCallback;
+    info.lParam = (LPARAM)(root.empty() ? nullptr : root.c_str());
+
+    PIDLIST_ABSOLUTE item = SHBrowseForFolderW(&info);
+    if (!item) return false;
+    wchar_t path[32768];
+    bool picked = SHGetPathFromIDListEx(item, path, ARRAYSIZE(path), GPFIDL_DEFAULT) != FALSE;
+    CoTaskMemFree(item);
+    if (!picked) return false;
+    root = path;
+    SaveAssetRoot(root);
+    return true;
 }
 
 // Exported drag files are transient; sweep out anything older than 3 days.
@@ -43,7 +87,30 @@ void App::Init(Gfx* g, HWND wnd, const std::wstring& root) {
     std::error_code ec;
     fs::create_directories(exportDir, ec);
     SweepOldExports(exportDir);
+    if (!root.empty()) db.StartScan(root);
+}
+
+void App::SetAssetRoot(const std::wstring& root) {
+    if (root.empty() || root == db.root) return;
+    db.StopScan();
+    audio.Stop();
+    db.entries.clear();
+    db.packs.clear();
+    db.typeCounts[0] = db.typeCounts[1] = db.typeCounts[2] = 0;
+    selection.clear();
+    selectedPacks.clear();
+    lastClicked = -1;
+    previewIndex = -1;
+    previewModel.Release();
+    previewModelValid = false;
+    SafeRelease(previewTexSRV);
+    SafeRelease(previewWaveSRV);
+    previewPcm = {};
+    thumbs.Shutdown();
+    thumbs.Init(gfx, &renderer, AppDataDir(L"thumbs"));
+    filterDirty = true;
     db.StartScan(root);
+    SaveAssetRoot(root);
 }
 
 void App::Shutdown() {
@@ -136,6 +203,9 @@ void App::DrawMenuBar(float& menuH) {
     if (ImGui::BeginMainMenuBar()) {
         menuH = ImGui::GetWindowHeight();
         if (ImGui::BeginMenu("File")) {
+            if (ImGui::MenuItem("Change asset folder...")) {
+                requestFolderPicker = true;
+            }
             if (ImGui::MenuItem("Rescan assets")) {
                 // Only allowed once the previous scan finished
                 if (!db.scanning) {
@@ -202,6 +272,7 @@ void App::DrawSidebar() {
                 typeSel[i] = !wasSelected;
                 lastTypeClicked = i;
             }
+            thumbs.FlushPending();
             filterDirty = true;
         }
     }
@@ -238,6 +309,7 @@ void App::DrawSidebar() {
                 if (!on) selectedPacks.insert(p.name);
                 lastPackClicked = p.name;
             }
+            thumbs.FlushPending();
             filterDirty = true;
         }
     }
@@ -255,7 +327,9 @@ void App::DrawStatusBar(float h) {
     ImGui::Begin("##status", nullptr, flags);
     ImGui::PopStyleVar();
 
-    if (db.scanning)
+    if (db.root.empty())
+        ImGui::Text("No asset folder selected");
+    else if (db.scanning)
         ImGui::Text("Scanning...  %d assets found", (int)db.entries.size());
     else
         ImGui::Text("%d assets", (int)db.entries.size());
