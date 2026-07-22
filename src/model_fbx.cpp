@@ -105,9 +105,10 @@ CpuModel LoadFbxObjCpu(const std::wstring& path) {
 
     // Last-resort texture: packs often ship the texture unreferenced beside the
     // model. Scan the model's folder plus one level of subfolders (Textures/,
-    // Materials/, ...) and guess the best candidate: prefer a filename related
-    // to the model's name, then the largest file (main textures dwarf
-    // accessory ones). Scanned/decoded lazily once per model.
+    // Materials/, ...) and guess the best candidate: never a PBR auxiliary map
+    // (normal/roughness/AO/... — wrong as a color source), then prefer a
+    // filename related to the model's name, then a base-color-ish name, then
+    // the largest file (main textures dwarf accessory ones). Lazily once.
     bool folderScanned = false;
     TexEntry folderTex;
     auto FolderFallback = [&]() -> TexEntry {
@@ -117,7 +118,23 @@ CpuModel LoadFbxObjCpu(const std::wstring& path) {
         std::wstring modelStem = ToLowerAsciiW(fs::path(path).stem().wstring());
         fs::path best;
         uint64_t bestSize = 0;
-        bool bestStem = false;
+        int bestScore = -1;
+        auto isAuxMap = [](const std::wstring& stem) {
+            static const wchar_t* aux[] = { L"normal", L"rough", L"metal", L"occlusion",
+                                            L"_ao", L"height", L"displace", L"emiss",
+                                            L"opacity", L"specular", L"gloss", L"bump",
+                                            L"_orm", L"cavity", L"curvature" };
+            for (auto a : aux)
+                if (stem.find(a) != std::wstring::npos) return true;
+            return false;
+        };
+        auto isBaseName = [](const std::wstring& stem) {
+            static const wchar_t* base[] = { L"base_color", L"basecolor", L"albedo",
+                                             L"diffuse", L"color", L"colour" };
+            for (auto b : base)
+                if (stem.find(b) != std::wstring::npos) return true;
+            return false;
+        };
         auto consider = [&](const fs::directory_entry& de) {
             std::error_code fec;
             if (!de.is_regular_file(fec)) return;
@@ -126,13 +143,15 @@ CpuModel LoadFbxObjCpu(const std::wstring& path) {
             if (ext != L".png" && ext != L".jpg" && ext != L".jpeg" &&
                 ext != L".tga" && ext != L".bmp") return;
             std::wstring stem = ToLowerAsciiW(de.path().stem().wstring());
+            if (isAuxMap(stem)) return;
             bool stemMatch = !modelStem.empty() &&
                              (stem.find(modelStem) != std::wstring::npos ||
                               modelStem.find(stem) != std::wstring::npos);
+            int score = (stemMatch ? 2 : 0) + (isBaseName(stem) ? 1 : 0);
             uint64_t size = (uint64_t)de.file_size(fec);
-            bool better = best.empty() || (stemMatch && !bestStem) ||
-                          (stemMatch == bestStem && size > bestSize);
-            if (better) { best = de.path(); bestSize = size; bestStem = stemMatch; }
+            bool better = best.empty() || score > bestScore ||
+                          (score == bestScore && size > bestSize);
+            if (better) { best = de.path(); bestSize = size; bestScore = score; }
         };
         for (const auto& de : fs::directory_iterator(modelDir, ec)) {
             if (de.is_directory(ec)) {

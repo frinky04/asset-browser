@@ -47,9 +47,12 @@ format-agnostic and unchanged.
 - Folder fallback: if a prim is still untextured and its mesh has UVs, guess
   from image files (png/jpg/jpeg/tga/bmp) in the model's folder and one level
   of subfolders (`Textures/`, `Materials/`, ...) — many packs ship the texture
-  unreferenced beside the model. Candidate ranking: filename related to the
-  model's name first, then largest file (main textures dwarf accessory ones).
-  A wrong guess costs little in a thumbnail; gray clay costs more.
+  unreferenced beside the model. PBR auxiliary maps (normal, roughness,
+  metallic, AO, height, emissive, ...) are excluded by filename — wrong as a
+  color source. Candidate ranking: filename related to the model's name first,
+  then base-color-ish names (base_color/albedo/diffuse/color), then largest
+  file (main textures dwarf accessory ones). A wrong guess costs little in a
+  thumbnail; gray clay costs more.
 - `alphaMask` is enabled when the resolved texture's source had an alpha
   channel (covers PSX-style decals; FBX has no explicit alpha mode).
 - Zero-triangle meshes and invisible nodes are skipped; empty result →
