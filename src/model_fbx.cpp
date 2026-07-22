@@ -102,6 +102,34 @@ CpuModel LoadFbxObjCpu(const std::wstring& path) {
 
     fs::path modelDir = fs::path(path).parent_path();
     std::unordered_map<const ufbx_texture*, TexEntry> texCache;
+
+    // Last-resort texture: packs often ship the texture unreferenced beside the
+    // model. If exactly one image file sits in the model's folder, use it for
+    // any UV-mapped prim that ends up untextured. Scanned/decoded lazily once.
+    bool folderScanned = false;
+    TexEntry folderTex;
+    auto FolderFallback = [&]() -> TexEntry {
+        if (folderScanned) return folderTex;
+        folderScanned = true;
+        std::error_code ec;
+        fs::path found;
+        int count = 0;
+        for (const auto& de : fs::directory_iterator(modelDir, ec)) {
+            if (!de.is_regular_file(ec)) continue;
+            std::wstring ext = ToLowerAsciiW(de.path().extension().wstring());
+            if (ext == L".png" || ext == L".jpg" || ext == L".jpeg" ||
+                ext == L".tga" || ext == L".bmp") {
+                if (++count > 1) return folderTex;
+                found = de.path();
+            }
+        }
+        if (count == 1) {
+            std::vector<uint8_t> bytes;
+            if (ReadFileBytes(found.wstring(), bytes) && !bytes.empty())
+                folderTex.image = DecodeImage(out, bytes.data(), bytes.size(), folderTex.hasAlpha);
+        }
+        return folderTex;
+    };
     out.bmin[0] = out.bmin[1] = out.bmin[2] = FLT_MAX;
     out.bmax[0] = out.bmax[1] = out.bmax[2] = -FLT_MAX;
 
@@ -185,6 +213,13 @@ CpuModel LoadFbxObjCpu(const std::wstring& path) {
                     cp.image = te.image;
                     // FBX has no explicit alpha mode; cut out wherever the texture carries alpha
                     cp.alphaMask = (te.image >= 0 && te.hasAlpha);
+                }
+                if (cp.image < 0 && mesh->vertex_uv.exists) {
+                    TexEntry te = FolderFallback();
+                    if (te.image >= 0) {
+                        cp.image = te.image;
+                        cp.alphaMask = te.hasAlpha;
+                    }
                 }
                 out.prims.push_back(cp);
             }

@@ -44,6 +44,10 @@ format-agnostic and unchanged.
      subdirectory — PSX packs keep textures in a shared dir above parallel
      format trees, while the file references the original author's disk.
   Miss → material base-color factor only (renderer already supports this).
+- Folder fallback: if a prim is still untextured, its mesh has UVs, and
+  exactly one image file (png/jpg/jpeg/tga/bmp) sits in the model's folder,
+  that image is used — many packs ship the texture unreferenced beside the
+  model. Two or more candidate images is ambiguous, so nothing is guessed.
 - `alphaMask` is enabled when the resolved texture's source had an alpha
   channel (covers PSX-style decals; FBX has no explicit alpha mode).
 - Zero-triangle meshes and invisible nodes are skipped; empty result →
