@@ -104,28 +104,47 @@ CpuModel LoadFbxObjCpu(const std::wstring& path) {
     std::unordered_map<const ufbx_texture*, TexEntry> texCache;
 
     // Last-resort texture: packs often ship the texture unreferenced beside the
-    // model. If exactly one image file sits in the model's folder, use it for
-    // any UV-mapped prim that ends up untextured. Scanned/decoded lazily once.
+    // model. Scan the model's folder plus one level of subfolders (Textures/,
+    // Materials/, ...) and guess the best candidate: prefer a filename related
+    // to the model's name, then the largest file (main textures dwarf
+    // accessory ones). Scanned/decoded lazily once per model.
     bool folderScanned = false;
     TexEntry folderTex;
     auto FolderFallback = [&]() -> TexEntry {
         if (folderScanned) return folderTex;
         folderScanned = true;
         std::error_code ec;
-        fs::path found;
-        int count = 0;
-        for (const auto& de : fs::directory_iterator(modelDir, ec)) {
-            if (!de.is_regular_file(ec)) continue;
+        std::wstring modelStem = ToLowerAsciiW(fs::path(path).stem().wstring());
+        fs::path best;
+        uint64_t bestSize = 0;
+        bool bestStem = false;
+        auto consider = [&](const fs::directory_entry& de) {
+            std::error_code fec;
+            if (!de.is_regular_file(fec)) return;
             std::wstring ext = ToLowerAsciiW(de.path().extension().wstring());
-            if (ext == L".png" || ext == L".jpg" || ext == L".jpeg" ||
-                ext == L".tga" || ext == L".bmp") {
-                if (++count > 1) return folderTex;
-                found = de.path();
+            if (ext != L".png" && ext != L".jpg" && ext != L".jpeg" &&
+                ext != L".tga" && ext != L".bmp") return;
+            std::wstring stem = ToLowerAsciiW(de.path().stem().wstring());
+            bool stemMatch = !modelStem.empty() &&
+                             (stem.find(modelStem) != std::wstring::npos ||
+                              modelStem.find(stem) != std::wstring::npos);
+            uint64_t size = (uint64_t)de.file_size(fec);
+            bool better = best.empty() || (stemMatch && !bestStem) ||
+                          (stemMatch == bestStem && size > bestSize);
+            if (better) { best = de.path(); bestSize = size; bestStem = stemMatch; }
+        };
+        for (const auto& de : fs::directory_iterator(modelDir, ec)) {
+            if (de.is_directory(ec)) {
+                std::error_code sec;
+                for (const auto& sub : fs::directory_iterator(de.path(), sec))
+                    consider(sub);
+            } else {
+                consider(de);
             }
         }
-        if (count == 1) {
+        if (!best.empty()) {
             std::vector<uint8_t> bytes;
-            if (ReadFileBytes(found.wstring(), bytes) && !bytes.empty())
+            if (ReadFileBytes(best.wstring(), bytes) && !bytes.empty())
                 folderTex.image = DecodeImage(out, bytes.data(), bytes.size(), folderTex.hasAlpha);
         }
         return folderTex;
