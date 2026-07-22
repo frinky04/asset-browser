@@ -27,6 +27,8 @@ struct CpuModel {
 
 // Worker-thread safe. Vertices are pre-transformed to world space.
 CpuModel LoadGlbCpu(const std::wstring& path);
+// Same contract; handles .fbx and .obj via ufbx.
+CpuModel LoadFbxObjCpu(const std::wstring& path);
 
 struct GpuPrim {
     uint32_t indexOffset = 0, indexCount = 0;

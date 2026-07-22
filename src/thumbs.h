@@ -13,7 +13,7 @@ enum class ThumbState : uint8_t {
     None = 0,   // never requested
     Pending,    // queued / in flight
     Ready,      // srv available
-    Icon,       // no image possible (e.g. FBX-only model) -> draw generic icon
+    Icon,       // no image possible (e.g. DAE-only model) -> draw generic icon
     Failed,     // decode failed -> draw generic icon
 };
 
@@ -45,7 +45,7 @@ private:
     struct Job {
         int index = -1;
         AssetType type{};
-        bool isGlb = false;
+        std::string ext;
         std::wstring path;
         uint64_t mtime = 0, size = 0;
         uint64_t generation = 0;

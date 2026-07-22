@@ -124,9 +124,10 @@ void Thumbs::Request(int index, const AssetEntry& entry) {
     Thumb& t = thumbs[index];
     if (t.state != ThumbState::None) return;
 
-    // Models we can't render (no GLB sibling) get a generic icon immediately.
-    bool isGlb = (entry.ext == ".glb" || entry.ext == ".gltf");
-    if (entry.type == AssetType::Model && !isGlb) {
+    // Models in formats we can't render (e.g. DAE) get a generic icon immediately.
+    bool renderable = entry.ext == ".glb" || entry.ext == ".gltf" ||
+                      entry.ext == ".fbx" || entry.ext == ".obj";
+    if (entry.type == AssetType::Model && !renderable) {
         t.state = ThumbState::Icon;
         return;
     }
@@ -135,7 +136,7 @@ void Thumbs::Request(int index, const AssetEntry& entry) {
     Job job;
     job.index = index;
     job.type = entry.type;
-    job.isGlb = isGlb;
+    job.ext = entry.ext;
     job.path = entry.path;
     job.mtime = entry.mtime;
     job.size = entry.size;
@@ -217,8 +218,9 @@ void Thumbs::WorkerLoop() {
             } else {
                 d.failed = true;
             }
-        } else { // Model (GLB): CPU parse here, GPU bake on main thread
-            CpuModel model = LoadGlbCpu(job.path);
+        } else { // Model: CPU parse here, GPU bake on main thread
+            bool isGltf = (job.ext == ".glb" || job.ext == ".gltf");
+            CpuModel model = isGltf ? LoadGlbCpu(job.path) : LoadFbxObjCpu(job.path);
             if (model.valid) {
                 Bake b;
                 b.index = job.index;

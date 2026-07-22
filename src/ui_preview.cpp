@@ -41,8 +41,10 @@ void App::SetPreview(int index) {
         BuildTexturePreview();
         return;
     }
-    if (e.type == AssetType::Model && (e.ext == ".glb" || e.ext == ".gltf")) {
-        CpuModel cpu = LoadGlbCpu(e.path);
+    bool isGltf = (e.ext == ".glb" || e.ext == ".gltf");
+    bool renderableModel = isGltf || e.ext == ".fbx" || e.ext == ".obj";
+    if (e.type == AssetType::Model && renderableModel) {
+        CpuModel cpu = isGltf ? LoadGlbCpu(e.path) : LoadFbxObjCpu(e.path);
         if (cpu.valid && previewModel.Create(*gfx, cpu)) {
             previewModelValid = true;
             previewCam = OrbitCamera{};
@@ -241,8 +243,10 @@ void App::DrawPreview() {
             if (ImGui::IsItemHovered() && ImGui::GetIO().MouseWheel != 0)
                 previewCam.dist *= powf(0.88f, ImGui::GetIO().MouseWheel);
         } else {
-            ImGui::TextDisabled(e.ext == ".glb" ? "Failed to load model"
-                                                : "No GLB available for preview (%s)", e.ext.c_str());
+            bool renderableExt = e.ext == ".glb" || e.ext == ".gltf" ||
+                                 e.ext == ".fbx" || e.ext == ".obj";
+            ImGui::TextDisabled(renderableExt ? "Failed to load model"
+                                              : "Preview not supported for %s", e.ext.c_str());
             if (!e.variants.empty()) {
                 ImGui::TextDisabled("Formats on disk:");
                 ImGui::BulletText("%s", e.ext.c_str());

@@ -28,15 +28,21 @@ format-agnostic and unchanged.
 ## Loader details
 
 - Load options: right-handed Y-up axes, meters, generate missing normals,
-  ignore animation, OBJ `.mtl` search by filename.
+  ignore animation, load external files (required for OBJ `.mtl`, with missing
+  files tolerated), OBJ `.mtl` search by filename.
 - Geometry: triangulate via ufbx, emit triangle soup per material part,
   transform positions/normals by each instance node's `geometry_to_world`.
 - UVs: flip V (ufbx uses bottom-left origin; renderer expects glTF top-left).
+- Material color/texture come from ufbx's `pbr.base_color` map, falling back
+  to `fbx.diffuse_color` (OBJ and classic FBX shaders only fill the latter).
 - Textures, resolved per material base-color map, in order:
   1. embedded content in the file,
   2. `absolute_filename` as-is,
   3. `relative_filename` relative to the model's directory,
-  4. `filename`'s basename next to the model file.
+  4. `filename`'s basename next to the model file,
+  5. the basename tried in up to 4 parent directories and their `Textures/`
+     subdirectory — PSX packs keep textures in a shared dir above parallel
+     format trees, while the file references the original author's disk.
   Miss → material base-color factor only (renderer already supports this).
 - `alphaMask` is enabled when the resolved texture's source had an alpha
   channel (covers PSX-style decals; FBX has no explicit alpha mode).
