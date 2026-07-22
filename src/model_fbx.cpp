@@ -121,6 +121,7 @@ CpuModel LoadFbxObjCpu(const std::wstring& path) {
         auto consider = [&](const fs::directory_entry& de) {
             std::error_code fec;
             if (!de.is_regular_file(fec)) return;
+            if (de.path().filename().wstring().rfind(L"._", 0) == 0) return; // AppleDouble junk
             std::wstring ext = ToLowerAsciiW(de.path().extension().wstring());
             if (ext != L".png" && ext != L".jpg" && ext != L".jpeg" &&
                 ext != L".tga" && ext != L".bmp") return;
@@ -135,6 +136,7 @@ CpuModel LoadFbxObjCpu(const std::wstring& path) {
         };
         for (const auto& de : fs::directory_iterator(modelDir, ec)) {
             if (de.is_directory(ec)) {
+                if (ToLowerAsciiW(de.path().filename().wstring()) == L"__macosx") continue;
                 std::error_code sec;
                 for (const auto& sub : fs::directory_iterator(de.path(), sec))
                     consider(sub);

@@ -106,13 +106,14 @@ void AssetDatabase::ScanWorker() {
         const fs::directory_entry& de = *it;
         if (de.is_directory(ec)) {
             std::wstring dn = de.path().filename().wstring();
-            if (!dn.empty() && (dn[0] == L'!' || dn[0] == L'.'))
-                it.disable_recursion_pending(); // skip "!Zips", hidden dirs
+            if (!dn.empty() && (dn[0] == L'!' || dn[0] == L'.' || ToLowerAsciiW(dn) == L"__macosx"))
+                it.disable_recursion_pending(); // skip "!Zips", hidden dirs, macOS zip junk
             continue;
         }
         if (!de.is_regular_file(ec)) continue;
 
         const fs::path& p = de.path();
+        if (p.filename().wstring().rfind(L"._", 0) == 0) continue; // AppleDouble resource forks
         std::wstring extLower = ToLowerAsciiW(p.extension().wstring());
         Kind kind = Classify(extLower);
         if (kind == Kind::Skip) continue;
