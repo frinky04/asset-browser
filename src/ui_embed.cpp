@@ -937,18 +937,15 @@ void App::DrawEmbedWindow() {
     else if (audioSeconds >= 60) snprintf(audioLen, sizeof(audioLen), "%.1f min", audioSeconds / 60);
     else snprintf(audioLen, sizeof(audioLen), "%.0f s", audioSeconds);
 
-    struct Row { const char* name; int count; double cost; bool upperBound; int type; const char* doneNote; const char* tip; };
+    struct Row { const char* name; int count; double cost; bool upperBound; int type; const char* tip; };
     char audioNote[96];
     snprintf(audioNote, sizeof(audioNote), "%s%s", audioLen, embedAudioUnknown ? " (measuring)" : "");
     const Row rows[] = {
         { "Textures", embedUnindexedTex, texCost, false, EmbedTex,
-          "aux maps skipped",
-          "256 px thumbnail" },
+          "256 px thumbnail; aux maps skipped" },
         { "Models", embedUnindexedModel, modelCost, false, EmbedModel,
-          "DAE skipped",
-          "Six rendered views; GLB, glTF, FBX, OBJ" },
+          "Six rendered views; DAE skipped" },
         { "Sounds", embedUnindexedAudio, audioCost, embedAudioUnknown > 0, EmbedAudio,
-          "",
           "First 12 s, 16 kHz mono; ~14x texture cost" },
     };
     if (ImGui::BeginTable("embedtypes", 3, ImGuiTableFlags_SizingStretchProp)) {
@@ -974,8 +971,7 @@ void App::DrawEmbedWindow() {
                 }
                 ImGui::TextUnformatted(line.c_str());
             } else {
-                ImGui::TextDisabled("all indexed%s%s", r.doneNote[0] ? " (" : "", r.doneNote);
-                if (r.doneNote[0]) ImGui::SameLine(0, 0), ImGui::TextDisabled(")");
+                ImGui::TextDisabled("all indexed");
             }
             ImGui::TableNextColumn();
             if (r.count > 0) {
