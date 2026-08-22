@@ -76,6 +76,7 @@ void WriteRecord(FILE* f, const std::string& rel, uint64_t mtime, uint64_t size,
 } // namespace
 
 bool EmbedIndex::Load(const std::wstring& path) {
+    { std::lock_guard<std::mutex> lock(fileMutex); pending.clear(); } // stale appends from a previous library
     entries.clear(); vectors.clear(); model.clear(); dims = 0; file = path;
     std::vector<uint8_t> b;
     if (!ReadFileBytes(path, b)) return false;

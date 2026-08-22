@@ -114,7 +114,9 @@ std::wstring App::EmbedIndexPathForRoot() const {
 void App::EmbedLoadIndexForRoot() {
     embedIndexLoaded = embedIndex.Load(EmbedIndexPathForRoot());
     embedPrunedAfterScan = false;
-    semanticScore.clear();
+    // Query vectors only make sense against the index they were embedded for.
+    semanticTextCache.clear();
+    SemanticClear();
 }
 
 void App::EmbedShutdown() {
@@ -212,6 +214,7 @@ void App::EmbedStartIndexing(bool rebuild) {
     if (rebuild || !embedIndexLoaded || !embedIndex.Matches(embedSettings)) {
         embedIndex.Reset(embedSettings.model, embedSettings.mode, embedSettings.dims, EmbedIndexPathForRoot());
         embedIndexLoaded = true;
+        semanticTextCache.clear();
         SemanticClear();
     }
     std::vector<EmbedJob> jobs;
