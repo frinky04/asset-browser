@@ -28,12 +28,15 @@ void EmbedSettings::Load(const std::wstring& file) {
     dims = j.value("dims", 768) == 3072 ? 3072 : 768;
     concurrency = (std::max)(1, (std::min)(16, j.value("concurrency", 8)));
     budgetUsd = (std::max)(0.0, j.value("budgetUsd", 0.0));
+    audioSeconds = (std::max)(4, (std::min)(30, j.value("audioSeconds", 12)));
+    audioTrimSilence = j.value("audioTrimSilence", true);
 }
 
 void EmbedSettings::Save(const std::wstring& file) const {
     std::error_code ec;
     fs::create_directories(fs::path(file).parent_path(), ec);
-    json j = { {"model", model}, {"mode", (int)mode}, {"dims", dims}, {"concurrency", concurrency}, {"budgetUsd", budgetUsd} };
+    json j = { {"model", model}, {"mode", (int)mode}, {"dims", dims}, {"concurrency", concurrency}, {"budgetUsd", budgetUsd},
+               {"audioSeconds", audioSeconds}, {"audioTrimSilence", audioTrimSilence} };
     std::ofstream out(file, std::ios::binary | std::ios::trunc);
     out << j.dump(2);
 }
@@ -367,14 +370,39 @@ std::string EmbedHybridText(AssetType type, const std::string& relPath, const st
     return words.empty() ? "texture" : "texture: " + words;
 }
 
-double EncodeWav16kMono(const PcmData& pcm, uint64_t f0, uint64_t f1, std::vector<uint8_t>& out) {
-    out.clear();
-    if (!pcm.valid || pcm.channels == 0 || pcm.sampleRate == 0) return 0;
+void EmbedAudioWindow(const PcmData& pcm, uint64_t& f0, uint64_t& f1, double maxSeconds, bool trimSilence) {
     f0 = (std::min)(f0, pcm.frames);
     f1 = (std::min)(f1, pcm.frames);
-    if (f1 <= f0) return 0;
-    uint64_t maxFrames = (uint64_t)(kEmbedAudioMaxSeconds * pcm.sampleRate);
+    if (f1 <= f0 || pcm.channels == 0) return;
+    if (trimSilence) {
+        // Silence = every channel below -50 dBFS. Padding is pure cost (25 tokens/s).
+        const float thresh = 0.00316f;
+        const uint32_t ch = pcm.channels;
+        auto loud = [&](uint64_t f) {
+            const float* s = pcm.samples.data() + (size_t)f * ch;
+            for (uint32_t k = 0; k < ch; ++k) if (std::fabs(s[k]) > thresh) return true;
+            return false;
+        };
+        uint64_t a = f0, b = f1;
+        while (a < b && !loud(a)) ++a;
+        while (b > a && !loud(b - 1)) --b;
+        if (b > a) {
+            // keep a little headroom so onsets are not clipped
+            uint64_t pad = pcm.sampleRate / 100; // 10 ms
+            f0 = a > f0 + pad ? a - pad : f0;
+            f1 = b + pad < f1 ? b + pad : f1;
+        }
+    }
+    uint64_t maxFrames = (uint64_t)(maxSeconds * pcm.sampleRate);
     if (f1 - f0 > maxFrames) f1 = f0 + maxFrames;
+}
+
+double EncodeWav16kMono(const PcmData& pcm, uint64_t f0, uint64_t f1, std::vector<uint8_t>& out,
+                        double maxSeconds, bool trimSilence) {
+    out.clear();
+    if (!pcm.valid || pcm.channels == 0 || pcm.sampleRate == 0) return 0;
+    EmbedAudioWindow(pcm, f0, f1, maxSeconds, trimSilence);
+    if (f1 <= f0) return 0;
 
     const uint32_t outRate = 16000;
     uint64_t srcFrames = f1 - f0;

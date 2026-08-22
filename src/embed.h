@@ -20,6 +20,8 @@ struct EmbedSettings {
     int dims = 768;          // 768 or 3072
     int concurrency = 8;     // 1..16
     double budgetUsd = 0;    // stop a run once its reported cost passes this (0 = no cap)
+    int audioSeconds = 12;   // seconds of each clip that are embedded (4..30)
+    bool audioTrimSilence = true; // drop leading/trailing silence before the window
 
     void Load(const std::wstring& file);
     void Save(const std::wstring& file) const;
@@ -75,12 +77,16 @@ std::string EmbedHybridText(AssetType type, const std::string& relPath, const st
 
 constexpr int    kEmbedTokensPerImage = 258;      // flat per image (measured)
 constexpr int    kEmbedTokensPerAudioSecond = 25; // linear (measured)
-constexpr double kEmbedAudioMaxSeconds = 12.0;    // only the first N seconds of a clip are embedded
+constexpr double kEmbedAudioDefaultSeconds = 12.0; // default clip window
 constexpr int    kEmbedModelView = 256;           // each view of a model contact sheet
 constexpr int    kEmbedModelSheetCols = 3, kEmbedModelSheetRows = 2; // 6 views, one request
 
-// First kEmbedAudioMaxSeconds of [f0, f1) as 16 kHz mono 16-bit WAV bytes; returns seconds encoded.
-double EncodeWav16kMono(const PcmData& pcm, uint64_t f0, uint64_t f1, std::vector<uint8_t>& out);
+// Window of [f0, f1) as 16 kHz mono 16-bit WAV bytes; returns seconds encoded.
+// trimSilence drops leading/trailing silence (below -50 dBFS) before the cap.
+double EncodeWav16kMono(const PcmData& pcm, uint64_t f0, uint64_t f1, std::vector<uint8_t>& out,
+                        double maxSeconds = kEmbedAudioDefaultSeconds, bool trimSilence = true);
+// The [f0, f1) range EncodeWav16kMono would actually send (for previews / chips).
+void EmbedAudioWindow(const PcmData& pcm, uint64_t& f0, uint64_t& f1, double maxSeconds, bool trimSilence);
 
 struct EmbedResult {
     bool ok = false;

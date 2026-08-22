@@ -358,8 +358,8 @@ void App::DrawPreview() {
                     SemanticQueryPreviewSelection();
                 ImGui::EndDisabled();
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Rank by similarity to %s (first %.0f s). One request.",
-                                      hasSel ? "the selection" : "this clip", kEmbedAudioMaxSeconds);
+                    ImGui::SetTooltip("Rank by similarity to %s (first %d s). One request.",
+                                      hasSel ? "the selection" : "this clip", embedSettings.audioSeconds);
             }
 
             // --- seamless loop tuning ---

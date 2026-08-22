@@ -258,7 +258,7 @@ void App::PumpEmbed() {
             ++embedUnindexedAudio;
             auto it = audioDurations.find(e.relPath);
             if (it == audioDurations.end()) ++embedAudioUnknown;
-            else embedAudioSecondsKnown += (std::min)(it->second, kEmbedAudioMaxSeconds);
+            else embedAudioSecondsKnown += (std::min)(it->second, (double)embedSettings.audioSeconds);
         }
         embedUnindexedCount = embedUnindexedTex + embedUnindexedAudio + embedUnindexedModel;
         embedStaleCount = 0;
@@ -379,7 +379,8 @@ App::EmbedEstimate App::EmbedEstimateFor(const std::vector<int>& candidates) con
         ++est.count;
         if (e.type == AssetType::Audio) {
             auto it = audioDurations.find(e.relPath);
-            double sec = it == audioDurations.end() ? kEmbedAudioMaxSeconds : (std::min)(it->second, kEmbedAudioMaxSeconds);
+            double win = embedSettings.audioSeconds;
+            double sec = it == audioDurations.end() ? win : (std::min)(it->second, win);
             if (it == audioDurations.end()) est.upperBound = true;
             est.cost += sec * kEmbedTokensPerAudioSecond * embedPrices.audio;
         } else {
@@ -421,8 +422,10 @@ bool App::EmbedStartIndexingSubset(std::vector<int> candidates, const std::strin
     }
     EmbedClient client{ embedKey, embedSettings.model, embedSettings.dims };
     Thumbs* th = &thumbs;
+    double audioWin = embedSettings.audioSeconds;
+    bool audioTrim = embedSettings.audioTrimSilence;
     embedIndexer.Start(&embedIndex, client, embedSettings.mode, embedSettings.concurrency, std::move(jobs),
-        [this, th](const EmbedJob& j, std::vector<uint8_t>& data, const char*& mime) {
+        [this, th, audioWin, audioTrim](const EmbedJob& j, std::vector<uint8_t>& data, const char*& mime) {
             if (j.type == AssetType::Model) {
                 std::vector<uint8_t> rgba;
                 mime = "image/jpeg";
@@ -433,7 +436,7 @@ bool App::EmbedStartIndexingSubset(std::vector<int> candidates, const std::strin
             if (j.type == AssetType::Audio) {
                 PcmData pcm = DecodeAudioFile(j.path);
                 mime = "audio/wav";
-                return EncodeWav16kMono(pcm, 0, pcm.frames, data) > 0;
+                return EncodeWav16kMono(pcm, 0, pcm.frames, data, audioWin, audioTrim) > 0;
             }
             int w = 0, h = 0;
             std::vector<uint8_t> rgba;
@@ -482,8 +485,10 @@ void App::EmbedStartIndexing(bool rebuild, int types) {
     if (jobs.empty()) return;
     EmbedClient client{ embedKey, embedSettings.model, embedSettings.dims };
     Thumbs* th = &thumbs;
+    double audioWin = embedSettings.audioSeconds;
+    bool audioTrim = embedSettings.audioTrimSilence;
     embedIndexer.Start(&embedIndex, client, embedSettings.mode, embedSettings.concurrency, std::move(jobs),
-        [this, th](const EmbedJob& j, std::vector<uint8_t>& data, const char*& mime) {
+        [this, th, audioWin, audioTrim](const EmbedJob& j, std::vector<uint8_t>& data, const char*& mime) {
             if (j.type == AssetType::Model) {
                 std::vector<uint8_t> rgba;
                 mime = "image/jpeg";
@@ -494,7 +499,7 @@ void App::EmbedStartIndexing(bool rebuild, int types) {
             if (j.type == AssetType::Audio) {
                 PcmData pcm = DecodeAudioFile(j.path);
                 mime = "audio/wav";
-                return EncodeWav16kMono(pcm, 0, pcm.frames, data) > 0;
+                return EncodeWav16kMono(pcm, 0, pcm.frames, data, audioWin, audioTrim) > 0;
             }
             int w = 0, h = 0;
             std::vector<uint8_t> rgba;
@@ -655,14 +660,15 @@ void App::SemanticQueryImage(const uint8_t* rgba, int w, int h, const std::strin
 void App::SemanticQueryAudio(const PcmData& pcm, uint64_t f0, uint64_t f1, const std::string& label) {
     if (!SemanticReady()) return;
     std::vector<uint8_t> wav;
-    double sec = EncodeWav16kMono(pcm, f0, f1, wav);
+    double sec = EncodeWav16kMono(pcm, f0, f1, wav, embedSettings.audioSeconds, embedSettings.audioTrimSilence);
     if (sec <= 0) { SemanticNotify("Could not decode that audio."); return; }
     // waveform of exactly what is sent, as the query chip
+    uint64_t w0 = f0, w1 = f1;
+    EmbedAudioWindow(pcm, w0, w1, embedSettings.audioSeconds, embedSettings.audioTrimSilence);
     PcmData part;
     part.channels = pcm.channels; part.sampleRate = pcm.sampleRate; part.valid = true;
-    uint64_t end = (std::min)(f1, f0 + (uint64_t)(kEmbedAudioMaxSeconds * pcm.sampleRate));
-    part.frames = end - f0;
-    part.samples.assign(pcm.samples.begin() + (size_t)f0 * pcm.channels, pcm.samples.begin() + (size_t)end * pcm.channels);
+    part.frames = w1 - w0;
+    part.samples.assign(pcm.samples.begin() + (size_t)w0 * pcm.channels, pcm.samples.begin() + (size_t)w1 * pcm.channels);
     std::vector<uint8_t> wave = RenderWaveformThumb(part, 256, 96);
     SafeRelease(semanticImageSRV);
     semanticImageSRV = gfx->CreateTextureSRV(wave.data(), 256, 96, false);
@@ -871,6 +877,17 @@ void App::DrawEmbedWindow() {
     ImGui::TextDisabled("(?)");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("0 = no cap. Stops the run at this cost; progress is kept.");
+    ImGui::SetNextItemWidth(180);
+    if (ImGui::SliderInt("Audio window (s)", &embedSettings.audioSeconds, 4, 30)) changed = true;
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Seconds of each clip sent. Cost is per second; 10 s matched full clips 10/12 in testing.");
+    if (ImGui::Checkbox("Trim silence", &embedSettings.audioTrimSilence)) changed = true;
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Skip leading and trailing silence (below -50 dBFS) before the window.");
     ImGui::EndDisabled();
     if (changed) embedSettings.Save(SettingsFile());
     if (embedPriceModel != embedSettings.model) embedPriceFetched = false;
@@ -930,7 +947,7 @@ void App::DrawEmbedWindow() {
     // -- per-type rows: what is left to index, what it costs, and a button each
     double texCost = embedUnindexedTex * (double)kEmbedTokensPerImage * embedPrices.image;
     double modelCost = embedUnindexedModel * (double)kEmbedTokensPerImage * embedPrices.image;
-    double audioSeconds = embedAudioSecondsKnown + embedAudioUnknown * kEmbedAudioMaxSeconds; // unknown = upper bound
+    double audioSeconds = embedAudioSecondsKnown + embedAudioUnknown * embedSettings.audioSeconds; // unknown = upper bound
     double audioCost = audioSeconds * kEmbedTokensPerAudioSecond * embedPrices.audio;
     char audioLen[64];
     if (audioSeconds >= 3600) snprintf(audioLen, sizeof(audioLen), "%.1f h", audioSeconds / 3600);
@@ -946,7 +963,7 @@ void App::DrawEmbedWindow() {
         { "Models", embedUnindexedModel, modelCost, false, EmbedModel,
           "Six rendered views; DAE skipped" },
         { "Sounds", embedUnindexedAudio, audioCost, embedAudioUnknown > 0, EmbedAudio,
-          "First 12 s, 16 kHz mono; ~14x texture cost" },
+          "16 kHz mono; ~14x texture cost per second" },
     };
     if (ImGui::BeginTable("embedtypes", 3, ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("type", ImGuiTableColumnFlags_WidthFixed, 70.0f);
