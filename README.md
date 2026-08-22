@@ -88,9 +88,10 @@ ab packs
 ab status
 ```
 
-Run `ab skill --install` to give Claude Code (or any agent that reads `~/.claude/skills`)
-a skill that explains when and how to use `ab` while building a game; the source is in
-`skills/finding-game-assets/`.
+Run `ab skill --install` to install a skill that explains when and how to use `ab` while
+building a game. It writes to `~/.claude/skills` (Claude Code) and the vendor-neutral
+`~/.agents/skills` (Codex, Cursor, Gemini CLI, Copilot and others); `--project` targets the
+current repo instead. The source is in `skills/finding-game-assets/`.
 
 Exports append a record to `<dir>/assets-used.json` (source path, pack, transform)
 so a project keeps track of what it pulled from the library.

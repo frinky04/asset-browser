@@ -66,6 +66,7 @@ struct Options {
     bool yes = false;
     bool manifest = true;
     bool install = false;      // skill --install
+    bool project = false;      // skill --install --project: ./.claude and ./.agents instead of ~
     // previews
     std::wstring sheet;        // search --sheet out.png
     std::wstring preview;      // inspect --preview out.png
@@ -81,7 +82,9 @@ Usage:
   ab inspect <id|relPath>          dimensions / triangles / duration for one asset
              [--preview out.png]   also write an image: fitted texture, waveform, or 6-view model sheet
   ab export  <id|relPath> --to <dir> [options]   copy or convert into a project
-  ab skill [--install [dir]]       print the agent skill; --install writes it to ~/.claude/skills
+  ab skill                         print the agent skill (SKILL.md)
+  ab skill --install [dir]         install to ~/.claude/skills and ~/.agents/skills (or one dir)
+  ab skill --install --project     install to ./.claude/skills and ./.agents/skills
   ab --help | --version
 
 Search options:
@@ -128,7 +131,7 @@ Examples:
   ab inspect 61d3f6f2393f9544 --preview look.png
   ab export 61d3f6f2393f9544 --to ./assets/textures --resize 512
   ab export 622c944aa6f7aeba --to ./assets/sfx --range 0-1.5 --trim-silence
-  ab skill --install          # teach Claude Code when and how to use ab
+  ab skill --install          # teach Claude Code, Codex, Cursor, Gemini CLI... when and how to use ab
 
 JSON results carry a stable "id" (hash of the library-relative path) plus the
 absolute "path"; pass the id to --similar.
@@ -189,6 +192,7 @@ bool ParseArgs(int argc, wchar_t** argv, Options& o, std::string& err) {
         else if (a == "--yes" || a == "-y") o.yes = true;
         else if (a == "--no-manifest") o.manifest = false;
         else if (a == "--install") o.install = true;
+        else if (a == "--project") o.project = true;
         else if (a == "--limit" || a == "--offset") {
             if (!need(i, v)) return false;
             int n = atoi(v.c_str());
@@ -770,23 +774,34 @@ std::string SkillText() {
 int CmdSkill(const Options& o) {
     std::string text = SkillText();
     if (!o.install) { fputs(text.c_str(), stdout); return ExitOk; }
-    fs::path dir;
-    if (!o.positional.empty()) dir = fs::absolute(fs::path(Utf8ToWide(o.positional[0])));
+    // Targets: an explicit directory, or the Claude Code layout plus the
+    // vendor-neutral .agents/skills layout (Codex, Cursor, Gemini CLI, Copilot, ...).
+    std::vector<fs::path> roots;
+    if (!o.positional.empty()) roots.push_back(fs::absolute(fs::path(Utf8ToWide(o.positional[0]))));
     else {
-        wchar_t* home = nullptr; size_t len = 0;
-        if (_wdupenv_s(&home, &len, L"USERPROFILE") || !home) return Fail("USERPROFILE is not set; pass a target directory");
-        dir = fs::path(home) / L".claude" / L"skills";
-        free(home);
+        fs::path base;
+        if (o.project) base = fs::current_path();
+        else {
+            wchar_t* home = nullptr; size_t len = 0;
+            if (_wdupenv_s(&home, &len, L"USERPROFILE") || !home) return Fail("USERPROFILE is not set; pass a target directory");
+            base = home; free(home);
+        }
+        roots.push_back(base / L".claude" / L"skills");
+        roots.push_back(base / L".agents" / L"skills");
     }
-    dir /= Utf8ToWide(kSkillName);
-    std::error_code ec;
-    fs::create_directories(dir, ec);
-    fs::path file = dir / L"SKILL.md";
-    std::ofstream out(file, std::ios::binary | std::ios::trunc);
-    if (!out) return Fail("cannot write " + WideToUtf8(file.wstring()));
-    out << text;
-    if (o.json) printf("%s\n", json({{"installed", WideToUtf8(file.wstring())}}).dump(2).c_str());
-    else printf("installed %s\n", WideToUtf8(file.wstring()).c_str());
+    json installed = json::array();
+    for (const fs::path& root : roots) {
+        fs::path dir = root / Utf8ToWide(kSkillName);
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        fs::path file = dir / L"SKILL.md";
+        std::ofstream out(file, std::ios::binary | std::ios::trunc);
+        if (!out) return Fail("cannot write " + WideToUtf8(file.wstring()));
+        out << text;
+        installed.push_back(WideToUtf8(file.wstring()));
+        if (!o.json) printf("installed %s\n", WideToUtf8(file.wstring()).c_str());
+    }
+    if (o.json) printf("%s\n", json({{"installed", installed}}).dump(2).c_str());
     return ExitOk;
 }
 
