@@ -179,7 +179,7 @@ void App::DrawGrid() {
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
             if (semanticAvail)
-                ImGui::SetTooltip("Rank indexed textures and sounds by meaning.\nDescribe one and press Enter, Ctrl+V / drop an image\n"
+                ImGui::SetTooltip("Rank indexed textures, models and sounds by meaning.\nDescribe one and press Enter, Ctrl+V / drop an image\n"
                                   "or sound file, or select an asset and press S.");
             else
                 ImGui::SetTooltip("Index your assets first: Tools > Embedding search.");
@@ -258,7 +258,7 @@ void App::DrawGrid() {
             ImGui::EndGroup();
         } else {
             ImGui::AlignTextToFramePadding();
-            ImGui::TextDisabled("Describe a texture or sound and press Enter, Ctrl+V / drop an image or sound file, or select an asset and press S.");
+            ImGui::TextDisabled("Describe an asset and press Enter, Ctrl+V / drop an image or sound file, or select an asset and press S.");
         }
         if (embedUnindexedCount > 0 && !embedIndexer.Running()) {
             ImGui::TextDisabled("%d asset%s not indexed yet and won't appear in rankings.", embedUnindexedCount,
@@ -337,7 +337,7 @@ void App::DrawGrid() {
         }
         if (ImGui::IsKeyPressed(ImGuiKey_S, false) && !io.KeyCtrl && SemanticReady() && !selection.empty()) {
             int src = *selection.begin();
-            if (db.entries[src].type != AssetType::Model) {
+            {
                 if (embedIndex.VectorFor(db.entries[src])) SemanticQueryAsset(src);
                 else SemanticNotify(db.entries[src].name + " is not in the embedding index.");
             }
@@ -505,6 +505,15 @@ void App::DrawGrid() {
                         radio("Max 64 px", 64);
                         ImGui::EndMenu();
                     }
+                }
+                if (e.type == AssetType::Model && SemanticReady()) {
+                    ImGui::Separator();
+                    bool indexed = embedIndex.VectorFor(e) != nullptr;
+                    ImGui::BeginDisabled(!indexed);
+                    if (ImGui::MenuItem("Find similar models", "S")) SemanticQueryAsset(idx);
+                    ImGui::EndDisabled();
+                    if (!indexed && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                        ImGui::SetTooltip(EmbedModelRenderable(e.ext) ? "Not in the embedding index" : "This format cannot be rendered, so it is not indexed");
                 }
                 if (e.type == AssetType::Model && !e.variants.empty()) {
                     ImGui::Separator();

@@ -16,8 +16,8 @@ Explorer.
 - Deduplicates equivalent model formats into one entry while preserving format choice.
 - Exports resized textures, audio selections, and seamless audio loops on demand.
 - Generates thumbnails in background workers and caches them for fast subsequent loads.
-- Optional semantic search (bring your own OpenRouter key): rank textures and sounds by a
-  text description, a pasted image or sound, or similarity to another asset.
+- Optional semantic search (bring your own OpenRouter key): rank textures, models and sounds
+  by a text description, a pasted image or sound, or similarity to another asset.
 
 <table>
   <tr>
@@ -50,14 +50,15 @@ Use `asset-browser.exe --root "D:\Assets"` for a one-off override.
 Asset Browser scans recursively, ignores unrelated file types, and stores only settings,
 thumbnail caches, and temporary exports under `%LOCALAPPDATA%\AssetBrowser`.
 
-### Semantic search (textures and sounds)
+### Semantic search (textures, models and sounds)
 
 Open **Tools → Embedding search**, paste an [OpenRouter](https://openrouter.ai) API key
-(or set `OPENROUTER_API_KEY`), and index your textures and/or sounds. Assets are embedded
-with `google/gemini-embedding-2`: colour textures from their 256 px thumbnails (about $0.12
-per 1,000; normal/roughness and other auxiliary maps are skipped), sounds from their first
-12 seconds as 16 kHz mono audio (about $0.002 per clip). The window shows exact counts and
-cost before anything is sent, and only new or changed files are sent on later runs.
+(or set `OPENROUTER_API_KEY`), and index your textures, models and/or sounds. Assets are
+embedded with `google/gemini-embedding-2`: colour textures from their 256 px thumbnails
+(about $0.12 per 1,000; normal/roughness and other auxiliary maps are skipped), models as a
+six-view contact sheet rendered in-app (same price; GLB/glTF/FBX/OBJ), and sounds from their
+first 12 seconds as 16 kHz mono audio (about $0.002 per clip). The window shows exact counts
+and cost before anything is sent, and only new or changed files are sent on later runs.
 
 Once indexed, tick **Semantic** next to the search box and press Enter to rank assets by
 description; `type:`, `pack:`, `ext:` and the other filters still apply. Ctrl+V a

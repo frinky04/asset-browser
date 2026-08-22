@@ -52,8 +52,10 @@ private:
     std::vector<Pending> pending;
 };
 
-// Textures worth indexing (colour/albedo maps, not normal/roughness/...) and every sound.
+// Textures worth indexing (colour/albedo maps, not normal/roughness/...), every
+// sound, and models in a format the in-app renderer can draw.
 bool EmbedIsIndexable(const AssetEntry& e);
+bool EmbedModelRenderable(const std::string& ext);
 std::string EmbedFilenameWords(const std::string& stem);  // "Wall_BrickRed_01" -> "wall brick red"
 // Metadata sent alongside the media in hybrid mode ("texture: ..." / "sound: <folder> <name>").
 std::string EmbedHybridText(AssetType type, const std::string& relPath, const std::string& name);
@@ -61,6 +63,8 @@ std::string EmbedHybridText(AssetType type, const std::string& relPath, const st
 constexpr int    kEmbedTokensPerImage = 258;      // flat per image (measured)
 constexpr int    kEmbedTokensPerAudioSecond = 25; // linear (measured)
 constexpr double kEmbedAudioMaxSeconds = 12.0;    // only the first N seconds of a clip are embedded
+constexpr int    kEmbedModelView = 256;           // each view of a model contact sheet
+constexpr int    kEmbedModelSheetCols = 3, kEmbedModelSheetRows = 2; // 6 views, one request
 
 // First kEmbedAudioMaxSeconds of [f0, f1) as 16 kHz mono 16-bit WAV bytes; returns seconds encoded.
 double EncodeWav16kMono(const PcmData& pcm, uint64_t f0, uint64_t f1, std::vector<uint8_t>& out);

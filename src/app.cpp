@@ -93,8 +93,7 @@ void App::Init(Gfx* g, HWND wnd, const std::wstring& root) {
 
 void App::SetAssetRoot(const std::wstring& root) {
     if (root.empty() || root == db.root) return;
-    embedIndexer.Cancel();
-    embedIndexer.Join();
+    EmbedStopIndexing();
     db.StopScan();
     audio.Stop();
     db.entries.clear();
@@ -234,7 +233,7 @@ void App::DrawMenuBar(float& menuH) {
             if (ImGui::MenuItem("Rescan assets")) {
                 // Only allowed once the previous scan finished
                 if (!db.scanning && !embedIndexer.Running()) {
-                    embedIndexer.Join();
+                    EmbedStopIndexing();
                     db.StopScan();
                     db.entries.clear();
                     db.packs.clear();

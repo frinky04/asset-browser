@@ -7,6 +7,8 @@
 #include "search.h"
 #include "embed.h"
 #include <mutex>
+#include <condition_variable>
+#include <deque>
 #include <set>
 #include <string>
 #include <vector>
@@ -84,7 +86,7 @@ struct App {
     int semanticAssetIndex = -1;              // source texture of a "find similar" query
     // refreshed ~1/s in PumpEmbed
     int embedIndexableCount = 0, embedUnindexedCount = 0;
-    int embedUnindexedTex = 0, embedUnindexedAudio = 0;
+    int embedUnindexedTex = 0, embedUnindexedAudio = 0, embedUnindexedModel = 0;
     double embedAudioSecondsKnown = 0;        // capped seconds of un-indexed audio with probed durations
     int embedAudioUnknown = 0;                // un-indexed audio still awaiting a duration probe
     // audio duration probing (for the cost estimate)
@@ -125,10 +127,25 @@ struct App {
     void EmbedShutdown();
     void PumpEmbed();                       // main thread, per frame
     void DrawEmbedWindow();
-    enum EmbedTypes { EmbedTex = 1, EmbedAudio = 2, EmbedAll = 3 };
+    enum EmbedTypes { EmbedTex = 1, EmbedAudio = 2, EmbedModel = 4, EmbedAll = 7 };
     void EmbedStartIndexing(bool rebuild, int types = EmbedAll);
     std::vector<int> EmbedUnindexed(int types = EmbedAll) const; // indexable entries lacking a current vector
     void EmbedProbeDurations();             // kick off / collect background duration probes
+    // Model contact sheets need the GPU: workers queue a loaded CpuModel and block
+    // until the main thread has rendered it (PumpEmbed, a few per frame).
+    struct SheetRequest {
+        CpuModel model;
+        std::vector<uint8_t> rgba;  // sheet, kEmbedModelView*cols x kEmbedModelView*rows
+        bool done = false, ok = false;
+    };
+    std::mutex sheetMutex;
+    std::condition_variable sheetCv;
+    std::deque<SheetRequest*> sheetQueue;
+    bool sheetAbort = false;
+    OffscreenTarget embedSheetRT;
+    bool RenderSheetRequest(const EmbedJob& job, std::vector<uint8_t>& rgba); // worker side
+    void PumpSheetRenders();                                                 // main thread
+    void EmbedStopIndexing();               // cancel + unblock sheet waits + join (main thread)
     std::wstring EmbedIndexPathForRoot() const;
     bool SemanticReady() const { return !embedKey.empty() && embedIndexLoaded && !embedIndex.Empty(); }
     void SemanticQueryText(const std::string& text);
@@ -192,5 +209,8 @@ struct App {
 };
 
 std::wstring LoadSavedAssetRoot();
-std::wstring AppDataDir(const wchar_t* sub); // %LocalAppData%\AssetBrowser\<sub>
+std::wstring AppDataDir(const wchar_t* sub);
+// 3x2 contact sheet (hero, front, back, left, right, top) on neutral grey. Main thread.
+bool RenderModelSheet(Gfx& gfx, ModelRenderer& renderer, OffscreenTarget& rt, const CpuModel& model,
+                      std::vector<uint8_t>& rgba); // %LocalAppData%\AssetBrowser\<sub>
 bool PickAssetRoot(HWND owner, std::wstring& root);

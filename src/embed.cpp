@@ -178,8 +178,13 @@ const float* EmbedIndex::VectorFor(const AssetEntry& e) const {
 
 // ---------------------------------------------------------------- filename text
 
+bool EmbedModelRenderable(const std::string& ext) {
+    return ext == ".glb" || ext == ".gltf" || ext == ".fbx" || ext == ".obj";
+}
+
 bool EmbedIsIndexable(const AssetEntry& e) {
     if (e.type == AssetType::Audio) return true;
+    if (e.type == AssetType::Model) return EmbedModelRenderable(e.ext);
     if (e.type != AssetType::Texture) return false;
     static const char* aux[] = { "normal", "rough", "metal", "occlusion", "_ao", "height",
                                  "displace", "emiss", "opacity", "specular", "gloss", "bump",
@@ -223,7 +228,7 @@ std::string EmbedFilenameWords(const std::string& stem) {
 
 std::string EmbedHybridText(AssetType type, const std::string& relPath, const std::string& name) {
     std::string words = EmbedFilenameWords(name);
-    if (type == AssetType::Audio) {
+    if (type == AssetType::Audio || type == AssetType::Model) {
         // Folder names in SFX packs are category labels ("Doors & Gates", "UI"):
         // the research showed they rescue text queries for short, generic sounds.
         std::string folder;
@@ -235,7 +240,8 @@ std::string EmbedHybridText(AssetType type, const std::string& relPath, const st
         std::string folderWords = EmbedFilenameWords(folder);
         std::string all = folderWords;
         if (!words.empty()) { if (!all.empty()) all += ' '; all += words; }
-        return all.empty() ? "sound" : "sound: " + all;
+        const char* kind = type == AssetType::Audio ? "sound" : "3d model";
+        return all.empty() ? kind : std::string(kind) + ": " + all;
     }
     return words.empty() ? "texture" : "texture: " + words;
 }

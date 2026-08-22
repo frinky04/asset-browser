@@ -9,6 +9,8 @@
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
 
+#include "embed.h"
+#include "stb_image_write.h"
 #include <ole2.h>
 #include <shellapi.h>
 
@@ -49,13 +51,14 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     // A command-line root is a session override; otherwise use the saved choice.
     std::wstring root = LoadSavedAssetRoot();
+    std::wstring dumpSheetIn, dumpSheetOut; // --dump-sheet <model> <out.png>: render the embedding sheet and exit
     {
         int argc = 0;
         LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-        for (int i = 1; i + 1 < argc; ++i)
-            if (wcscmp(argv[i], L"--root") == 0) {
-                root = argv[i + 1];
-            }
+        for (int i = 1; i + 1 < argc; ++i) {
+            if (wcscmp(argv[i], L"--root") == 0) root = argv[i + 1];
+            if (wcscmp(argv[i], L"--dump-sheet") == 0 && i + 2 < argc) { dumpSheetIn = argv[i + 1]; dumpSheetOut = argv[i + 2]; }
+        }
         if (argv) LocalFree(argv);
     }
 
@@ -76,6 +79,26 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     if (!g_gfx.Init(hwnd)) {
         MessageBoxW(hwnd, L"Failed to create D3D11 device.", L"Asset Browser", MB_ICONERROR);
         return 1;
+    }
+
+    if (!dumpSheetIn.empty()) {
+        ModelRenderer renderer;
+        renderer.Init(g_gfx);
+        OffscreenTarget rt;
+        rt.Create(g_gfx.device, kEmbedModelView, kEmbedModelView, true);
+        std::wstring lower = ToLowerAsciiW(dumpSheetIn);
+        bool gltf = lower.ends_with(L".glb") || lower.ends_with(L".gltf");
+        CpuModel model = gltf ? LoadGlbCpu(dumpSheetIn) : LoadFbxObjCpu(dumpSheetIn);
+        std::vector<uint8_t> rgba;
+        int rc = 2;
+        if (model.valid && RenderModelSheet(g_gfx, renderer, rt, model, rgba))
+            rc = stbi_write_png(WideToUtf8(dumpSheetOut).c_str(), kEmbedModelView * kEmbedModelSheetCols,
+                                kEmbedModelView * kEmbedModelSheetRows, 4, rgba.data(),
+                                kEmbedModelView * kEmbedModelSheetCols * 4) ? 0 : 3;
+        rt.Release();
+        renderer.Shutdown();
+        g_gfx.Shutdown();
+        return rc;
     }
 
     DragAcceptFiles(hwnd, TRUE);
