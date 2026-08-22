@@ -75,3 +75,11 @@ private:
     ID3D11BlendState* blend = nullptr;
     ID3D11ShaderResourceView* whiteTex = nullptr;
 };
+
+// 3x2 contact sheet (hero, front, back, left, right, top) on neutral grey, each
+// cell kEmbedModelView px; rt must be kEmbedModelView square with staging.
+bool RenderModelSheet(Gfx& gfx, ModelRenderer& renderer, OffscreenTarget& rt, const CpuModel& model,
+                      std::vector<uint8_t>& rgba);
+// One 3/4 hero view into rt (any size, with staging).
+bool RenderModelHero(Gfx& gfx, ModelRenderer& renderer, OffscreenTarget& rt, const CpuModel& model,
+                     std::vector<uint8_t>& rgba);

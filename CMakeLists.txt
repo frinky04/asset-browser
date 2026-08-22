@@ -58,6 +58,7 @@ add_library(abcore STATIC
   src/model_fbx.cpp
   src/audio.cpp
   src/embed.cpp
+  src/preview.cpp
   src/third_party_impl.cpp
   src/stb_vorbis_impl.c
   ${ufbx_SOURCE_DIR}/ufbx.c)

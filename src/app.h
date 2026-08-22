@@ -231,7 +231,4 @@ struct App {
     void RebuildFilterIfDirty();    // search.cpp
 };
 
-// 3x2 contact sheet (hero, front, back, left, right, top) on neutral grey. Main thread.
-bool RenderModelSheet(Gfx& gfx, ModelRenderer& renderer, OffscreenTarget& rt, const CpuModel& model,
-                      std::vector<uint8_t>& rgba); // %LocalAppData%\AssetBrowser\<sub>
 bool PickAssetRoot(HWND owner, std::wstring& root);

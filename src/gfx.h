@@ -13,6 +13,7 @@ struct Gfx {
     int width = 0, height = 0;
 
     bool Init(HWND hwnd);
+    bool InitHeadless();   // device + context only, no window or swap chain
     void Shutdown();
     void Resize(int w, int h);
 

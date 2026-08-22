@@ -15,6 +15,7 @@
 #include "stb_image_write.h"
 #include "audio.h"
 #include "model.h"
+#include "preview.h"
 #include <io.h>
 #include <filesystem>
 #include <fstream>
@@ -61,6 +62,10 @@ struct Options {
     bool trimSilence = false;
     bool yes = false;
     bool manifest = true;
+    // previews
+    std::wstring sheet;        // search --sheet out.png
+    std::wstring preview;      // inspect --preview out.png
+    int tile = 256;
 };
 
 const char* kUsage = R"(ab - headless Asset Browser for scripts and coding agents
@@ -70,6 +75,7 @@ Usage:
   ab packs                         list top-level packs with counts
   ab status                        library root, counts, semantic index state
   ab inspect <id|relPath>          dimensions / triangles / duration for one asset
+             [--preview out.png]   also write an image: fitted texture, waveform, or 6-view model sheet
   ab export  <id|relPath> --to <dir> [options]   copy or convert into a project
   ab --help | --version
 
@@ -81,6 +87,8 @@ Search options:
   --limit N           results per page (default 10)
   --offset N          skip the first N results
   --sort relevance|name|newest|largest
+  --sheet <out.png>   write a numbered contact sheet of this page of results
+  --tile N            contact sheet cell size in px (default 256)
 
 Query syntax (same as the GUI search box):
   words            fuzzy match on file name and path    "exact phrase"
@@ -111,13 +119,19 @@ Examples:
   ab search --semantic "weathered wooden door creak" --type audio
   ab search --similar 3f2a9c1e0b7d4e55 --limit 8
   ab status --json
-  ab inspect 61d3f6f2393f9544
+  ab search "rock" --type model --limit 12 --sheet candidates.png   # then view the PNG
+  ab inspect 61d3f6f2393f9544 --preview look.png
   ab export 61d3f6f2393f9544 --to ./assets/textures --resize 512
   ab export 622c944aa6f7aeba --to ./assets/sfx --range 0-1.5 --trim-silence
 
 JSON results carry a stable "id" (hash of the library-relative path) plus the
 absolute "path"; pass the id to --similar.
 )";
+
+int Fail(const std::string& msg, int code = ExitError) {
+    fprintf(stderr, "error: %s\n", msg.c_str());
+    return code;
+}
 
 std::string IdFor(const AssetEntry& e) {
     char buf[24];
@@ -148,6 +162,9 @@ bool ParseArgs(int argc, wchar_t** argv, Options& o, std::string& err) {
         else if (a == "--type") { if (!need(i, o.type)) return false; }
         else if (a == "--pack") { if (!need(i, o.pack)) return false; }
         else if (a == "--sort") { if (!need(i, o.sort)) return false; }
+        else if (a == "--sheet") { if (!need(i, v)) return false; o.sheet = Utf8ToWide(v); }
+        else if (a == "--preview") { if (!need(i, v)) return false; o.preview = Utf8ToWide(v); }
+        else if (a == "--tile") { if (!need(i, v)) return false; o.tile = atoi(v.c_str()); if (o.tile < 64 || o.tile > 1024) { err = "--tile must be 64..1024"; return false; } }
         else if (a == "--to") { if (!need(i, v)) return false; o.to = Utf8ToWide(v); }
         else if (a == "--name") { if (!need(i, o.name)) return false; }
         else if (a == "--format") { if (!need(i, o.format)) return false; o.format = ToLowerAscii(o.format); if (!o.format.empty() && o.format[0] == '.') o.format.erase(0, 1); }
@@ -308,6 +325,27 @@ int CmdSearch(const Options& o, AssetDatabase& db) {
     size_t from = std::min((size_t)o.offset, total);
     size_t to = std::min(from + (size_t)o.limit, total);
 
+    json sheetInfo;
+    if (!o.sheet.empty() && to > from) {
+        PreviewRenderer pr;
+        std::vector<RgbaImage> tiles;
+        int failed = 0;
+        for (size_t n = from; n < to; ++n) {
+            RgbaImage img; std::string perr;
+            if (!o.quiet) fprintf(stderr, "rendering %zu/%zu\r", n - from + 1, to - from);
+            if (!pr.Make(db.entries[r.filtered[n]], o.tile, false, img, perr)) ++failed;
+            tiles.push_back(std::move(img));
+        }
+        int cols = std::min<int>((int)tiles.size(), std::max(1, 1024 / o.tile));
+        RgbaImage sheet = ComposeContactSheet(tiles, o.tile, cols);
+        fs::path outPath = fs::absolute(fs::path(o.sheet));
+        std::error_code ec; fs::create_directories(outPath.parent_path(), ec);
+        if (!WritePng(outPath.wstring(), sheet)) { fprintf(stderr, "error: cannot write %s\n", WideToUtf8(outPath.wstring()).c_str()); return ExitError; }
+        sheetInfo = {{"path", WideToUtf8(outPath.wstring())}, {"cols", cols}, {"tile", o.tile},
+                     {"numbering", "1-based, row-major; tile k = results[k-1]"}, {"failed", failed}};
+        if (!o.quiet) fprintf(stderr, "                      \r");
+    }
+
     if (o.json) {
         json out;
         out["query"] = queryText;
@@ -324,6 +362,7 @@ int CmdSearch(const Options& o, AssetDatabase& db) {
             results.push_back(std::move(j));
         }
         out["results"] = std::move(results);
+        if (!sheetInfo.is_null()) out["sheet"] = sheetInfo;
         printf("%s\n", out.dump(2).c_str());
     } else {
         if (total == 0) {
@@ -340,6 +379,7 @@ int CmdSearch(const Options& o, AssetDatabase& db) {
             printf("%s  %-7s %s\n", IdFor(e).c_str(), TypeName(e.type), WideToUtf8(e.path).c_str());
         }
         if (to < total) printf("... use --offset %zu for more\n", to);
+        if (!sheetInfo.is_null()) printf("contact sheet: %s (numbered 1-%zu)\n", sheetInfo["path"].get<std::string>().c_str(), to - from);
     }
     return ExitOk;
 }
@@ -471,6 +511,16 @@ int CmdInspect(const Options& o, AssetDatabase& db) {
     int idx;
     if (int rc = ResolveRef(db, o, idx)) return rc;
     json j = InspectJson(db.entries[idx], db.root);
+    if (!o.preview.empty()) {
+        PreviewRenderer pr;
+        RgbaImage img; std::string perr;
+        fs::path outPath = fs::absolute(fs::path(o.preview));
+        std::error_code ec; fs::create_directories(outPath.parent_path(), ec);
+        if (!pr.Make(db.entries[idx], 512, /*sheet*/ true, img, perr) || !WritePng(outPath.wstring(), img))
+            return Fail("preview failed: " + (perr.empty() ? "cannot write png" : perr));
+        j["preview"] = {{"path", WideToUtf8(outPath.wstring())}, {"width", img.w}, {"height", img.h}};
+        if (db.entries[idx].type == AssetType::Model) j["preview"]["layout"] = "3x2: hero, front, back, left, right, top";
+    }
     if (o.json) { printf("%s\n", j.dump(2).c_str()); return ExitOk; }
     const AssetEntry& e = db.entries[idx];
     printf("%s  %s\n%s\n", IdFor(e).c_str(), TypeName(e.type), WideToUtf8(e.path).c_str());
@@ -497,11 +547,6 @@ bool CopyTo(const fs::path& src, const fs::path& dst, bool yes, std::string& err
     fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
     if (ec) { err = "copy failed: " + ec.message(); return false; }
     return true;
-}
-
-int Fail(const std::string& msg, int code = ExitError) {
-    fprintf(stderr, "error: %s\n", msg.c_str());
-    return code;
 }
 
 int ExportTexture(const Options& o, const AssetEntry& e, const fs::path& dir, const std::string& stem,

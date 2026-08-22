@@ -1,4 +1,5 @@
 #include "model.h"
+#include "embed.h"
 #include "util.h"
 #include <d3dcompiler.h>
 #include <DirectXMath.h>
@@ -433,4 +434,48 @@ void ModelRenderer::Render(Gfx& gfx, const GpuModel& model, OffscreenTarget& tar
     // Unbind so the target's SRV can be sampled by ImGui afterwards
     ID3D11RenderTargetView* nullRTV = nullptr;
     c->OMSetRenderTargets(1, &nullRTV, nullptr);
+}
+
+// ---------------------------------------------------------------- offscreen views
+
+bool RenderModelSheet(Gfx& gfx, ModelRenderer& renderer, OffscreenTarget& rt, const CpuModel& model,
+                      std::vector<uint8_t>& rgba) {
+    const int view = kEmbedModelView, cols = kEmbedModelSheetCols, rows = kEmbedModelSheetRows;
+    const int sheetW = view * cols, sheetH = view * rows;
+    if (rt.w != view || rt.h != view) return false;
+    GpuModel gpu;
+    if (!gpu.Create(gfx, model)) return false;
+    rgba.assign((size_t)sheetW * sheetH * 4, 0);
+    // yaw/pitch per cell, row-major: hero 3/4, front, back, left, right, top
+    const float views[6][2] = { { 35, -22 }, { 0, -8 }, { 180, -8 }, { 90, -8 }, { -90, -8 }, { 0, -80 } };
+    const float grey[4] = { 0.216f, 0.216f, 0.216f, 1.0f }; // ~#808080 after sRGB encode
+    bool ok = true;
+    std::vector<uint8_t> px;
+    for (int i = 0; i < cols * rows && ok; ++i) {
+        OrbitCamera cam;
+        cam.yawDeg = views[i][0];
+        cam.pitchDeg = views[i][1];
+        cam.FrameModel(gpu.bmin, gpu.bmax);
+        renderer.Render(gfx, gpu, rt, cam, grey);
+        if (!rt.ReadPixels(gfx.ctx, px) || px.size() < (size_t)view * view * 4) { ok = false; break; }
+        int cx = (i % cols) * view, cy = (i / cols) * view;
+        for (int y = 0; y < view; ++y)
+            memcpy(rgba.data() + ((size_t)(cy + y) * sheetW + cx) * 4, px.data() + (size_t)y * view * 4, (size_t)view * 4);
+    }
+    gpu.Release();
+    return ok;
+}
+
+
+bool RenderModelHero(Gfx& gfx, ModelRenderer& renderer, OffscreenTarget& rt, const CpuModel& model,
+                     std::vector<uint8_t>& rgba) {
+    GpuModel gpu;
+    if (!gpu.Create(gfx, model)) return false;
+    OrbitCamera cam;
+    cam.FrameModel(gpu.bmin, gpu.bmax);
+    const float grey[4] = { 0.216f, 0.216f, 0.216f, 1.0f };
+    renderer.Render(gfx, gpu, rt, cam, grey);
+    bool ok = rt.ReadPixels(gfx.ctx, rgba) && rgba.size() >= (size_t)rt.w * rt.h * 4;
+    gpu.Release();
+    return ok;
 }

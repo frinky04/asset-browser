@@ -31,6 +31,22 @@ bool Gfx::Init(HWND hwnd) {
     return true;
 }
 
+bool Gfx::InitHeadless() {
+    D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_0 };
+    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, levels, 1,
+                                   D3D11_SDK_VERSION, &device, nullptr, &ctx);
+    if (FAILED(hr))
+        hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, levels, 1,
+                               D3D11_SDK_VERSION, &device, nullptr, &ctx);
+    if (FAILED(hr)) return false;
+    D3D11_SAMPLER_DESC samp{};
+    samp.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    samp.AddressU = samp.AddressV = samp.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+    samp.MaxLOD = D3D11_FLOAT32_MAX;
+    device->CreateSamplerState(&samp, &wrapSampler);
+    return true;
+}
+
 void Gfx::Shutdown() {
     SafeRelease(wrapSampler);
     SafeRelease(backbufferRTV);

@@ -78,7 +78,9 @@ library root, query syntax and semantic index as the GUI, prints JSON when piped
 ab search "mossy stone" --type tex --limit 5
 ab search --semantic "creaky wooden door" --type audio --json
 ab search --similar <id>          # rank by an indexed asset, no API call
+ab search rock --type model --limit 12 --sheet candidates.png   # numbered contact sheet
 ab inspect <id>                   # dimensions / triangles / duration
+ab inspect <id> --preview look.png   # fitted texture, waveform, or 6-view model sheet
 ab export <id> --to ./assets/textures --resize 512
 ab export <id> --to ./assets/sfx --range 0-1.5 --trim-silence --loop
 ab export <id> --to ./assets/models --format obj   # copies the .mtl too
