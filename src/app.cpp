@@ -345,6 +345,12 @@ void App::DrawSidebar() {
         if (on) ImGui::PushStyleColor(ImGuiCol_Text, Theme::Accent());
         bool clicked = ImGui::Selectable(label, on, ImGuiSelectableFlags_SpanAllColumns);
         if (on) ImGui::PopStyleColor();
+        if (!embedKey.empty() && ImGui::BeginPopupContextItem()) {
+            bool excluded = EmbedFolderExcluded(p.name);
+            if (ImGui::MenuItem(excluded ? "Include in semantic indexing" : "Exclude from semantic indexing"))
+                EmbedSetFolderExcluded(p.name, !excluded);
+            ImGui::EndPopup();
+        }
         if (clicked) {
             const ImGuiIO& io = ImGui::GetIO();
             auto anchor = std::find_if(db.packs.begin(), db.packs.end(), [&](const PackInfo& candidate) {

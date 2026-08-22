@@ -10,6 +10,8 @@
 
 #include "stb_image.h"
 #include "stb_image_resize2.h"
+#include <nlohmann/json.hpp>
+#include <fstream>
 
 namespace fs = std::filesystem;
 
@@ -110,7 +112,69 @@ std::wstring App::EmbedIndexPathForRoot() const {
     return EmbedDir() + L"\\" + name;
 }
 
+// ---------------------------------------------------------------- folder exclusions
+
+static std::string NormalizeFolder(std::string f) {
+    for (char& c : f) if (c == '\\') c = '/';
+    while (!f.empty() && f.back() == '/') f.pop_back();
+    while (!f.empty() && f.front() == '/') f.erase(f.begin());
+    return ToLowerAscii(f);
+}
+
+std::string App::EmbedParentFolder(const AssetEntry& e) {
+    size_t slash = e.relPath.rfind('/');
+    return slash == std::string::npos ? "" : e.relPath.substr(0, slash);
+}
+
+bool App::EmbedExcluded(const AssetEntry& e) const {
+    if (embedExcludes.empty()) return false;
+    const std::string& p = e.relPathLower;
+    for (const std::string& x : embedExcludes)
+        if (p.size() > x.size() && p[x.size()] == '/' && p.compare(0, x.size(), x) == 0) return true;
+    return false;
+}
+
+bool App::EmbedFolderExcluded(const std::string& relFolder) const {
+    std::string f = NormalizeFolder(relFolder);
+    return std::find(embedExcludes.begin(), embedExcludes.end(), f) != embedExcludes.end();
+}
+
+void App::EmbedSetFolderExcluded(const std::string& relFolder, bool excluded) {
+    std::string f = NormalizeFolder(relFolder);
+    if (f.empty()) return;
+    auto it = std::find(embedExcludes.begin(), embedExcludes.end(), f);
+    if (excluded && it == embedExcludes.end()) embedExcludes.push_back(f);
+    else if (!excluded && it != embedExcludes.end()) embedExcludes.erase(it);
+    else return;
+    std::sort(embedExcludes.begin(), embedExcludes.end());
+    EmbedSaveExcludes();
+    embedCountedAt = -1;
+    if (SemanticActive()) { thumbs.FlushPending(); filterDirty = true; }
+}
+
+static std::wstring ExcludesFileFor(const std::wstring& indexPath) {
+    return indexPath.substr(0, indexPath.size() - 4) + L".exclude.json";
+}
+
+void App::EmbedSaveExcludes() const {
+    std::error_code ec;
+    fs::create_directories(EmbedDir(), ec);
+    std::ofstream out(ExcludesFileFor(EmbedIndexPathForRoot()), std::ios::binary | std::ios::trunc);
+    out << nlohmann::json(embedExcludes).dump(2);
+}
+
 void App::EmbedLoadIndexForRoot() {
+    embedExcludes.clear();
+    {
+        std::ifstream in(ExcludesFileFor(EmbedIndexPathForRoot()), std::ios::binary);
+        if (in) {
+            nlohmann::json j = nlohmann::json::parse(in, nullptr, false);
+            if (j.is_array())
+                for (const auto& x : j) if (x.is_string()) embedExcludes.push_back(NormalizeFolder(x.get<std::string>()));
+            std::sort(embedExcludes.begin(), embedExcludes.end());
+            embedExcludes.erase(std::unique(embedExcludes.begin(), embedExcludes.end()), embedExcludes.end());
+        }
+    }
     embedIndexLoaded = embedIndex.Load(EmbedIndexPathForRoot());
     embedPrunedAfterScan = false;
     // Query vectors only make sense against the index they were embedded for.
@@ -175,7 +239,7 @@ void App::PumpEmbed() {
         embedIndexedByType[0] = embedIndexedByType[1] = embedIndexedByType[2] = 0;
         if (embedIndexLoaded)
             for (const AssetEntry& e : db.entries)
-                if (embedIndex.HasCurrent(e)) ++embedIndexedByType[(int)e.type];
+                if (!EmbedExcluded(e) && embedIndex.HasCurrent(e)) ++embedIndexedByType[(int)e.type];
         for (int i : EmbedUnindexed()) {
             const AssetEntry& e = db.entries[i];
             if (e.type == AssetType::Model) { ++embedUnindexedModel; continue; }
@@ -234,7 +298,7 @@ std::vector<int> App::EmbedUnindexed(int types) const {
     bool usable = embedIndexLoaded && embedIndex.Matches(embedSettings);
     for (int i = 0; i < (int)db.entries.size(); ++i) {
         const AssetEntry& e = db.entries[i];
-        if (!EmbedIsIndexable(e)) continue;
+        if (!EmbedIsIndexable(e) || EmbedExcluded(e)) continue;
         int bit = e.type == AssetType::Audio ? EmbedAudio : e.type == AssetType::Model ? EmbedModel : EmbedTex;
         if (!(types & bit)) continue;
         if (usable && embedIndex.HasCurrent(e)) continue;
@@ -510,6 +574,7 @@ bool App::SemanticFindSimilar(int index) {
     if (index < 0 || index >= (int)db.entries.size()) return false;
     const AssetEntry& e = db.entries[index];
     if (!SemanticReady()) { SemanticNotify("Index your assets first: Semantic > Embedding settings & indexing."); return false; }
+    if (EmbedExcluded(e)) { SemanticNotify(e.name + " is in an excluded folder."); return false; }
     if (!embedIndex.VectorFor(e)) {
         if (e.type == AssetType::Model && !EmbedModelRenderable(e.ext))
             SemanticNotify(e.name + " cannot be rendered, so it is not indexed.");
@@ -836,6 +901,32 @@ void App::DrawEmbedWindow() {
             for (const std::string& e : errors) ImGui::TextWrapped("%s", e.c_str());
             ImGui::TreePop();
         }
+    }
+
+    // ---- exclusions
+    ImGui::SeparatorText("Excluded folders");
+    ImGui::TextDisabled("Assets under these folders are never sent, counted, or ranked.");
+    if (embedExcludes.empty()) {
+        ImGui::TextDisabled("None. Right-click a pack in the sidebar or an asset in the grid to exclude its folder.");
+    } else {
+        std::string remove;
+        for (const std::string& x : embedExcludes) {
+            ImGui::PushID(x.c_str());
+            if (ImGui::SmallButton("x")) remove = x;
+            ImGui::SameLine();
+            ImGui::TextUnformatted(x.c_str());
+            ImGui::PopID();
+        }
+        if (!remove.empty()) EmbedSetFolderExcluded(remove, false);
+    }
+    ImGui::SetNextItemWidth(-80);
+    bool addExclude = ImGui::InputTextWithHint("##exclude", "folder relative to the library, e.g. Packs/OldStuff",
+                                               embedExcludeBuf, sizeof(embedExcludeBuf), ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+    if (ImGui::Button("Add", ImVec2(-1, 0))) addExclude = true;
+    if (addExclude && embedExcludeBuf[0]) {
+        EmbedSetFolderExcluded(embedExcludeBuf, true);
+        embedExcludeBuf[0] = 0;
     }
 
     // ---- usage

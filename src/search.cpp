@@ -271,7 +271,7 @@ void App::RebuildFilterIfDirty() {
         if (semantic) {
             // Rank every indexed texture by cosine to the query; text terms are
             // the query itself, so only the filter terms narrow the set.
-            const float* v = embedIndex.VectorFor(e);
+            const float* v = EmbedExcluded(e) ? nullptr : embedIndex.VectorFor(e);
             if (!v) continue;
             if (hasQuery && !MatchEntry(query, e, now, score, /*skipFuzzy*/ true)) continue;
             float dot = 0;

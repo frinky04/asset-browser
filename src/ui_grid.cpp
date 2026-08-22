@@ -484,6 +484,15 @@ void App::DrawGrid() {
                 ImGui::Separator();
                 if (ImGui::MenuItem("Copy path")) CopyPathToClipboard(idx);
                 if (ImGui::MenuItem("Open in Explorer")) OpenInExplorer(idx);
+                if (!embedKey.empty()) {
+                    std::string folder = EmbedParentFolder(e);
+                    if (!folder.empty()) {
+                        bool excluded = EmbedFolderExcluded(folder);
+                        std::string item = (excluded ? "Include folder in semantic indexing" : "Exclude folder from semantic indexing");
+                        if (ImGui::MenuItem(item.c_str())) EmbedSetFolderExcluded(folder, !excluded);
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", folder.c_str());
+                    }
+                }
                 if (e.type == AssetType::Texture) {
                     ImGui::Separator();
                     if (SemanticReady()) {

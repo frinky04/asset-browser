@@ -88,6 +88,15 @@ struct App {
     int embedIndexableCount = 0, embedUnindexedCount = 0;
     int embedUnindexedTex = 0, embedUnindexedAudio = 0, embedUnindexedModel = 0;
     int embedIndexedByType[3] = { 0, 0, 0 };  // current vectors per AssetType
+    // Folders (relative, lowercase, forward slashes, no trailing slash) kept out
+    // of indexing and rankings. Per library, stored beside the index.
+    std::vector<std::string> embedExcludes;
+    char embedExcludeBuf[512] = "";
+    bool EmbedExcluded(const AssetEntry& e) const;
+    bool EmbedFolderExcluded(const std::string& relFolder) const; // exact entry present
+    void EmbedSetFolderExcluded(const std::string& relFolder, bool excluded);
+    void EmbedSaveExcludes() const;
+    static std::string EmbedParentFolder(const AssetEntry& e); // "" for root-level files
     double embedAudioSecondsKnown = 0;        // capped seconds of un-indexed audio with probed durations
     int embedAudioUnknown = 0;                // un-indexed audio still awaiting a duration probe
     // audio duration probing (for the cost estimate)
