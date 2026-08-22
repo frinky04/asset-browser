@@ -264,9 +264,17 @@ void App::PumpEmbed() {
     }
     if (embedWindowOpen) EmbedProbeDurations();
     // Prune index entries for files that vanished, once the scan has settled.
+    // The scan worker clears `scanning` right after queueing its last batch, so
+    // wait until a PumpScan() after that point has come back empty; pruning on
+    // the flag alone could drop vectors for the still-queued batch.
     if (embedIndexLoaded && !db.scanning && !embedPrunedAfterScan && !db.root.empty()) {
-        embedPrunedAfterScan = true;
-        if (!embedIndexer.Running()) embedIndex.Prune(db.entries);
+        if (db.PumpScan()) {
+            thumbs.EnsureCount(db.entries.size());
+            filterDirty = true;
+        } else {
+            embedPrunedAfterScan = true;
+            if (!embedIndexer.Running()) embedIndex.Prune(db.entries);
+        }
     }
     // async query result
     {
