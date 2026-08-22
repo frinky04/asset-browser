@@ -88,6 +88,10 @@ ab packs
 ab status
 ```
 
+Run `ab skill --install` to give Claude Code (or any agent that reads `~/.claude/skills`)
+a skill that explains when and how to use `ab` while building a game; the source is in
+`skills/finding-game-assets/`.
+
 Exports append a record to `<dir>/assets-used.json` (source path, pack, transform)
 so a project keeps track of what it pulled from the library.
 

@@ -1,0 +1,3 @@
+// Generated from skills/finding-game-assets/SKILL.md by CMake.
+extern const char* const kSkillName = "finding-game-assets";
+extern const char* const kSkillMarkdown = R"SKILL(@AB_SKILL_MD@)SKILL";

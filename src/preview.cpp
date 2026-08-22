@@ -29,10 +29,20 @@ bool FitTexture(const std::wstring& path, int maxSide, RgbaImage& out) {
     return true;
 }
 
-// 3x5 digit glyphs, row-major bits (MSB = left).
-const uint8_t kDigits[10][5] = {
+// 3x5 glyphs, row-major bits (MSB = left): digits, then x . s k
+const uint8_t kDigits[14][5] = {
     {7,5,5,5,7},{2,6,2,2,7},{7,1,7,4,7},{7,1,7,1,7},{5,5,7,1,1},
-    {7,4,7,1,7},{7,4,7,5,7},{7,1,1,1,1},{7,5,7,5,7},{7,5,7,1,7}};
+    {7,4,7,1,7},{7,4,7,5,7},{7,1,1,1,1},{7,5,7,5,7},{7,5,7,1,7},
+    {0,5,2,5,0},{0,0,0,0,2},{0,3,6,1,6},{4,5,6,5,5}};
+
+int GlyphIndex(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c == 'x') return 10;
+    if (c == '.') return 11;
+    if (c == 's') return 12;
+    if (c == 'k') return 13;
+    return -1;
+}
 
 void Fill(RgbaImage& img, int x0, int y0, int w, int h, uint8_t r, uint8_t g, uint8_t b) {
     for (int y = std::max(0, y0); y < std::min(img.h, y0 + h); ++y)
@@ -42,13 +52,14 @@ void Fill(RgbaImage& img, int x0, int y0, int w, int h, uint8_t r, uint8_t g, ui
         }
 }
 
-void DrawNumber(RgbaImage& img, int x, int y, int n, int scale) {
-    std::string s = std::to_string(n);
+void DrawLabel(RgbaImage& img, int x, int y, const std::string& s, int scale) {
     int pad = scale, gw = 3 * scale, gh = 5 * scale;
     Fill(img, x, y, (int)s.size() * (gw + pad) + pad, gh + 2 * pad, 0, 0, 0);
     int cx = x + pad;
     for (char c : s) {
-        const uint8_t* g = kDigits[c - '0'];
+        int gi = GlyphIndex(c);
+        if (gi < 0) { cx += gw + pad; continue; }
+        const uint8_t* g = kDigits[gi];
         for (int row = 0; row < 5; ++row)
             for (int col = 0; col < 3; ++col)
                 if (g[row] & (4 >> col)) Fill(img, cx + col * scale, y + pad + row * scale, scale, scale, 255, 255, 255);
@@ -73,6 +84,9 @@ bool PreviewRenderer::EnsureGpu(std::string& err) {
 bool PreviewRenderer::Make(const AssetEntry& e, int maxSide, bool sheet, RgbaImage& out, std::string& err) {
     out = {};
     if (e.type == AssetType::Texture) {
+        std::vector<uint8_t> bytes; int w = 0, h = 0, comp = 0;
+        if (ReadFileBytes(e.path, bytes) && stbi_info_from_memory(bytes.data(), (int)bytes.size(), &w, &h, &comp))
+            out.label = std::to_string(w) + "x" + std::to_string(h);
         if (!FitTexture(e.path, maxSide, out)) { err = "cannot decode texture"; return false; }
         return true;
     }
@@ -81,6 +95,8 @@ bool PreviewRenderer::Make(const AssetEntry& e, int maxSide, bool sheet, RgbaIma
         if (!pcm.valid) { err = "cannot decode audio"; return false; }
         out.w = maxSide; out.h = std::max(16, maxSide / 3);
         out.px = RenderWaveformThumb(pcm, out.w, out.h);
+        char sec[32]; snprintf(sec, sizeof(sec), "%.1fs", (double)pcm.frames / pcm.sampleRate);
+        out.label = sec;
         return out.valid();
     }
     if (!EmbedModelRenderable(e.ext)) { err = "no renderer for " + e.ext; return false; }
@@ -89,6 +105,12 @@ bool PreviewRenderer::Make(const AssetEntry& e, int maxSide, bool sheet, RgbaIma
     bool gltf = lower.ends_with(L".glb") || lower.ends_with(L".gltf");
     CpuModel model = gltf ? LoadGlbCpu(e.path) : LoadFbxObjCpu(e.path);
     if (!model.valid) { err = "cannot parse model"; return false; }
+    {
+        size_t tris = model.indices.size() / 3;
+        char t[32];
+        if (tris >= 1000) snprintf(t, sizeof(t), "%.1fk", tris / 1000.0); else snprintf(t, sizeof(t), "%zu", tris);
+        out.label = t;
+    }
     int side = sheet ? kEmbedModelView : maxSide;
     if (rt.w != side || rt.h != side) rt.Create(gfx.device, side, side, /*withStaging*/ true);
     bool ok = sheet ? RenderModelSheet(gfx, renderer, rt, model, out.px)
@@ -127,7 +149,9 @@ RgbaImage ComposeContactSheet(const std::vector<RgbaImage>& tiles, int cell, int
         } else {
             Fill(sheet, cx + 4, cy + 4, cell - 8, cell - 8, 90, 40, 40); // unrenderable
         }
-        DrawNumber(sheet, cx + 4, cy + 4, (int)i + 1, std::max(2, cell / 48));
+        int scale = std::max(2, cell / 48);
+        DrawLabel(sheet, cx + 4, cy + 4, std::to_string(i + 1), scale);
+        if (!t.label.empty()) DrawLabel(sheet, cx + 4, cy + cell - 7 * scale - 4, t.label, scale);
     }
     return sheet;
 }

@@ -10,6 +10,7 @@
 struct RgbaImage {
     int w = 0, h = 0;
     std::vector<uint8_t> px;
+    std::string label;   // short caption burned into contact sheets ("512x512", "1.8s", "2.0k")
     bool valid() const { return w > 0 && h > 0 && px.size() == (size_t)w * h * 4; }
 };
 

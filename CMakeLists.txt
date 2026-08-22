@@ -88,8 +88,12 @@ target_sources(asset-browser PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/version.rc")
 target_link_libraries(asset-browser PRIVATE abcore imgui_lib)
 target_compile_options(asset-browser PRIVATE /utf-8 /EHsc /MP)
 
-# Headless CLI for scripts and coding agents (console subsystem).
-add_executable(ab src/cli.cpp)
+# Headless CLI for scripts and coding agents (console subsystem). The agent
+# skill is embedded so `ab skill --install` works from any install location.
+file(READ skills/finding-game-assets/SKILL.md AB_SKILL_MD)
+configure_file(src/skill_data.cpp.in skill_data.cpp @ONLY)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS skills/finding-game-assets/SKILL.md)
+add_executable(ab src/cli.cpp "${CMAKE_CURRENT_BINARY_DIR}/skill_data.cpp")
 target_link_libraries(ab PRIVATE abcore)
 target_compile_options(ab PRIVATE /utf-8 /EHsc /MP)
 target_compile_definitions(ab PRIVATE ASSET_BROWSER_VERSION="${ASSET_BROWSER_VERSION}")

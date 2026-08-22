@@ -34,6 +34,9 @@
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 
+extern const char* const kSkillName;
+extern const char* const kSkillMarkdown;
+
 namespace {
 
 enum Exit { ExitOk = 0, ExitError = 1, ExitUsage = 2, ExitNoSemantic = 3, ExitNotFound = 4 };
@@ -62,6 +65,7 @@ struct Options {
     bool trimSilence = false;
     bool yes = false;
     bool manifest = true;
+    bool install = false;      // skill --install
     // previews
     std::wstring sheet;        // search --sheet out.png
     std::wstring preview;      // inspect --preview out.png
@@ -77,6 +81,7 @@ Usage:
   ab inspect <id|relPath>          dimensions / triangles / duration for one asset
              [--preview out.png]   also write an image: fitted texture, waveform, or 6-view model sheet
   ab export  <id|relPath> --to <dir> [options]   copy or convert into a project
+  ab skill [--install [dir]]       print the agent skill; --install writes it to ~/.claude/skills
   ab --help | --version
 
 Search options:
@@ -86,7 +91,7 @@ Search options:
   --pack <name>       restrict to one top-level folder
   --limit N           results per page (default 10)
   --offset N          skip the first N results
-  --sort relevance|name|newest|largest
+  --sort relevance|name|newest|largest   (name search only; semantic results are by score)
   --sheet <out.png>   write a numbered contact sheet of this page of results
   --tile N            contact sheet cell size in px (default 256)
 
@@ -99,7 +104,7 @@ Query syntax (same as the GUI search box):
 Export options:
   --to <dir>          destination folder (created if missing)
   --name <stem>       output file name without extension (default: asset name)
-  --resize N          textures: scale so the longest side is N px (writes PNG)
+  --resize N          textures: downscale so the longest side is N px (never upscales; writes PNG)
   --format <ext>      models: glb|gltf|fbx|obj|dae variant to copy
                       textures: png (forces re-encode)   audio: wav (forces decode)
   --range A-B         audio: seconds to keep, e.g. 0.5-2.25
@@ -123,6 +128,7 @@ Examples:
   ab inspect 61d3f6f2393f9544 --preview look.png
   ab export 61d3f6f2393f9544 --to ./assets/textures --resize 512
   ab export 622c944aa6f7aeba --to ./assets/sfx --range 0-1.5 --trim-silence
+  ab skill --install          # teach Claude Code when and how to use ab
 
 JSON results carry a stable "id" (hash of the library-relative path) plus the
 absolute "path"; pass the id to --similar.
@@ -182,6 +188,7 @@ bool ParseArgs(int argc, wchar_t** argv, Options& o, std::string& err) {
         else if (a == "--trim-silence") o.trimSilence = true;
         else if (a == "--yes" || a == "-y") o.yes = true;
         else if (a == "--no-manifest") o.manifest = false;
+        else if (a == "--install") o.install = true;
         else if (a == "--limit" || a == "--offset") {
             if (!need(i, v)) return false;
             int n = atoi(v.c_str());
@@ -282,6 +289,8 @@ int CmdSearch(const Options& o, AssetDatabase& db) {
     else if (o.sort == "largest") req.sortMode = 3;
     else if (o.sort != "relevance") { fprintf(stderr, "error: --sort must be relevance, name, newest or largest\n"); return ExitUsage; }
 
+    if (req.sortMode != 0 && (o.semantic || !o.similar.empty()))
+        return Fail("--sort replaces semantic ranking; drop --sort (results are already by relevance) or drop --semantic/--similar", ExitUsage);
     bool wantsIndex = o.semantic || !o.similar.empty();
     for (const SearchTerm& t : req.query.terms) if (t.kind == SearchTermKind::Indexed) wantsIndex = true;
 
@@ -358,6 +367,12 @@ int CmdSearch(const Options& o, AssetDatabase& db) {
         for (size_t n = from; n < to; ++n) {
             int i = r.filtered[n];
             json j = EntryJson(db.entries[i], db.root);
+            if (db.entries[i].type == AssetType::Texture) { // header-only read, cheap per page
+                std::vector<uint8_t> bytes; int w = 0, h = 0, comp = 0;
+                if (ReadFileBytes(db.entries[i].path, bytes) && stbi_info_from_memory(bytes.data(), (int)bytes.size(), &w, &h, &comp)) {
+                    j["width"] = w; j["height"] = h;
+                }
+            }
             if (!r.semanticScore.empty()) j["score"] = r.semanticScore[i];
             results.push_back(std::move(j));
         }
@@ -583,6 +598,10 @@ int ExportTexture(const Options& o, const AssetEntry& e, const fs::path& dir, co
     if (!ok) return Fail(err.empty() ? "png write failed" : err);
     outputs.push_back(dst);
     transform = {{"from", {w, h}}, {"to", {nw, nh}}, {"format", "png"}};
+    if (o.resize > 0 && nw < o.resize && nh < o.resize) {
+        transform["note"] = "source smaller than --resize; not upscaled";
+        fprintf(stderr, "warning: %dx%d source is smaller than %d; exported at original size (no upscaling)\n", w, h, o.resize);
+    }
     return ExitOk;
 }
 
@@ -736,6 +755,41 @@ int CmdExport(const Options& o, AssetDatabase& db) {
     return ExitOk;
 }
 
+// ---------------------------------------------------------------- skill
+
+std::string SkillText() {
+    wchar_t exe[MAX_PATH * 2];
+    DWORD n = GetModuleFileNameW(nullptr, exe, ARRAYSIZE(exe));
+    std::string path = n ? WideToUtf8(std::wstring(exe, n)) : "ab";
+    for (char& c : path) if (c == '\\') c = '/';
+    std::string text = kSkillMarkdown;
+    for (size_t at; (at = text.find("@AB_EXE@")) != std::string::npos;) text.replace(at, 8, path);
+    return text;
+}
+
+int CmdSkill(const Options& o) {
+    std::string text = SkillText();
+    if (!o.install) { fputs(text.c_str(), stdout); return ExitOk; }
+    fs::path dir;
+    if (!o.positional.empty()) dir = fs::absolute(fs::path(Utf8ToWide(o.positional[0])));
+    else {
+        wchar_t* home = nullptr; size_t len = 0;
+        if (_wdupenv_s(&home, &len, L"USERPROFILE") || !home) return Fail("USERPROFILE is not set; pass a target directory");
+        dir = fs::path(home) / L".claude" / L"skills";
+        free(home);
+    }
+    dir /= Utf8ToWide(kSkillName);
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    fs::path file = dir / L"SKILL.md";
+    std::ofstream out(file, std::ios::binary | std::ios::trunc);
+    if (!out) return Fail("cannot write " + WideToUtf8(file.wstring()));
+    out << text;
+    if (o.json) printf("%s\n", json({{"installed", WideToUtf8(file.wstring())}}).dump(2).c_str());
+    else printf("installed %s\n", WideToUtf8(file.wstring()).c_str());
+    return ExitOk;
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -749,6 +803,7 @@ int wmain(int argc, wchar_t** argv) {
     if (o.command == "help") { fputs(kUsage, stdout); return ExitOk; }
     if (o.command == "version") { printf("ab %s\n", ASSET_BROWSER_VERSION); return ExitOk; }
     if (!_isatty(_fileno(stdout))) o.json = true;
+    if (o.command == "skill") return CmdSkill(o);
 
     static const char* kCommands[] = {"search", "packs", "status", "inspect", "export"};
     if (std::find(std::begin(kCommands), std::end(kCommands), o.command) == std::end(kCommands)) {

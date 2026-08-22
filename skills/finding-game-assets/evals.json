@@ -1,0 +1,32 @@
+[
+  {
+    "skills": ["finding-game-assets"],
+    "query": "I'm making a low-poly Godot dungeon crawler. Find me a stone wall texture for the corridors and put it in res://textures at 512px.",
+    "expected_behavior": [
+      "Runs ab status before searching, and uses --semantic only if the index is reported available",
+      "Searches with a description plus --type tex and --sheet, then reads the sheet PNG before choosing",
+      "Runs ab inspect on the chosen id and mentions powerOfTwo / dimensions in the decision",
+      "Exports with --to <project>/textures --resize 512 and reports the absolute output path",
+      "Tells the user the export was recorded in assets-used.json"
+    ]
+  },
+  {
+    "skills": ["finding-game-assets"],
+    "query": "Add a door-opening sound to the Phaser game in this folder. Keep it short and trim any silence.",
+    "expected_behavior": [
+      "Searches audio by description (or name search with a short query if semantic is unavailable)",
+      "Uses ab inspect to check seconds / trimmed duration before exporting",
+      "Exports with --trim-silence (and --range if the clip is long) into the project's audio folder",
+      "Does not overwrite an existing file without --yes; asks or renames instead"
+    ]
+  },
+  {
+    "skills": ["finding-game-assets"],
+    "query": "I liked the barrel prop you added earlier (id 9b986df547746312). Find a few more props in the same style as OBJ for my Three.js scene.",
+    "expected_behavior": [
+      "Uses ab search --similar 9b986df547746312 --type model rather than a new text query",
+      "Renders a sheet and picks by looking",
+      "Exports with --format obj and notes that the .mtl came along; if a model has no OBJ variant, reports the available formats from the exit-4 message instead of failing silently"
+    ]
+  }
+]
