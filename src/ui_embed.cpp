@@ -271,6 +271,8 @@ void App::EmbedProbeDurations() {
 void App::EmbedStartIndexing(bool rebuild, int types) {
     if (embedIndexer.Running() || embedKey.empty() || db.root.empty()) return;
     embedIndexer.Join();
+    // Resetting the index drops every type's vectors, so a reset always re-queues all types.
+    if (rebuild || (embedIndexLoaded && !embedIndex.Matches(embedSettings))) types = EmbedAll;
     if (rebuild || !embedIndexLoaded || !embedIndex.Matches(embedSettings)) {
         embedIndex.Reset(embedSettings.model, embedSettings.mode, embedSettings.dims, EmbedIndexPathForRoot());
         embedIndexLoaded = true;
@@ -692,6 +694,13 @@ void App::DrawEmbedWindow() {
         return embedPriceError.empty() ? " (price unknown)" : " (price unknown: " + embedPriceError + ")";
     };
     bool canIndex = !embedKey.empty() && !db.scanning && !running;
+    // A settings mismatch means the next run must reset the index; only the
+    // all-types rebuild button may do that, or the other types would vanish.
+    bool canIndexType = canIndex && !mismatch;
+    auto mismatchTip = [&] {
+        if (mismatch && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Settings changed: use \"Rebuild index\" below to re-embed every asset type.");
+    };
 
     // -- textures
     double texCost = embedUnindexedTex * (double)kEmbedTokensPerImage * embedPrices.image;
@@ -704,11 +713,12 @@ void App::DrawEmbedWindow() {
     }
     if (embedUnindexedTex > 0) {
         ImGui::SameLine();
-        ImGui::BeginDisabled(!canIndex);
+        ImGui::BeginDisabled(!canIndexType);
         char label[64];
         snprintf(label, sizeof(label), "Index %d textures##tex", embedUnindexedTex);
-        if (ImGui::Button(label)) EmbedStartIndexing(mismatch, EmbedTex);
+        if (ImGui::Button(label)) EmbedStartIndexing(false, EmbedTex);
         ImGui::EndDisabled();
+        mismatchTip();
     }
 
     // -- models: six rendered views in one contact sheet, priced like an image
@@ -718,12 +728,13 @@ void App::DrawEmbedWindow() {
         if (priceKnown) ImGui::Text("Models: %d to index, about $%.4f", embedUnindexedModel, modelCost);
         else ImGui::Text("Models: %d to index%s", embedUnindexedModel, priceNote().c_str());
         ImGui::SameLine();
-        ImGui::BeginDisabled(!canIndex);
+        ImGui::BeginDisabled(!canIndexType);
         char label[64];
         snprintf(label, sizeof(label), "Index %d models##model", embedUnindexedModel);
-        if (ImGui::Button(label)) EmbedStartIndexing(mismatch, EmbedModel);
+        if (ImGui::Button(label)) EmbedStartIndexing(false, EmbedModel);
         ImGui::EndDisabled();
-        if (ImGui::IsItemHovered())
+        mismatchTip();
+        if (!mismatch && ImGui::IsItemHovered())
             ImGui::SetTooltip("Each model is rendered in-app from six angles into one image.\n"
                               "GLB, glTF, FBX and OBJ only; DAE cannot be rendered and is skipped.");
     } else {
@@ -751,13 +762,14 @@ void App::DrawEmbedWindow() {
     }
     if (embedUnindexedAudio > 0) {
         ImGui::SameLine();
-        ImGui::BeginDisabled(!canIndex);
+        ImGui::BeginDisabled(!canIndexType);
         char label[64];
         snprintf(label, sizeof(label), "Index %d sounds##audio", embedUnindexedAudio);
-        if (ImGui::Button(label)) EmbedStartIndexing(mismatch, EmbedAudio);
+        if (ImGui::Button(label)) EmbedStartIndexing(false, EmbedAudio);
         ImGui::EndDisabled();
+        mismatchTip();
     }
-    if (ImGui::IsItemHovered() && embedUnindexedAudio > 0)
+    if (!mismatch && ImGui::IsItemHovered() && embedUnindexedAudio > 0)
         ImGui::SetTooltip("Only the first %.0f seconds of each clip are embedded (16 kHz mono).\n"
                           "Audio costs about 14x more per item than textures.", kEmbedAudioMaxSeconds);
     if (todo > 0)
