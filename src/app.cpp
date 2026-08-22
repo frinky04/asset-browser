@@ -161,7 +161,7 @@ void App::Frame() {
     if (!pendingDropFile.empty()) {
         std::wstring file = std::move(pendingDropFile);
         pendingDropFile.clear();
-        if (SemanticReady()) DropImageQuery(file);
+        if (SemanticReady()) DropFileQuery(file);
     }
 
     float menuH = 0;

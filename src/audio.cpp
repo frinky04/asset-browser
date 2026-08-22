@@ -7,6 +7,10 @@
 // stb_vorbis is compiled as C in its own TU (stb_vorbis_impl.c)
 extern "C" int stb_vorbis_decode_memory(const unsigned char* mem, int len,
                                         int* channels, int* sample_rate, short** output);
+struct stb_vorbis;
+extern "C" stb_vorbis* stb_vorbis_open_memory(const unsigned char* data, int len, int* error, const void* alloc);
+extern "C" float stb_vorbis_stream_length_in_seconds(stb_vorbis* f);
+extern "C" void stb_vorbis_close(stb_vorbis* f);
 
 namespace {
 
@@ -55,6 +59,29 @@ PcmData DecodeWithMiniaudio(const std::wstring& path) {
 }
 
 } // namespace
+
+double AudioDurationSeconds(const std::wstring& path) {
+    std::wstring lower = ToLowerAsciiW(path);
+    if (lower.size() >= 4 && lower.compare(lower.size() - 4, 4, L".ogg") == 0) {
+        std::vector<uint8_t> bytes;
+        if (!ReadFileBytes(path, bytes) || bytes.empty()) return 0;
+        int err = 0;
+        stb_vorbis* v = stb_vorbis_open_memory(bytes.data(), (int)bytes.size(), &err, nullptr);
+        if (!v) return 0;
+        double sec = stb_vorbis_stream_length_in_seconds(v);
+        stb_vorbis_close(v);
+        return sec > 0 ? sec : 0;
+    }
+    ma_decoder_config cfg = ma_decoder_config_init(ma_format_f32, 0, 0);
+    ma_decoder dec;
+    if (ma_decoder_init_file_w(path.c_str(), &cfg, &dec) != MA_SUCCESS) return 0;
+    ma_uint64 frames = 0;
+    double sec = 0;
+    if (ma_decoder_get_length_in_pcm_frames(&dec, &frames) == MA_SUCCESS && dec.outputSampleRate)
+        sec = (double)frames / dec.outputSampleRate;
+    ma_decoder_uninit(&dec);
+    return sec;
+}
 
 PcmData DecodeAudioFile(const std::wstring& path) {
     std::wstring lower = ToLowerAsciiW(path);

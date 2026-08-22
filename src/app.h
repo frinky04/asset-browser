@@ -82,7 +82,17 @@ struct App {
     ID3D11ShaderResourceView* semanticImageSRV = nullptr; // preview of a pasted/dropped query image
     int semanticImageW = 0, semanticImageH = 0;
     int semanticAssetIndex = -1;              // source texture of a "find similar" query
-    int embedIndexableCount = 0, embedUnindexedCount = 0; // refreshed ~1/s in PumpEmbed
+    // refreshed ~1/s in PumpEmbed
+    int embedIndexableCount = 0, embedUnindexedCount = 0;
+    int embedUnindexedTex = 0, embedUnindexedAudio = 0;
+    double embedAudioSecondsKnown = 0;        // capped seconds of un-indexed audio with probed durations
+    int embedAudioUnknown = 0;                // un-indexed audio still awaiting a duration probe
+    // audio duration probing (for the cost estimate)
+    std::unordered_map<std::string, double> audioDurations; // relPath -> seconds (0 = unreadable)
+    std::thread embedProbeThread;
+    std::mutex embedProbeMutex;
+    std::vector<std::pair<std::string, double>> embedProbeResults;
+    bool embedProbing = false, embedProbeDone = false;
     double embedCountedAt = -1;
     size_t embedCountedEntries = 0;
     bool embedIndexerWasRunning = false;
@@ -100,7 +110,7 @@ struct App {
     std::thread embedPriceThread;
     std::mutex embedPriceMutex;
     bool embedPriceReady = false, embedPriceFetched = false, embedPriceFetching = false;
-    double embedPricePerToken = 0;
+    EmbedClient::Prices embedPrices;
     std::string embedPriceError;
     std::string embedPriceModel;
     std::thread embedKeyTestThread;
@@ -115,18 +125,22 @@ struct App {
     void EmbedShutdown();
     void PumpEmbed();                       // main thread, per frame
     void DrawEmbedWindow();
-    void EmbedStartIndexing(bool rebuild);
-    std::vector<int> EmbedUnindexed() const; // indexable entries lacking a current vector
+    enum EmbedTypes { EmbedTex = 1, EmbedAudio = 2, EmbedAll = 3 };
+    void EmbedStartIndexing(bool rebuild, int types = EmbedAll);
+    std::vector<int> EmbedUnindexed(int types = EmbedAll) const; // indexable entries lacking a current vector
+    void EmbedProbeDurations();             // kick off / collect background duration probes
     std::wstring EmbedIndexPathForRoot() const;
     bool SemanticReady() const { return !embedKey.empty() && embedIndexLoaded && !embedIndex.Empty(); }
     void SemanticQueryText(const std::string& text);
     void SemanticQueryImage(const uint8_t* rgba, int w, int h, const std::string& label);
+    void SemanticQueryAudio(const PcmData& pcm, uint64_t f0, uint64_t f1, const std::string& label);
+    void SemanticQueryPreviewSelection();   // audio preview: selected range (or whole clip)
     void SemanticQueryAsset(int index);     // "find similar": uses stored vector, no API call
     void SemanticClear();
     void SemanticNotify(const std::string& text);
     bool SemanticActive() const { return semanticSearch && semanticKind != SemanticKind::None && !semanticQuery.empty(); }
     bool PasteImageQuery();                 // clipboard bitmap or file -> image query
-    bool DropImageQuery(const std::wstring& file); // dropped image file -> image query
+    bool DropFileQuery(const std::wstring& file);  // dropped/copied image or audio file -> query
     std::wstring pendingDropFile;           // set by WM_DROPFILES (main.cpp), consumed in Frame
 
     // drag-out (executed by main.cpp after the ImGui frame)

@@ -179,6 +179,7 @@ const float* EmbedIndex::VectorFor(const AssetEntry& e) const {
 // ---------------------------------------------------------------- filename text
 
 bool EmbedIsIndexable(const AssetEntry& e) {
+    if (e.type == AssetType::Audio) return true;
     if (e.type != AssetType::Texture) return false;
     static const char* aux[] = { "normal", "rough", "metal", "occlusion", "_ao", "height",
                                  "displace", "emiss", "opacity", "specular", "gloss", "bump",
@@ -218,6 +219,67 @@ std::string EmbedFilenameWords(const std::string& stem) {
     for (char c : s) { if (c == ' ') flush(); else tok += c; }
     flush();
     return out;
+}
+
+std::string EmbedHybridText(AssetType type, const std::string& relPath, const std::string& name) {
+    std::string words = EmbedFilenameWords(name);
+    if (type == AssetType::Audio) {
+        // Folder names in SFX packs are category labels ("Doors & Gates", "UI"):
+        // the research showed they rescue text queries for short, generic sounds.
+        std::string folder;
+        size_t slash = relPath.rfind('/');
+        if (slash != std::string::npos) {
+            size_t prev = relPath.rfind('/', slash - 1);
+            folder = relPath.substr(prev == std::string::npos ? 0 : prev + 1, slash - (prev == std::string::npos ? 0 : prev + 1));
+        }
+        std::string folderWords = EmbedFilenameWords(folder);
+        std::string all = folderWords;
+        if (!words.empty()) { if (!all.empty()) all += ' '; all += words; }
+        return all.empty() ? "sound" : "sound: " + all;
+    }
+    return words.empty() ? "texture" : "texture: " + words;
+}
+
+double EncodeWav16kMono(const PcmData& pcm, uint64_t f0, uint64_t f1, std::vector<uint8_t>& out) {
+    out.clear();
+    if (!pcm.valid || pcm.channels == 0 || pcm.sampleRate == 0) return 0;
+    f0 = (std::min)(f0, pcm.frames);
+    f1 = (std::min)(f1, pcm.frames);
+    if (f1 <= f0) return 0;
+    uint64_t maxFrames = (uint64_t)(kEmbedAudioMaxSeconds * pcm.sampleRate);
+    if (f1 - f0 > maxFrames) f1 = f0 + maxFrames;
+
+    const uint32_t outRate = 16000;
+    uint64_t srcFrames = f1 - f0;
+    uint64_t outFrames = (uint64_t)((double)srcFrames * outRate / pcm.sampleRate);
+    if (outFrames == 0) return 0;
+    std::vector<int16_t> mono(outFrames);
+    const float* src = pcm.samples.data() + (size_t)f0 * pcm.channels;
+    double step = (double)pcm.sampleRate / outRate;
+    for (uint64_t i = 0; i < outFrames; ++i) {
+        // linear interpolation between neighbouring source frames, channels averaged
+        double pos = i * step;
+        uint64_t a = (uint64_t)pos;
+        uint64_t b = (std::min)(a + 1, srcFrames - 1);
+        float t = (float)(pos - a);
+        float va = 0, vb = 0;
+        for (uint32_t c = 0; c < pcm.channels; ++c) {
+            va += src[a * pcm.channels + c];
+            vb += src[b * pcm.channels + c];
+        }
+        float v = (va + (vb - va) * t) / pcm.channels;
+        v = (std::max)(-1.0f, (std::min)(1.0f, v));
+        mono[i] = (int16_t)(v * 32767.0f);
+    }
+    uint32_t dataBytes = (uint32_t)(outFrames * 2);
+    uint32_t riffSize = 36 + dataBytes, fmtSize = 16, byteRate = outRate * 2;
+    uint16_t fmt16 = 1, channels = 1, blockAlign = 2, bits = 16;
+    auto put = [&](const void* p, size_t n) { out.insert(out.end(), (const uint8_t*)p, (const uint8_t*)p + n); };
+    put("RIFF", 4); put(&riffSize, 4); put("WAVE", 4);
+    put("fmt ", 4); put(&fmtSize, 4); put(&fmt16, 2); put(&channels, 2);
+    put(&outRate, 4); put(&byteRate, 4); put(&blockAlign, 2); put(&bits, 2);
+    put("data", 4); put(&dataBytes, 4); put(mono.data(), dataBytes);
+    return (double)outFrames / outRate;
 }
 
 // ---------------------------------------------------------------- http
@@ -343,11 +405,12 @@ EmbedResult EmbedClient::Call(const std::string& body) const {
     return res;
 }
 
-EmbedResult EmbedClient::EmbedImage(const std::vector<uint8_t>& jpeg, const std::string& text) const {
+EmbedResult EmbedClient::EmbedMedia(const std::vector<uint8_t>& data, const char* mime, const std::string& text) const {
     json content = json::array();
     if (!text.empty()) content.push_back({ {"type", "text"}, {"text", text} });
+    // Audio rides in the same image_url part as images (verified: data:audio/wav works).
     content.push_back({ {"type", "image_url"},
-                        {"image_url", { {"url", "data:image/jpeg;base64," + Base64(jpeg.data(), jpeg.size())} }} });
+                        {"image_url", { {"url", "data:" + std::string(mime) + ";base64," + Base64(data.data(), data.size())} }} });
     json body = { {"model", model}, {"dimensions", dims},
                   {"input", json::array({ { {"role", "user"}, {"content", content} } })} };
     return Call(body.dump());
@@ -358,12 +421,13 @@ EmbedResult EmbedClient::EmbedText(const std::string& text) const {
     return Call(body.dump());
 }
 
-bool EmbedClient::FetchPricePerToken(const std::string& apiKey, const std::string& model,
-                                     double& price, std::string& error) {
-    price = 0;
+bool EmbedClient::FetchPrices(const std::string& apiKey, const std::string& model,
+                              Prices& prices, std::string& error) {
+    prices = {};
     // Embedding models are listed separately from chat models. Image inputs are
-    // billed at pricing.image per token (258 tokens per image for Gemini); fall
-    // back to the prompt price for models without a separate image rate.
+    // billed at pricing.image per token (258 tokens per image for Gemini) and
+    // audio at pricing.audio (25 tokens per second); fall back to the prompt
+    // price for models without separate media rates.
     HttpResponse r = HttpRequest(L"GET", L"/api/v1/embeddings/models", apiKey, "");
     if (!r.ok) { error = r.error; return false; }
     if (r.status != 200) { error = ApiErrorMessage(r.body, r.status); return false; }
@@ -377,8 +441,12 @@ bool EmbedClient::FetchPricePerToken(const std::string& apiKey, const std::strin
     for (const json& m : j["data"]) {
         if (!m.is_object() || m.value("id", "") != model) continue;
         if (m.contains("pricing") && m["pricing"].is_object()) {
-            price = toPrice(m["pricing"].value("image", json()));
-            if (price <= 0) price = toPrice(m["pricing"].value("prompt", json()));
+            const json& p = m["pricing"];
+            double prompt = toPrice(p.value("prompt", json()));
+            prices.image = toPrice(p.value("image", json()));
+            prices.audio = toPrice(p.value("audio", json()));
+            if (prices.image <= 0) prices.image = prompt;
+            if (prices.audio <= 0) prices.audio = prompt;
         }
         return true;
     }
@@ -433,9 +501,9 @@ static double NowSeconds() {
 }
 
 void EmbedIndexer::Start(EmbedIndex* idx, EmbedClient c, EmbedMode md, int n,
-                         std::vector<EmbedJob> list, ThumbFn fn) {
+                         std::vector<EmbedJob> list, MediaFn fn) {
     Join();
-    index = idx; client = std::move(c); mode = md; thumbFn = std::move(fn); jobs = std::move(list);
+    index = idx; client = std::move(c); mode = md; mediaFn = std::move(fn); jobs = std::move(list);
     next = 0; done = 0; failed = 0; total = (int)jobs.size();
     cancel = false; aborted = false; abortReason.clear();
     { std::lock_guard<std::mutex> l(m); cost = 0; errors.clear(); }
@@ -465,15 +533,11 @@ void EmbedIndexer::Worker() {
             if (errors.size() < 20) errors.push_back(job.relPath + ": " + why);
         };
 
-        int w = 0, h = 0;
-        std::vector<uint8_t> rgba, jpeg;
-        if (!thumbFn(job, w, h, rgba) || !EncodeJpeg(rgba.data(), w, h, jpeg)) { fail("could not decode"); continue; }
-        std::string text;
-        if (mode == EmbedMode::Hybrid) {
-            std::string words = EmbedFilenameWords(job.name);
-            text = words.empty() ? "texture" : "texture: " + words;
-        }
-        EmbedResult r = client.EmbedImage(jpeg, text);
+        std::vector<uint8_t> data;
+        const char* mime = nullptr;
+        if (!mediaFn(job, data, mime) || data.empty() || !mime) { fail("could not decode"); continue; }
+        std::string text = mode == EmbedMode::Hybrid ? EmbedHybridText(job.type, job.relPath, job.name) : "";
+        EmbedResult r = client.EmbedMedia(data, mime, text);
         if (!r.ok) {
             if (r.httpStatus == 401 || r.httpStatus == 403) {
                 std::lock_guard<std::mutex> l(m);

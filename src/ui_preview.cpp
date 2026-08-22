@@ -342,6 +342,16 @@ void App::DrawPreview() {
                 ImGui::Text("%.2f / %.2f s", contextCursorSec, contextLenSec);
             else
                 ImGui::TextDisabled("%.2f s", contextLenSec);
+            if (SemanticReady()) {
+                ImGui::SameLine();
+                ImGui::BeginDisabled(semanticBusy);
+                if (ImGui::Button(hasSel ? "Search similar to selection" : "Search similar"))
+                    SemanticQueryPreviewSelection();
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Embed %s (first %.0f s) and rank the library by similarity. One paid request.",
+                                      hasSel ? "the selected range" : "this clip", kEmbedAudioMaxSeconds);
+            }
 
             // --- seamless loop tuning ---
             float tuneLoopWidth = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x +

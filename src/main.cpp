@@ -32,7 +32,7 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         return 0;
     case WM_DROPFILES: {
-        // Image files dropped on the window become a semantic image query.
+        // Image or audio files dropped on the window become a semantic query.
         HDROP drop = (HDROP)wParam;
         wchar_t path[MAX_PATH * 2];
         if (DragQueryFileW(drop, 0, path, ARRAYSIZE(path))) g_app.pendingDropFile = path;

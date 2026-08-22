@@ -1,6 +1,7 @@
 #pragma once
 // BYOK embedding search (OpenRouter). Index textures as vectors, rank by cosine.
 #include "assets.h"
+#include "audio.h"
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -51,9 +52,18 @@ private:
     std::vector<Pending> pending;
 };
 
-// True for textures worth indexing (colour/albedo maps, not normal/roughness/...).
+// Textures worth indexing (colour/albedo maps, not normal/roughness/...) and every sound.
 bool EmbedIsIndexable(const AssetEntry& e);
 std::string EmbedFilenameWords(const std::string& stem);  // "Wall_BrickRed_01" -> "wall brick red"
+// Metadata sent alongside the media in hybrid mode ("texture: ..." / "sound: <folder> <name>").
+std::string EmbedHybridText(AssetType type, const std::string& relPath, const std::string& name);
+
+constexpr int    kEmbedTokensPerImage = 258;      // flat per image (measured)
+constexpr int    kEmbedTokensPerAudioSecond = 25; // linear (measured)
+constexpr double kEmbedAudioMaxSeconds = 12.0;    // only the first N seconds of a clip are embedded
+
+// First kEmbedAudioMaxSeconds of [f0, f1) as 16 kHz mono 16-bit WAV bytes; returns seconds encoded.
+double EncodeWav16kMono(const PcmData& pcm, uint64_t f0, uint64_t f1, std::vector<uint8_t>& out);
 
 struct EmbedResult {
     bool ok = false;
@@ -69,11 +79,11 @@ struct EmbedClient {
     std::string model;
     int dims = 768;
 
-    EmbedResult EmbedImage(const std::vector<uint8_t>& jpeg, const std::string& text /*"" = image only*/) const;
+    // media: JPEG ("image/jpeg") or WAV ("audio/wav"); text "" = media only
+    EmbedResult EmbedMedia(const std::vector<uint8_t>& data, const char* mime, const std::string& text) const;
     EmbedResult EmbedText(const std::string& text) const;
-    // price per prompt token for `model` (0 if unknown); blocks on network
-    static bool FetchPricePerToken(const std::string& apiKey, const std::string& model,
-                                   double& pricePerToken, std::string& error);
+    struct Prices { double image = 0, audio = 0; }; // per token
+    static bool FetchPrices(const std::string& apiKey, const std::string& model, Prices& prices, std::string& error);
     static bool ValidateKey(const std::string& apiKey, std::string& error);
 
 private:
@@ -89,6 +99,7 @@ bool SaveApiKey(const std::wstring& file, const std::string& key);  // empty key
 
 struct EmbedJob {
     int index = -1;
+    AssetType type = AssetType::Texture;
     std::string relPath, name;
     std::wstring path;
     uint64_t mtime = 0, size = 0;
@@ -97,10 +108,11 @@ struct EmbedJob {
 // Background indexing run over a list of assets.
 class EmbedIndexer {
 public:
-    using ThumbFn = std::function<bool(const EmbedJob&, int& w, int& h, std::vector<uint8_t>& rgba)>;
+    // Produce the upload bytes for a job (JPEG thumbnail or 16 kHz WAV) and its MIME type.
+    using MediaFn = std::function<bool(const EmbedJob&, std::vector<uint8_t>& data, const char*& mime)>;
 
     void Start(EmbedIndex* index, EmbedClient client, EmbedMode mode, int threads,
-               std::vector<EmbedJob> jobs, ThumbFn thumbFn);
+               std::vector<EmbedJob> jobs, MediaFn mediaFn);
     void Cancel();  // asynchronous; workers exit after their current request
     void Join();
     bool Running() const { return active > 0; }   // workers still going
@@ -118,7 +130,7 @@ private:
     EmbedIndex* index = nullptr;
     EmbedClient client;
     EmbedMode mode = EmbedMode::Hybrid;
-    ThumbFn thumbFn;
+    MediaFn mediaFn;
     std::vector<EmbedJob> jobs;
     std::atomic<size_t> next{0};
     std::atomic<bool> cancel{false};

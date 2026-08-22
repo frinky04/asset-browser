@@ -15,7 +15,6 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr int kTokensPerImage = 258; // flat per image for gemini-embedding-2 (measured)
 
 std::wstring EmbedDir() { return AppDataDir(L"embeddings"); }
 std::wstring SettingsFile() { return EmbedDir() + L"\\settings.json"; }
@@ -126,6 +125,7 @@ void App::EmbedShutdown() {
     if (semanticJob.thread.joinable()) semanticJob.thread.join();
     if (embedPriceThread.joinable()) embedPriceThread.join();
     if (embedKeyTestThread.joinable()) embedKeyTestThread.join();
+    if (embedProbeThread.joinable()) embedProbeThread.join();
 }
 
 void App::PumpEmbed() {
@@ -140,7 +140,7 @@ void App::PumpEmbed() {
         if (embedIndexer.aborted)
             snprintf(msg, sizeof(msg), "Indexing stopped: %s", embedIndexer.abortReason.c_str());
         else
-            snprintf(msg, sizeof(msg), "Indexed %d textures for $%.4f%s", embedIndexer.done.load(),
+            snprintf(msg, sizeof(msg), "Indexed %d assets for $%.4f%s", embedIndexer.done.load(),
                      embedIndexer.costSoFar(), semanticSearch ? "." : ". Tick Semantic next to the search box to use it.");
         SemanticNotify(msg);
         embedCountedAt = -1; // refresh counts now
@@ -153,8 +153,19 @@ void App::PumpEmbed() {
         embedCountedEntries = db.entries.size();
         embedIndexableCount = 0;
         for (const AssetEntry& e : db.entries) if (EmbedIsIndexable(e)) ++embedIndexableCount;
-        embedUnindexedCount = (int)EmbedUnindexed().size();
+        embedUnindexedTex = embedUnindexedAudio = embedAudioUnknown = 0;
+        embedAudioSecondsKnown = 0;
+        for (int i : EmbedUnindexed()) {
+            const AssetEntry& e = db.entries[i];
+            if (e.type != AssetType::Audio) { ++embedUnindexedTex; continue; }
+            ++embedUnindexedAudio;
+            auto it = audioDurations.find(e.relPath);
+            if (it == audioDurations.end()) ++embedAudioUnknown;
+            else embedAudioSecondsKnown += (std::min)(it->second, kEmbedAudioMaxSeconds);
+        }
+        embedUnindexedCount = embedUnindexedTex + embedUnindexedAudio;
     }
+    if (embedWindowOpen) EmbedProbeDurations();
     // Prune index entries for files that vanished, once the scan has settled.
     if (embedIndexLoaded && !db.scanning && !embedPrunedAfterScan && !db.root.empty()) {
         embedPrunedAfterScan = true;
@@ -196,19 +207,49 @@ void App::PumpEmbed() {
 
 // ---------------------------------------------------------------- indexing
 
-std::vector<int> App::EmbedUnindexed() const {
+std::vector<int> App::EmbedUnindexed(int types) const {
     std::vector<int> out;
     bool usable = embedIndexLoaded && embedIndex.Matches(embedSettings);
     for (int i = 0; i < (int)db.entries.size(); ++i) {
         const AssetEntry& e = db.entries[i];
         if (!EmbedIsIndexable(e)) continue;
+        if (!(types & (e.type == AssetType::Audio ? EmbedAudio : EmbedTex))) continue;
         if (usable && embedIndex.HasCurrent(e)) continue;
         out.push_back(i);
     }
     return out;
 }
 
-void App::EmbedStartIndexing(bool rebuild) {
+// Reads container headers of un-indexed sounds in the background so the cost
+// estimate can be exact (25 tokens per second) instead of an upper bound.
+void App::EmbedProbeDurations() {
+    {
+        std::lock_guard<std::mutex> lock(embedProbeMutex);
+        for (auto& [rel, sec] : embedProbeResults) audioDurations[rel] = sec;
+        if (!embedProbeResults.empty()) { embedProbeResults.clear(); embedCountedAt = -1; }
+        if (embedProbeDone) { embedProbeDone = false; embedProbing = false; embedProbeThread.join(); }
+    }
+    if (embedProbing || db.scanning) return;
+    std::vector<std::pair<std::string, std::wstring>> todo;
+    for (int i : EmbedUnindexed(EmbedAudio)) {
+        const AssetEntry& e = db.entries[i];
+        if (!audioDurations.count(e.relPath)) todo.emplace_back(e.relPath, e.path);
+        if (todo.size() >= 256) break; // batch; PumpEmbed starts the next one
+    }
+    if (todo.empty()) return;
+    embedProbing = true;
+    embedProbeThread = std::thread([this, todo = std::move(todo)] {
+        for (auto& [rel, path] : todo) {
+            double sec = AudioDurationSeconds(path);
+            std::lock_guard<std::mutex> lock(embedProbeMutex);
+            embedProbeResults.emplace_back(rel, sec);
+        }
+        std::lock_guard<std::mutex> lock(embedProbeMutex);
+        embedProbeDone = true;
+    });
+}
+
+void App::EmbedStartIndexing(bool rebuild, int types) {
     if (embedIndexer.Running() || embedKey.empty() || db.root.empty()) return;
     embedIndexer.Join();
     if (rebuild || !embedIndexLoaded || !embedIndex.Matches(embedSettings)) {
@@ -218,16 +259,24 @@ void App::EmbedStartIndexing(bool rebuild) {
         SemanticClear();
     }
     std::vector<EmbedJob> jobs;
-    for (int i : EmbedUnindexed()) {
+    for (int i : EmbedUnindexed(types)) {
         const AssetEntry& e = db.entries[i];
-        jobs.push_back({ i, e.relPath, e.name, e.path, e.mtime, e.size });
+        jobs.push_back({ i, e.type, e.relPath, e.name, e.path, e.mtime, e.size });
     }
     if (jobs.empty()) return;
     EmbedClient client{ embedKey, embedSettings.model, embedSettings.dims };
     Thumbs* th = &thumbs;
     embedIndexer.Start(&embedIndex, client, embedSettings.mode, embedSettings.concurrency, std::move(jobs),
-        [th](const EmbedJob& j, int& w, int& h, std::vector<uint8_t>& rgba) {
-            return th->LoadOrMakeTextureThumb(j.path, j.mtime, j.size, w, h, rgba);
+        [th](const EmbedJob& j, std::vector<uint8_t>& data, const char*& mime) {
+            if (j.type == AssetType::Audio) {
+                PcmData pcm = DecodeAudioFile(j.path);
+                mime = "audio/wav";
+                return EncodeWav16kMono(pcm, 0, pcm.frames, data) > 0;
+            }
+            int w = 0, h = 0;
+            std::vector<uint8_t> rgba;
+            mime = "image/jpeg";
+            return th->LoadOrMakeTextureThumb(j.path, j.mtime, j.size, w, h, rgba) && EncodeJpeg(rgba.data(), w, h, data);
         });
 }
 
@@ -298,7 +347,7 @@ void App::SemanticQueryImage(const uint8_t* rgba, int w, int h, const std::strin
     EmbedClient client{ embedKey, embedIndex.model, embedIndex.dims };
     semanticBusy = true;
     semanticJob.thread = std::thread([this, id, client, jpeg = std::move(jpeg), label] {
-        EmbedResult r = client.EmbedImage(jpeg, "");
+        EmbedResult r = client.EmbedMedia(jpeg, "image/jpeg", "");
         std::lock_guard<std::mutex> lock(semanticJob.m);
         semanticJob.result = std::move(r);
         semanticJob.id = id;
@@ -306,6 +355,51 @@ void App::SemanticQueryImage(const uint8_t* rgba, int w, int h, const std::strin
         semanticJob.label = label;
         semanticJob.ready = true;
     });
+}
+
+void App::SemanticQueryAudio(const PcmData& pcm, uint64_t f0, uint64_t f1, const std::string& label) {
+    if (!SemanticReady()) return;
+    std::vector<uint8_t> wav;
+    double sec = EncodeWav16kMono(pcm, f0, f1, wav);
+    if (sec <= 0) { SemanticNotify("Could not decode that audio."); return; }
+    // waveform of exactly what is sent, as the query chip
+    PcmData part;
+    part.channels = pcm.channels; part.sampleRate = pcm.sampleRate; part.valid = true;
+    uint64_t end = (std::min)(f1, f0 + (uint64_t)(kEmbedAudioMaxSeconds * pcm.sampleRate));
+    part.frames = end - f0;
+    part.samples.assign(pcm.samples.begin() + (size_t)f0 * pcm.channels, pcm.samples.begin() + (size_t)end * pcm.channels);
+    std::vector<uint8_t> wave = RenderWaveformThumb(part, 256, 96);
+    SafeRelease(semanticImageSRV);
+    semanticImageSRV = gfx->CreateTextureSRV(wave.data(), 256, 96, false);
+    semanticImageW = 256; semanticImageH = 96;
+    semanticAssetIndex = -1;
+    semanticSearch = true;
+    semanticError.clear();
+    if (semanticJob.thread.joinable()) semanticJob.thread.join();
+    uint64_t id = ++semanticJobId;
+    EmbedClient client{ embedKey, embedIndex.model, embedIndex.dims };
+    semanticBusy = true;
+    char lbl[256];
+    snprintf(lbl, sizeof(lbl), "%s (%.1f s)", label.c_str(), sec);
+    std::string labelSec = lbl;
+    semanticJob.thread = std::thread([this, id, client, wav = std::move(wav), labelSec] {
+        EmbedResult r = client.EmbedMedia(wav, "audio/wav", "");
+        std::lock_guard<std::mutex> lock(semanticJob.m);
+        semanticJob.result = std::move(r);
+        semanticJob.id = id;
+        semanticJob.kind = SemanticKind::Image;
+        semanticJob.label = labelSec;
+        semanticJob.ready = true;
+    });
+}
+
+void App::SemanticQueryPreviewSelection() {
+    if (previewIndex < 0 || previewIndex >= (int)db.entries.size() || !previewPcm.valid) return;
+    const AssetEntry& e = db.entries[previewIndex];
+    if (e.type != AssetType::Audio) return;
+    uint64_t f0 = 0, f1 = 0;
+    bool hasSel = AudioSelectionFrames(f0, f1);
+    SemanticQueryAudio(previewPcm, f0, f1, hasSel ? "selection of " + e.name : e.name);
 }
 
 void App::SemanticQueryAsset(int index) {
@@ -327,23 +421,41 @@ void App::SemanticQueryAsset(int index) {
 }
 
 bool App::PasteImageQuery() {
+    // A copied file (Explorer) may be an image or a sound; a bitmap is an image.
+    if (IsClipboardFormatAvailable(CF_HDROP) && OpenClipboard(hwnd)) {
+        std::wstring file;
+        if (HANDLE hd = GetClipboardData(CF_HDROP)) {
+            wchar_t path[MAX_PATH * 2];
+            if (DragQueryFileW((HDROP)hd, 0, path, ARRAYSIZE(path))) file = path;
+        }
+        CloseClipboard();
+        if (!file.empty()) return DropFileQuery(file);
+    }
     std::vector<uint8_t> rgba;
     int w = 0, h = 0;
     std::string label;
     if (!ReadClipboardImage(hwnd, rgba, w, h, label)) {
-        SemanticNotify("Clipboard has no image. Copy a screenshot region or an image file, then Ctrl+V.");
+        SemanticNotify("Clipboard has no image or file. Copy a screenshot region, an image, or a sound file, then Ctrl+V.");
         return false;
     }
     SemanticQueryImage(rgba.data(), w, h, label);
     return true;
 }
 
-bool App::DropImageQuery(const std::wstring& file) {
+bool App::DropFileQuery(const std::wstring& file) {
+    std::string name = WideToUtf8(fs::path(file).filename().wstring());
+    std::string ext = ToLowerAscii(WideToUtf8(fs::path(file).extension().wstring()));
+    if (ext == ".wav" || ext == ".ogg" || ext == ".mp3" || ext == ".flac") {
+        PcmData pcm = DecodeAudioFile(file);
+        if (!pcm.valid) { SemanticNotify("Could not decode " + name + "."); return false; }
+        SemanticQueryAudio(pcm, 0, pcm.frames, name);
+        return true;
+    }
     std::vector<uint8_t> bytes;
     if (!ReadFileBytes(file, bytes)) { SemanticNotify("Could not read the dropped file."); return false; }
     int w = 0, h = 0, comp = 0;
     stbi_uc* p = stbi_load_from_memory(bytes.data(), (int)bytes.size(), &w, &h, &comp, 4);
-    if (!p) { SemanticNotify("Dropped file is not an image."); return false; }
+    if (!p) { SemanticNotify("Dropped file is not an image or sound."); return false; }
     std::vector<uint8_t> rgba(p, p + (size_t)w * h * 4);
     stbi_image_free(p);
     SemanticQueryImage(rgba.data(), w, h, WideToUtf8(fs::path(file).filename().wstring()));
@@ -364,9 +476,9 @@ void App::DrawEmbedWindow() {
         if (embedKey.empty()) { state = "Not set up: add an OpenRouter API key below."; col = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled); }
         else if (db.root.empty()) { state = "Choose an asset folder to index."; col = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled); }
         else if (running) state = "Indexing...";
-        else if (!embedIndexLoaded || embedIndex.Empty()) state = "Key ready. Index your textures to enable semantic search.";
-        else if (embedUnindexedCount > 0) state = "Semantic search ready; some textures are not indexed yet.";
-        else state = "Semantic search ready: every colour texture is indexed.";
+        else if (!embedIndexLoaded || embedIndex.Empty()) state = "Key ready. Index your textures and sounds to enable semantic search.";
+        else if (embedUnindexedCount > 0) state = "Semantic search ready; some assets are not indexed yet.";
+        else state = "Semantic search ready: every colour texture and sound is indexed.";
         ImGui::TextColored(col, "%s", state);
         ImGui::Spacing();
     }
@@ -448,10 +560,10 @@ void App::DrawEmbedWindow() {
         embedPriceModel = embedSettings.model;
         std::string key = embedKey, model = embedSettings.model;
         embedPriceThread = std::thread([this, key, model] {
-            double price = 0; std::string err;
-            EmbedClient::FetchPricePerToken(key, model, price, err);
+            EmbedClient::Prices prices; std::string err;
+            EmbedClient::FetchPrices(key, model, prices, err);
             std::lock_guard<std::mutex> lock(embedPriceMutex);
-            embedPricePerToken = price;
+            embedPrices = prices;
             embedPriceError = err;
             embedPriceReady = true;
         });
@@ -464,32 +576,79 @@ void App::DrawEmbedWindow() {
         ImGui::End();
         return;
     }
-    int indexable = embedIndexableCount, todo = embedUnindexedCount;
+    int todo = embedUnindexedCount;
     bool mismatch = embedIndexLoaded && !embedIndex.Empty() && !embedIndex.Matches(embedSettings);
 
-    ImGui::Text("%d indexable textures (colour maps; normal/roughness/etc. skipped)", indexable);
     if (embedIndexLoaded && !embedIndex.Empty())
         ImGui::Text("Index: %zu vectors, %s, %s, %d dims", embedIndex.entries.size(), embedIndex.model.c_str(),
-                    embedIndex.mode == EmbedMode::Hybrid ? "hybrid" : "image only", embedIndex.dims);
+                    embedIndex.mode == EmbedMode::Hybrid ? "hybrid" : "media only", embedIndex.dims);
     else
         ImGui::TextDisabled("No index for this library yet.");
     if (mismatch)
         ImGui::TextColored(Theme::Accent(), "Settings differ from the index. Indexing will rebuild it from scratch.");
 
-    double price = embedPricePerToken;
-    if (todo > 0) {
-        if (price > 0)
-            ImGui::Text("%d textures to index, estimated cost $%.4f", todo, todo * (double)kTokensPerImage * price);
-        else if (embedPriceFetching)
-            ImGui::Text("%d textures to index (fetching price...)", todo);
-        else
-            ImGui::Text("%d textures to index (price unknown%s%s)", todo, embedPriceError.empty() ? "" : ": ",
-                        embedPriceError.c_str());
-        ImGui::TextDisabled("Roughly %.1f min at %d parallel requests.",
-                            todo * 0.85 / (std::max)(1, embedSettings.concurrency) / 60.0, embedSettings.concurrency);
-    } else if (!running) {
-        ImGui::TextDisabled("Everything is indexed.");
+    bool priceKnown = embedPrices.image > 0 || embedPrices.audio > 0;
+    auto priceNote = [&]() -> std::string {
+        if (priceKnown) return "";
+        if (embedPriceFetching) return " (fetching price...)";
+        return embedPriceError.empty() ? " (price unknown)" : " (price unknown: " + embedPriceError + ")";
+    };
+    bool canIndex = !embedKey.empty() && !db.scanning && !running;
+
+    // -- textures
+    double texCost = embedUnindexedTex * (double)kEmbedTokensPerImage * embedPrices.image;
+    ImGui::AlignTextToFramePadding();
+    if (embedUnindexedTex > 0) {
+        if (priceKnown) ImGui::Text("Textures: %d to index, about $%.4f", embedUnindexedTex, texCost);
+        else ImGui::Text("Textures: %d to index%s", embedUnindexedTex, priceNote().c_str());
+    } else {
+        ImGui::TextDisabled("Textures: all indexed (colour maps; normal/roughness/etc. are skipped)");
     }
+    if (embedUnindexedTex > 0) {
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!canIndex);
+        char label[64];
+        snprintf(label, sizeof(label), "Index %d textures##tex", embedUnindexedTex);
+        if (ImGui::Button(label)) EmbedStartIndexing(mismatch, EmbedTex);
+        ImGui::EndDisabled();
+    }
+
+    // -- sounds: 25 tokens per second, first 12 s of each clip
+    double audioSeconds = embedAudioSecondsKnown + embedAudioUnknown * kEmbedAudioMaxSeconds; // unknown = upper bound
+    double audioCost = audioSeconds * kEmbedTokensPerAudioSecond * embedPrices.audio;
+    ImGui::AlignTextToFramePadding();
+    if (embedUnindexedAudio > 0) {
+        char secs[64];
+        if (audioSeconds >= 3600) snprintf(secs, sizeof(secs), "%.1f h", audioSeconds / 3600);
+        else if (audioSeconds >= 60) snprintf(secs, sizeof(secs), "%.1f min", audioSeconds / 60);
+        else snprintf(secs, sizeof(secs), "%.0f s", audioSeconds);
+        if (priceKnown) ImGui::Text("Sounds: %d to index, %s of audio, %s$%.4f", embedUnindexedAudio, secs,
+                                    embedAudioUnknown ? "at most " : "about ", audioCost);
+        else ImGui::Text("Sounds: %d to index, %s of audio%s", embedUnindexedAudio, secs, priceNote().c_str());
+        if (embedAudioUnknown) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(measuring %d clips...)", embedAudioUnknown);
+        }
+    } else {
+        ImGui::TextDisabled("Sounds: all indexed");
+    }
+    if (embedUnindexedAudio > 0) {
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!canIndex);
+        char label[64];
+        snprintf(label, sizeof(label), "Index %d sounds##audio", embedUnindexedAudio);
+        if (ImGui::Button(label)) EmbedStartIndexing(mismatch, EmbedAudio);
+        ImGui::EndDisabled();
+    }
+    if (ImGui::IsItemHovered() && embedUnindexedAudio > 0)
+        ImGui::SetTooltip("Only the first %.0f seconds of each clip are embedded (16 kHz mono).\n"
+                          "Audio costs about 14x more per item than textures.", kEmbedAudioMaxSeconds);
+    if (todo > 0)
+        ImGui::TextDisabled("Roughly %.1f min at %d parallel requests.",
+                            (embedUnindexedTex * 0.85 + embedUnindexedAudio * 2.5) / (std::max)(1, embedSettings.concurrency) / 60.0,
+                            embedSettings.concurrency);
+    else if (!running)
+        ImGui::TextDisabled("Everything is indexed.");
 
     if (running) {
         int done = embedIndexer.done.load(), failed = embedIndexer.failed.load(), total = embedIndexer.total.load();
@@ -503,14 +662,16 @@ void App::DrawEmbedWindow() {
         ImGui::Text("Spent so far: $%.4f", embedIndexer.costSoFar());
         if (ImGui::Button("Cancel")) embedIndexer.Cancel();
     } else {
-        ImGui::BeginDisabled(embedKey.empty() || todo == 0 || db.scanning);
+        ImGui::BeginDisabled(!canIndex || todo == 0);
         char label[64];
-        snprintf(label, sizeof(label), mismatch ? "Rebuild index (%d)" : "Index %d textures", todo);
-        if (ImGui::Button(label)) EmbedStartIndexing(mismatch);
+        snprintf(label, sizeof(label), mismatch ? "Rebuild index (%d items)" : "Index everything (%d)", todo);
+        if (ImGui::Button(label)) EmbedStartIndexing(mismatch, EmbedAll);
         ImGui::EndDisabled();
         if (embedIndexLoaded && !embedIndex.Empty() && !mismatch) {
             ImGui::SameLine();
-            if (ImGui::Button("Rebuild everything")) EmbedStartIndexing(true);
+            ImGui::BeginDisabled(!canIndex);
+            if (ImGui::Button("Rebuild from scratch")) EmbedStartIndexing(true, EmbedAll);
+            ImGui::EndDisabled();
         }
         if (embedKey.empty()) { ImGui::SameLine(); ImGui::TextDisabled("(needs an API key)"); }
         else if (db.scanning) { ImGui::SameLine(); ImGui::TextDisabled("(wait for the scan to finish)"); }
@@ -531,8 +692,9 @@ void App::DrawEmbedWindow() {
     // ---- usage
     ImGui::SeparatorText("Searching");
     ImGui::BulletText("Tick Semantic next to the search box, describe a texture, press Enter.");
-    ImGui::BulletText("Ctrl+V a screenshot region or image file, or drop an image onto the window.");
-    ImGui::BulletText("Select a texture and press S, or right-click > Find similar textures.");
+    ImGui::BulletText("Ctrl+V a screenshot region, or drop / paste an image or sound file onto the window.");
+    ImGui::BulletText("Select a texture or sound and press S, or right-click > Find similar.");
+    ImGui::BulletText("In the audio preview, select a range and click Search similar.");
     ImGui::BulletText("type:, pack:, ext: and the other filters still narrow the ranking.");
     if (ImGui::Button("Open index folder"))
         ShellExecuteW(nullptr, L"open", EmbedDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL);

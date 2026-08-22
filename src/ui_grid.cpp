@@ -179,10 +179,10 @@ void App::DrawGrid() {
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
             if (semanticAvail)
-                ImGui::SetTooltip("Rank indexed textures by meaning.\nDescribe a texture and press Enter, Ctrl+V an image,\n"
-                                  "drop an image file, or right-click a texture > Find similar.");
+                ImGui::SetTooltip("Rank indexed textures and sounds by meaning.\nDescribe one and press Enter, Ctrl+V / drop an image\n"
+                                  "or sound file, or select an asset and press S.");
             else
-                ImGui::SetTooltip("Index your textures first: Tools > Embedding search.");
+                ImGui::SetTooltip("Index your assets first: Tools > Embedding search.");
         }
     }
     ImGui::SameLine();
@@ -243,7 +243,7 @@ void App::DrawGrid() {
             }
             ImGui::BeginGroup();
             const char* kindName = semanticKind == SemanticKind::Text ? "Ranked by description"
-                                 : semanticKind == SemanticKind::Image ? "Ranked by image" : "Ranked by similarity";
+                                 : semanticKind == SemanticKind::Image ? "Ranked by example" : "Ranked by similarity";
             ImGui::TextColored(Theme::Accent(), "%s", kindName);
             if (semanticKind == SemanticKind::Text) ImGui::TextDisabled("\"%s\"", semanticLabel.c_str());
             else ImGui::TextDisabled("%s", semanticLabel.c_str());
@@ -258,10 +258,10 @@ void App::DrawGrid() {
             ImGui::EndGroup();
         } else {
             ImGui::AlignTextToFramePadding();
-            ImGui::TextDisabled("Describe a texture and press Enter, Ctrl+V an image, drop an image file, or select a texture and press S.");
+            ImGui::TextDisabled("Describe a texture or sound and press Enter, Ctrl+V / drop an image or sound file, or select an asset and press S.");
         }
         if (embedUnindexedCount > 0 && !embedIndexer.Running()) {
-            ImGui::TextDisabled("%d texture%s not indexed yet and won't appear in rankings.", embedUnindexedCount,
+            ImGui::TextDisabled("%d asset%s not indexed yet and won't appear in rankings.", embedUnindexedCount,
                                 embedUnindexedCount == 1 ? " is" : "s are");
             ImGui::SameLine();
             if (ImGui::SmallButton("Index now...")) embedWindowOpen = true;
@@ -275,7 +275,7 @@ void App::DrawGrid() {
     }
 
     if (SemanticActive())
-        ImGui::TextDisabled("%zu indexed textures ranked", totalFilterMatches);
+        ImGui::TextDisabled("%zu indexed assets ranked", totalFilterMatches);
     else
         ImGui::TextDisabled("%zu results", totalFilterMatches);
     static const char* typeNames[] = { "textures", "models", "audio" };
@@ -337,7 +337,7 @@ void App::DrawGrid() {
         }
         if (ImGui::IsKeyPressed(ImGuiKey_S, false) && !io.KeyCtrl && SemanticReady() && !selection.empty()) {
             int src = *selection.begin();
-            if (db.entries[src].type == AssetType::Texture) {
+            if (db.entries[src].type != AssetType::Model) {
                 if (embedIndex.VectorFor(db.entries[src])) SemanticQueryAsset(src);
                 else SemanticNotify(db.entries[src].name + " is not in the embedding index.");
             }
@@ -531,6 +531,14 @@ void App::DrawGrid() {
                     ImGui::Separator();
                     if (ImGui::MenuItem(audio.IsPlaying(idx) ? "Stop" : "Play"))
                         audio.Toggle(idx, e.path);
+                    if (SemanticReady()) {
+                        bool indexed = embedIndex.VectorFor(e) != nullptr;
+                        ImGui::BeginDisabled(!indexed);
+                        if (ImGui::MenuItem("Find similar sounds", "S")) SemanticQueryAsset(idx);
+                        ImGui::EndDisabled();
+                        if (!indexed && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                            ImGui::SetTooltip("Not in the embedding index");
+                    }
                 }
                 ImGui::EndPopup();
             }

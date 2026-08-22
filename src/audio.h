@@ -14,6 +14,9 @@ struct PcmData {
 // Thread-safe (used by thumbnail workers and the playback path).
 PcmData DecodeAudioFile(const std::wstring& path);
 
+// Duration from the container header (no full decode); 0 on failure. Thread-safe.
+double AudioDurationSeconds(const std::wstring& path);
+
 // Renders a min/max envelope waveform into an RGBA thumbnail.
 std::vector<uint8_t> RenderWaveformThumb(const PcmData& pcm, int w, int h);
 
