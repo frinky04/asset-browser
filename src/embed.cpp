@@ -1,4 +1,5 @@
 #include "embed.h"
+#include "paths.h"
 #include "util.h"
 #include <windows.h>
 #include <winhttp.h>
@@ -709,4 +710,47 @@ void EmbedIndexer::Worker() {
         if (maxCost > 0 && cost >= maxCost && !budgetHit) { budgetHit = true; cancel = true; }
     }
     --active;
+}
+
+// ---------------------------------------------------------------- locations
+
+std::wstring EmbedDir() { return AppDataDir(L"embeddings"); }
+std::wstring EmbedSettingsFile() { return EmbedDir() + L"\\settings.json"; }
+std::wstring EmbedKeyFile() { return EmbedDir() + L"\\openrouter.key"; }
+
+std::wstring EmbedIndexPathFor(const std::wstring& root) {
+    std::string utf8 = WideToUtf8(ToLowerAsciiW(root));
+    wchar_t name[32];
+    swprintf_s(name, L"%016llx.abe", (unsigned long long)Fnv1a64(utf8.data(), utf8.size()));
+    return EmbedDir() + L"\\" + name;
+}
+
+std::wstring EmbedExcludesFileFor(const std::wstring& indexPath) {
+    return indexPath.substr(0, indexPath.size() - 4) + L".exclude.json";
+}
+
+std::string NormalizeEmbedFolder(std::string f) {
+    for (char& c : f) if (c == '\\') c = '/';
+    while (!f.empty() && f.back() == '/') f.pop_back();
+    while (!f.empty() && f.front() == '/') f.erase(f.begin());
+    return ToLowerAscii(f);
+}
+
+std::vector<std::string> LoadEmbedExcludes(const std::wstring& indexPath) {
+    std::vector<std::string> out;
+    std::ifstream in(EmbedExcludesFileFor(indexPath), std::ios::binary);
+    if (!in) return out;
+    nlohmann::json j = nlohmann::json::parse(in, nullptr, false);
+    if (j.is_array())
+        for (const auto& x : j) if (x.is_string()) out.push_back(NormalizeEmbedFolder(x.get<std::string>()));
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+bool EmbedFolderListExcludes(const std::vector<std::string>& excludes, const AssetEntry& e) {
+    const std::string& p = e.relPathLower;
+    for (const std::string& x : excludes)
+        if (p.size() > x.size() && p[x.size()] == '/' && p.compare(0, x.size(), x) == 0) return true;
+    return false;
 }

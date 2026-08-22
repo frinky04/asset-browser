@@ -1,4 +1,5 @@
 #include "app.h"
+#include "paths.h"
 #include "util.h"
 #include "theme.h"
 #include "imgui.h"
@@ -13,34 +14,6 @@
 #include "stb_image_write.h"
 
 namespace fs = std::filesystem;
-
-std::wstring AppDataDir(const wchar_t* sub) {
-    PWSTR base = nullptr;
-    std::wstring dir = L".";
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &base))) {
-        dir = base;
-        CoTaskMemFree(base);
-    }
-    return dir + L"\\AssetBrowser\\" + sub;
-}
-
-static fs::path RootSettingsPath() {
-    return fs::path(AppDataDir(L"")) / L"asset-root.txt";
-}
-
-std::wstring LoadSavedAssetRoot() {
-    std::ifstream in(RootSettingsPath(), std::ios::binary);
-    std::string utf8((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    while (!utf8.empty() && (utf8.back() == '\n' || utf8.back() == '\r')) utf8.pop_back();
-    return Utf8ToWide(utf8);
-}
-
-static void SaveAssetRoot(const std::wstring& root) {
-    std::error_code ec;
-    fs::create_directories(RootSettingsPath().parent_path(), ec);
-    std::ofstream out(RootSettingsPath(), std::ios::binary | std::ios::trunc);
-    out << WideToUtf8(root);
-}
 
 static int CALLBACK BrowseCallback(HWND dialog, UINT message, LPARAM, LPARAM data) {
     if (message == BFFM_INITIALIZED && data)
@@ -646,4 +619,40 @@ void App::OpenInExplorer(int index) {
 void App::CopyPathToClipboard(int index) {
     if (index < 0 || index >= (int)db.entries.size()) return;
     ImGui::SetClipboardText(WideToUtf8(db.entries[index].path).c_str());
+}
+
+void App::RebuildFilterIfDirty() {
+    if (!filterDirty) return;
+    filterDirty = false;
+
+    std::string queryText = searchBuf;
+    FilterRequest req;
+    req.query = ParseQueryText(queryText);
+    ParsedQuery previous = ParseQueryText(lastQuery);
+    bool sameSidebarFilters = std::equal(std::begin(typeSel), std::end(typeSel), std::begin(lastTypeSel)) &&
+                              selectedPacks == lastSelectedPacks;
+    bool semantic = SemanticActive();
+    bool narrow = !req.query.terms.empty() && sameSidebarFilters && !semantic &&
+                  CanNarrow(lastQuery, queryText, previous, req.query);
+
+    req.typeSel = typeSel;
+    req.packs = &selectedPacks;
+    req.sortMode = sortMode;
+    req.index = embedIndexLoaded ? &embedIndex : nullptr;
+    req.excluded = [this](const AssetEntry& e) { return EmbedExcluded(e); };
+    if (semantic) req.semanticQuery = &semanticQuery;
+    if (narrow) req.source = &lastCandidates;
+
+    FilterResult r = FilterAssets(db.entries, req);
+    filtered = std::move(r.filtered);
+    semanticScore = std::move(r.semanticScore);
+    totalFilterMatches = r.candidates.size();
+    std::copy(std::begin(r.typeCounts), std::end(r.typeCounts), std::begin(resultTypeCounts));
+    resultExtCounts = std::move(r.extCounts);
+
+    parsedQuery = std::move(req.query);
+    lastQuery = std::move(queryText);
+    lastCandidates = std::move(r.candidates);
+    std::copy(std::begin(typeSel), std::end(typeSel), std::begin(lastTypeSel));
+    lastSelectedPacks = selectedPacks;
 }

@@ -18,9 +18,8 @@ namespace fs = std::filesystem;
 namespace {
 
 
-std::wstring EmbedDir() { return AppDataDir(L"embeddings"); }
-std::wstring SettingsFile() { return EmbedDir() + L"\\settings.json"; }
-std::wstring KeyFile() { return EmbedDir() + L"\\openrouter.key"; }
+std::wstring SettingsFile() { return EmbedSettingsFile(); }
+std::wstring KeyFile() { return EmbedKeyFile(); }
 
 double NowSeconds() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -105,21 +104,11 @@ void App::EmbedInit() {
     strncpy_s(embedModelBuf, sizeof(embedModelBuf), embedSettings.model.c_str(), _TRUNCATE);
 }
 
-std::wstring App::EmbedIndexPathForRoot() const {
-    std::string utf8 = WideToUtf8(ToLowerAsciiW(db.root));
-    wchar_t name[32];
-    swprintf_s(name, L"%016llx.abe", (unsigned long long)Fnv1a64(utf8.data(), utf8.size()));
-    return EmbedDir() + L"\\" + name;
-}
+std::wstring App::EmbedIndexPathForRoot() const { return EmbedIndexPathFor(db.root); }
 
 // ---------------------------------------------------------------- folder exclusions
 
-static std::string NormalizeFolder(std::string f) {
-    for (char& c : f) if (c == '\\') c = '/';
-    while (!f.empty() && f.back() == '/') f.pop_back();
-    while (!f.empty() && f.front() == '/') f.erase(f.begin());
-    return ToLowerAscii(f);
-}
+static std::string NormalizeFolder(std::string f) { return NormalizeEmbedFolder(std::move(f)); }
 
 std::string App::EmbedParentFolder(const AssetEntry& e) {
     size_t slash = e.relPath.rfind('/');
@@ -127,11 +116,7 @@ std::string App::EmbedParentFolder(const AssetEntry& e) {
 }
 
 bool App::EmbedExcluded(const AssetEntry& e) const {
-    if (embedExcludes.empty()) return false;
-    const std::string& p = e.relPathLower;
-    for (const std::string& x : embedExcludes)
-        if (p.size() > x.size() && p[x.size()] == '/' && p.compare(0, x.size(), x) == 0) return true;
-    return false;
+    return !embedExcludes.empty() && EmbedFolderListExcludes(embedExcludes, e);
 }
 
 bool App::EmbedFolderExcluded(const std::string& relFolder) const {
@@ -152,9 +137,7 @@ void App::EmbedSetFolderExcluded(const std::string& relFolder, bool excluded) {
     if (SemanticActive()) { thumbs.FlushPending(); filterDirty = true; }
 }
 
-static std::wstring ExcludesFileFor(const std::wstring& indexPath) {
-    return indexPath.substr(0, indexPath.size() - 4) + L".exclude.json";
-}
+static std::wstring ExcludesFileFor(const std::wstring& indexPath) { return EmbedExcludesFileFor(indexPath); }
 
 void App::EmbedSaveExcludes() const {
     std::error_code ec;
@@ -164,17 +147,7 @@ void App::EmbedSaveExcludes() const {
 }
 
 void App::EmbedLoadIndexForRoot() {
-    embedExcludes.clear();
-    {
-        std::ifstream in(ExcludesFileFor(EmbedIndexPathForRoot()), std::ios::binary);
-        if (in) {
-            nlohmann::json j = nlohmann::json::parse(in, nullptr, false);
-            if (j.is_array())
-                for (const auto& x : j) if (x.is_string()) embedExcludes.push_back(NormalizeFolder(x.get<std::string>()));
-            std::sort(embedExcludes.begin(), embedExcludes.end());
-            embedExcludes.erase(std::unique(embedExcludes.begin(), embedExcludes.end()), embedExcludes.end());
-        }
-    }
+    embedExcludes = LoadEmbedExcludes(EmbedIndexPathForRoot());
     embedIndexLoaded = embedIndex.Load(EmbedIndexPathForRoot());
     if (embedIndex.loadedFromBackup)
         SemanticNotify("Index was unreadable; restored from backup.");

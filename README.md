@@ -68,6 +68,32 @@ and in the audio preview select a range and click **Search similar** to search b
 of a clip. The key is stored encrypted for the current Windows user; vectors live in
 `%LOCALAPPDATA%\AssetBrowser\embeddings`.
 
+### Headless CLI (`ab.exe`)
+
+`ab.exe` is built alongside the GUI for scripts and coding agents. It uses the same
+library root, query syntax and semantic index as the GUI, prints JSON when piped
+(or with `--json`), and keeps progress on stderr.
+
+```
+ab search "mossy stone" --type tex --limit 5
+ab search --semantic "creaky wooden door" --type audio --json
+ab search --similar <id>          # rank by an indexed asset, no API call
+ab inspect <id>                   # dimensions / triangles / duration
+ab export <id> --to ./assets/textures --resize 512
+ab export <id> --to ./assets/sfx --range 0-1.5 --trim-silence --loop
+ab export <id> --to ./assets/models --format obj   # copies the .mtl too
+ab packs
+ab status
+```
+
+Exports append a record to `<dir>/assets-used.json` (source path, pack, transform)
+so a project keeps track of what it pulled from the library.
+
+Results carry a stable `id` (hash of the library-relative path) and the absolute
+`path`. Exit codes: 0 ok, 1 error, 2 usage, 3 semantic unavailable, 4 not found.
+See `ab --help` for the full option list. See `docs/headless-mode-research.md` for
+the design.
+
 ## Build
 
 Requires Windows 10+, CMake, and Visual Studio 2022. Dependencies are fetched by CMake.

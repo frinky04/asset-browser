@@ -6,6 +6,7 @@
 #include "model.h"
 #include "search.h"
 #include "embed.h"
+#include "paths.h"
 #include <mutex>
 #include <condition_variable>
 #include <deque>
@@ -230,8 +231,6 @@ struct App {
     void RebuildFilterIfDirty();    // search.cpp
 };
 
-std::wstring LoadSavedAssetRoot();
-std::wstring AppDataDir(const wchar_t* sub);
 // 3x2 contact sheet (hero, front, back, left, right, top) on neutral grey. Main thread.
 bool RenderModelSheet(Gfx& gfx, ModelRenderer& renderer, OffscreenTarget& rt, const CpuModel& model,
                       std::vector<uint8_t>& rgba); // %LocalAppData%\AssetBrowser\<sub>

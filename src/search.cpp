@@ -1,5 +1,5 @@
-#include "app.h"
 #include "search.h"
+#include "embed.h"
 #include "util.h"
 #include <algorithm>
 #include <charconv>
@@ -191,6 +191,8 @@ bool MatchEntry(const ParsedQuery& query, const AssetEntry& e, uint64_t now, int
     return true;
 }
 
+} // namespace
+
 bool CanNarrow(std::string_view oldText, std::string_view newText,
                const ParsedQuery& oldQuery, const ParsedQuery& newQuery) {
     if (oldText.empty() || newText.size() <= oldText.size() || newText.substr(0, oldText.size()) != oldText)
@@ -206,7 +208,7 @@ bool CanNarrow(std::string_view oldText, std::string_view newText,
            newQuery.terms.back().value.starts_with(oldQuery.terms.back().value);
 }
 
-} // namespace
+
 
 ParsedQuery ParseQueryText(std::string_view input) { return ParseQuery(input); }
 
@@ -240,104 +242,85 @@ bool SearchNameMatchPositions(const ParsedQuery& query, const std::string& nameL
     return !positions.empty();
 }
 
-void App::RebuildFilterIfDirty() {
-    if (!filterDirty) return;
-    filterDirty = false;
-
-    std::string queryText = searchBuf;
-    ParsedQuery query = ParseQuery(queryText);
-    ParsedQuery previous = ParseQuery(lastQuery);
+FilterResult FilterAssets(const std::vector<AssetEntry>& entries, const FilterRequest& req) {
+    FilterResult out;
+    const ParsedQuery& query = req.query;
     bool hasQuery = !query.terms.empty();
-    bool sameSidebarFilters = std::equal(std::begin(typeSel), std::end(typeSel), std::begin(lastTypeSel)) &&
-                              selectedPacks == lastSelectedPacks;
-    bool semantic = SemanticActive();
+    bool semantic = req.semanticQuery && !req.semanticQuery->empty() && req.index;
     int indexedFilter = 0; // 0 none, 1 only indexed, -1 only un-indexed
     for (const SearchTerm& t : query.terms)
         if (t.kind == SearchTermKind::Indexed) indexedFilter = t.number ? 1 : -1;
-    bool narrow = hasQuery && sameSidebarFilters && !semantic &&
-                  CanNarrow(lastQuery, queryText, previous, query);
 
-    filtered.clear();
-    bool anyType = typeSel[0] || typeSel[1] || typeSel[2];
+    bool anyType = req.typeSel && (req.typeSel[0] || req.typeSel[1] || req.typeSel[2]);
     std::vector<std::pair<int, int>> scored;
     std::vector<std::pair<float, int>> semanticScored;
-    if (semantic) semanticScore.assign(db.entries.size(), 0.0f);
-    else semanticScore.clear();
-    std::vector<int> candidates;
-    const std::vector<int>* source = narrow ? &lastCandidates : nullptr;
-    size_t sourceSize = source ? source->size() : db.entries.size();
-    candidates.reserve(sourceSize);
+    if (semantic) out.semanticScore.assign(entries.size(), 0.0f);
+    size_t sourceSize = req.source ? req.source->size() : entries.size();
+    out.candidates.reserve(sourceSize);
     uint64_t now = (uint64_t)std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+    auto excluded = [&](const AssetEntry& e) { return req.excluded && req.excluded(e); };
 
     for (size_t n = 0; n < sourceSize; ++n) {
-        int i = source ? (*source)[n] : (int)n;
-        const AssetEntry& e = db.entries[i];
-        if (anyType && !typeSel[(int)e.type]) continue;
-        if (!selectedPacks.empty() && !selectedPacks.count(e.pack)) continue;
+        int i = req.source ? (*req.source)[n] : (int)n;
+        const AssetEntry& e = entries[i];
+        if (anyType && !req.typeSel[(int)e.type]) continue;
+        if (req.packs && !req.packs->empty() && !req.packs->count(e.pack)) continue;
         if (indexedFilter) {
-            bool isIndexed = embedIndexLoaded && !EmbedExcluded(e) && embedIndex.VectorFor(e) != nullptr;
+            bool isIndexed = req.index && !excluded(e) && req.index->VectorFor(e) != nullptr;
             if ((indexedFilter > 0) != isIndexed) continue;
         }
         int score = 0;
         if (semantic) {
-            // Rank every indexed texture by cosine to the query; text terms are
+            // Rank every indexed asset by cosine to the query; text terms are
             // the query itself, so only the filter terms narrow the set.
-            const float* v = EmbedExcluded(e) ? nullptr : embedIndex.VectorFor(e);
+            const float* v = excluded(e) ? nullptr : req.index->VectorFor(e);
             if (!v) continue;
             if (hasQuery && !MatchEntry(query, e, now, score, /*skipFuzzy*/ true)) continue;
             float dot = 0;
-            for (int k = 0; k < embedIndex.dims; ++k) dot += v[k] * semanticQuery[k];
-            semanticScore[i] = dot;
-            candidates.push_back(i);
+            for (int k = 0; k < req.index->dims; ++k) dot += v[k] * (*req.semanticQuery)[k];
+            out.semanticScore[i] = dot;
+            out.candidates.push_back(i);
             semanticScored.emplace_back(dot, i);
             continue;
         }
         if (hasQuery && !MatchEntry(query, e, now, score)) continue;
-        candidates.push_back(i);
+        out.candidates.push_back(i);
         if (hasQuery) scored.emplace_back(score, i);
-        else filtered.push_back(i);
+        else out.filtered.push_back(i);
     }
 
-    totalFilterMatches = candidates.size();
-    resultTypeCounts[0] = resultTypeCounts[1] = resultTypeCounts[2] = 0;
-    resultExtCounts.clear();
-    for (int i : candidates) {
-        const AssetEntry& e = db.entries[i];
-        ++resultTypeCounts[(int)e.type];
-        if (e.ext.size() > 1) ++resultExtCounts[e.ext.substr(1)];
+    for (int i : out.candidates) {
+        const AssetEntry& e = entries[i];
+        ++out.typeCounts[(int)e.type];
+        if (e.ext.size() > 1) ++out.extCounts[e.ext.substr(1)];
     }
     if (semantic) {
         std::stable_sort(semanticScored.begin(), semanticScored.end(),
                          [](const auto& a, const auto& b) { return a.first > b.first; });
-        filtered.reserve(semanticScored.size());
-        for (const auto& item : semanticScored) filtered.push_back(item.second);
+        out.filtered.reserve(semanticScored.size());
+        for (const auto& item : semanticScored) out.filtered.push_back(item.second);
     } else if (hasQuery) {
         constexpr size_t kMaxResults = 5000;
         auto byScore = [](const auto& a, const auto& b) { return a.first > b.first; };
-        if (db.entries.size() > 200000 && scored.size() > kMaxResults) {
+        if (entries.size() > 200000 && scored.size() > kMaxResults) {
             std::partial_sort(scored.begin(), scored.begin() + kMaxResults, scored.end(), byScore);
             scored.resize(kMaxResults);
         } else {
             std::stable_sort(scored.begin(), scored.end(), byScore);
         }
-        filtered.reserve(scored.size());
-        for (const auto& item : scored) filtered.push_back(item.second);
+        out.filtered.reserve(scored.size());
+        for (const auto& item : scored) out.filtered.push_back(item.second);
     }
 
-    if (sortMode != 0) {
-        std::stable_sort(filtered.begin(), filtered.end(), [&](int a, int b) {
-            const AssetEntry& left = db.entries[a];
-            const AssetEntry& right = db.entries[b];
-            if (sortMode == 2) return left.mtime > right.mtime;
-            if (sortMode == 3) return left.size > right.size;
+    if (req.sortMode != 0) {
+        std::stable_sort(out.filtered.begin(), out.filtered.end(), [&](int a, int b) {
+            const AssetEntry& left = entries[a];
+            const AssetEntry& right = entries[b];
+            if (req.sortMode == 2) return left.mtime > right.mtime;
+            if (req.sortMode == 3) return left.size > right.size;
             return left.nameLower < right.nameLower;
         });
     }
-
-    parsedQuery = query;
-    lastQuery = std::move(queryText);
-    lastCandidates = std::move(candidates);
-    std::copy(std::begin(typeSel), std::end(typeSel), std::begin(lastTypeSel));
-    lastSelectedPacks = selectedPacks;
+    return out;
 }

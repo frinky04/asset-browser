@@ -67,6 +67,17 @@ private:
     std::vector<Pending> pending;
 };
 
+// Per-library file locations (under %LocalAppData%\AssetBrowser\embeddings).
+std::wstring EmbedDir();
+std::wstring EmbedSettingsFile();
+std::wstring EmbedKeyFile();
+std::wstring EmbedIndexPathFor(const std::wstring& root);        // <hash-of-root>.abe
+std::wstring EmbedExcludesFileFor(const std::wstring& indexPath); // <index>.exclude.json
+// Folders (relative, lowercase, forward slashes) kept out of indexing; sorted, unique.
+std::vector<std::string> LoadEmbedExcludes(const std::wstring& indexPath);
+std::string NormalizeEmbedFolder(std::string folder);
+bool EmbedFolderListExcludes(const std::vector<std::string>& excludes, const AssetEntry& e);
+
 // Textures worth indexing (colour/albedo maps, not normal/roughness/...), every
 // sound, and models in a format the in-app renderer can draw.
 bool EmbedIsIndexable(const AssetEntry& e);
