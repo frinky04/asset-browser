@@ -486,6 +486,13 @@ void App::DrawGrid() {
                 if (ImGui::MenuItem("Open in Explorer")) OpenInExplorer(idx);
                 if (!embedKey.empty()) {
                     std::string folder = EmbedParentFolder(e);
+                    ImGui::Separator();
+                    if (selection.size() > 1) {
+                        std::vector<int> sel(selection.begin(), selection.end());
+                        EmbedIndexMenuItem(sel, "the selection");
+                    }
+                    if (!folder.empty() && !EmbedFolderExcluded(folder))
+                        EmbedIndexMenuItem(EmbedEntriesUnderFolder(folder), "this folder");
                     if (!folder.empty()) {
                         bool excluded = EmbedFolderExcluded(folder);
                         std::string item = (excluded ? "Include folder in semantic indexing" : "Exclude folder from semantic indexing");

@@ -79,6 +79,9 @@ ParsedQuery ParseQuery(std::string_view input) {
             } else if (field == "type" && !value.empty()) {
                 term.kind = SearchTermKind::Type;
                 term.values = Split(value, '|');
+            } else if (field == "indexed" && !value.empty()) {
+                term.kind = SearchTermKind::Indexed;
+                term.number = (value == "yes" || value == "true" || value == "1") ? 1 : 0;
             } else if ((field == "pack" || field == "path") && !value.empty()) {
                 term.kind = field == "pack" ? SearchTermKind::Pack : SearchTermKind::Path;
                 term.value = std::move(value);
@@ -175,6 +178,8 @@ bool MatchEntry(const ParsedQuery& query, const AssetEntry& e, uint64_t now, int
             if ((term.comparison == '>' && e.size <= term.number) ||
                 (term.comparison == '<' && e.size >= term.number)) return false;
             break;
+        case SearchTermKind::Indexed:
+            break; // needs the embedding index; applied by the caller
         case SearchTermKind::Age: {
             uint64_t age = now > e.mtime ? now - e.mtime : 0;
             if ((term.comparison == '>' && age <= term.number) ||
@@ -246,6 +251,9 @@ void App::RebuildFilterIfDirty() {
     bool sameSidebarFilters = std::equal(std::begin(typeSel), std::end(typeSel), std::begin(lastTypeSel)) &&
                               selectedPacks == lastSelectedPacks;
     bool semantic = SemanticActive();
+    int indexedFilter = 0; // 0 none, 1 only indexed, -1 only un-indexed
+    for (const SearchTerm& t : query.terms)
+        if (t.kind == SearchTermKind::Indexed) indexedFilter = t.number ? 1 : -1;
     bool narrow = hasQuery && sameSidebarFilters && !semantic &&
                   CanNarrow(lastQuery, queryText, previous, query);
 
@@ -267,6 +275,10 @@ void App::RebuildFilterIfDirty() {
         const AssetEntry& e = db.entries[i];
         if (anyType && !typeSel[(int)e.type]) continue;
         if (!selectedPacks.empty() && !selectedPacks.count(e.pack)) continue;
+        if (indexedFilter) {
+            bool isIndexed = embedIndexLoaded && !EmbedExcluded(e) && embedIndex.VectorFor(e) != nullptr;
+            if ((indexedFilter > 0) != isIndexed) continue;
+        }
         int score = 0;
         if (semantic) {
             // Rank every indexed texture by cosine to the query; text terms are

@@ -27,12 +27,13 @@ void EmbedSettings::Load(const std::wstring& file) {
     mode = j.value("mode", 0) == 1 ? EmbedMode::ImageOnly : EmbedMode::Hybrid;
     dims = j.value("dims", 768) == 3072 ? 3072 : 768;
     concurrency = (std::max)(1, (std::min)(16, j.value("concurrency", 8)));
+    budgetUsd = (std::max)(0.0, j.value("budgetUsd", 0.0));
 }
 
 void EmbedSettings::Save(const std::wstring& file) const {
     std::error_code ec;
     fs::create_directories(fs::path(file).parent_path(), ec);
-    json j = { {"model", model}, {"mode", (int)mode}, {"dims", dims}, {"concurrency", concurrency} };
+    json j = { {"model", model}, {"mode", (int)mode}, {"dims", dims}, {"concurrency", concurrency}, {"budgetUsd", budgetUsd} };
     std::ofstream out(file, std::ios::binary | std::ios::trunc);
     out << j.dump(2);
 }
@@ -507,12 +508,12 @@ static double NowSeconds() {
 }
 
 void EmbedIndexer::Start(EmbedIndex* idx, EmbedClient c, EmbedMode md, int n,
-                         std::vector<EmbedJob> list, MediaFn fn) {
+                         std::vector<EmbedJob> list, MediaFn fn, double maxCostUsd) {
     Join();
     index = idx; client = std::move(c); mode = md; mediaFn = std::move(fn); jobs = std::move(list);
     next = 0; done = 0; failed = 0; total = (int)jobs.size();
-    cancel = false; aborted = false; abortReason.clear();
-    { std::lock_guard<std::mutex> l(m); cost = 0; errors.clear(); }
+    cancel = false; aborted = false; budgetHit = false; abortReason.clear();
+    { std::lock_guard<std::mutex> l(m); cost = 0; maxCost = maxCostUsd; errors.clear(); }
     startTime = NowSeconds();
     n = (std::max)(1, (std::min)(16, n));
     active = n;
@@ -557,6 +558,7 @@ void EmbedIndexer::Worker() {
         ++done;
         std::lock_guard<std::mutex> l(m);
         cost += r.cost;
+        if (maxCost > 0 && cost >= maxCost && !budgetHit) { budgetHit = true; cancel = true; }
     }
     --active;
 }

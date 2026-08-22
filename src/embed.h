@@ -19,6 +19,7 @@ struct EmbedSettings {
     EmbedMode mode = EmbedMode::Hybrid;
     int dims = 768;          // 768 or 3072
     int concurrency = 8;     // 1..16
+    double budgetUsd = 0;    // stop a run once its reported cost passes this (0 = no cap)
 
     void Load(const std::wstring& file);
     void Save(const std::wstring& file) const;
@@ -116,7 +117,7 @@ public:
     using MediaFn = std::function<bool(const EmbedJob&, std::vector<uint8_t>& data, const char*& mime)>;
 
     void Start(EmbedIndex* index, EmbedClient client, EmbedMode mode, int threads,
-               std::vector<EmbedJob> jobs, MediaFn mediaFn);
+               std::vector<EmbedJob> jobs, MediaFn mediaFn, double maxCostUsd = 0);
     void Cancel();  // asynchronous; workers exit after their current request
     void Join();
     bool Running() const { return active > 0; }   // workers still going
@@ -124,6 +125,7 @@ public:
 
     std::atomic<int> done{0}, failed{0}, total{0};
     std::atomic<bool> aborted{false};   // fatal (401 etc.)
+    std::atomic<bool> budgetHit{false}; // stopped by the spending cap
     std::string abortReason;            // valid once !Running()
     double costSoFar() { std::lock_guard<std::mutex> l(m); return cost; }
     std::vector<std::string> RecentErrors() { std::lock_guard<std::mutex> l(m); return errors; }
@@ -142,5 +144,6 @@ private:
     std::vector<std::thread> threads;
     std::mutex m;
     double cost = 0;
+    double maxCost = 0;
     std::vector<std::string> errors;
 };

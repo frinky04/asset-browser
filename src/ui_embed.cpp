@@ -220,6 +220,9 @@ void App::PumpEmbed() {
         char msg[160];
         if (embedIndexer.aborted)
             snprintf(msg, sizeof(msg), "Indexing stopped: %s", embedIndexer.abortReason.c_str());
+        else if (embedIndexer.budgetHit)
+            snprintf(msg, sizeof(msg), "Spending cap reached after %d assets ($%.4f). Progress is kept; raise the cap or run again to continue.",
+                     embedIndexer.done.load(), embedIndexer.costSoFar());
         else
             snprintf(msg, sizeof(msg), "Indexed %d assets for $%.4f%s", embedIndexer.done.load(),
                      embedIndexer.costSoFar(), semanticSearch ? "." : ". Tick Semantic next to the search box to use it.");
@@ -240,6 +243,14 @@ void App::PumpEmbed() {
         if (embedIndexLoaded)
             for (const AssetEntry& e : db.entries)
                 if (!EmbedExcluded(e) && embedIndex.HasCurrent(e)) ++embedIndexedByType[(int)e.type];
+        embedPackCoverage.clear();
+        if (embedIndexLoaded)
+            for (const AssetEntry& e : db.entries) {
+                if (!EmbedIsIndexable(e) || EmbedExcluded(e)) continue;
+                auto& cov = embedPackCoverage[e.pack];
+                ++cov.second;
+                if (embedIndex.HasCurrent(e)) ++cov.first;
+            }
         for (int i : EmbedUnindexed()) {
             const AssetEntry& e = db.entries[i];
             if (e.type == AssetType::Model) { ++embedUnindexedModel; continue; }
@@ -336,6 +347,110 @@ void App::EmbedProbeDurations() {
     });
 }
 
+std::vector<int> App::EmbedPendingIn(const std::vector<int>& candidates) const {
+    std::vector<int> out;
+    bool usable = embedIndexLoaded && embedIndex.Matches(embedSettings);
+    for (int i : candidates) {
+        if (i < 0 || i >= (int)db.entries.size()) continue;
+        const AssetEntry& e = db.entries[i];
+        if (!EmbedIsIndexable(e) || EmbedExcluded(e)) continue;
+        if (usable && embedIndex.HasCurrent(e)) continue;
+        out.push_back(i);
+    }
+    return out;
+}
+
+App::EmbedEstimate App::EmbedEstimateFor(const std::vector<int>& candidates) const {
+    EmbedEstimate est;
+    for (int i : EmbedPendingIn(candidates)) {
+        const AssetEntry& e = db.entries[i];
+        ++est.count;
+        if (e.type == AssetType::Audio) {
+            auto it = audioDurations.find(e.relPath);
+            double sec = it == audioDurations.end() ? kEmbedAudioMaxSeconds : (std::min)(it->second, kEmbedAudioMaxSeconds);
+            if (it == audioDurations.end()) est.upperBound = true;
+            est.cost += sec * kEmbedTokensPerAudioSecond * embedPrices.audio;
+        } else {
+            est.cost += kEmbedTokensPerImage * embedPrices.image;
+        }
+    }
+    return est;
+}
+
+std::vector<int> App::EmbedEntriesUnderFolder(const std::string& relFolder) const {
+    std::vector<int> out;
+    std::string f = ToLowerAscii(relFolder);
+    for (int i = 0; i < (int)db.entries.size(); ++i) {
+        const std::string& p = db.entries[i].relPathLower;
+        if (p.size() > f.size() && p[f.size()] == '/' && p.compare(0, f.size(), f) == 0) out.push_back(i);
+    }
+    return out;
+}
+
+bool App::EmbedStartIndexingSubset(std::vector<int> candidates, const std::string& what) {
+    if (embedIndexer.Running()) { SemanticNotify("Indexing is already running."); return false; }
+    if (embedKey.empty()) { SemanticNotify("Add an OpenRouter key first: Semantic > Embedding settings & indexing."); return false; }
+    if (db.scanning) { SemanticNotify("Wait for the library scan to finish."); return false; }
+    if (embedIndexLoaded && !embedIndex.Empty() && !embedIndex.Matches(embedSettings)) {
+        SemanticNotify("Embedding settings changed; rebuild the index from the settings window first.");
+        return false;
+    }
+    std::vector<int> pending = EmbedPendingIn(candidates);
+    if (pending.empty()) { SemanticNotify("Nothing to index in " + what + "."); return false; }
+    embedIndexer.Join();
+    if (!embedIndexLoaded) {
+        embedIndex.Reset(embedSettings.model, embedSettings.mode, embedSettings.dims, EmbedIndexPathForRoot());
+        embedIndexLoaded = true;
+    }
+    std::vector<EmbedJob> jobs;
+    for (int i : pending) {
+        const AssetEntry& e = db.entries[i];
+        jobs.push_back({ i, e.type, e.relPath, e.name, e.path, e.mtime, e.size });
+    }
+    EmbedClient client{ embedKey, embedSettings.model, embedSettings.dims };
+    Thumbs* th = &thumbs;
+    embedIndexer.Start(&embedIndex, client, embedSettings.mode, embedSettings.concurrency, std::move(jobs),
+        [this, th](const EmbedJob& j, std::vector<uint8_t>& data, const char*& mime) {
+            if (j.type == AssetType::Model) {
+                std::vector<uint8_t> rgba;
+                mime = "image/jpeg";
+                return RenderSheetRequest(j, rgba) &&
+                       EncodeJpeg(rgba.data(), kEmbedModelView * kEmbedModelSheetCols,
+                                  kEmbedModelView * kEmbedModelSheetRows, data);
+            }
+            if (j.type == AssetType::Audio) {
+                PcmData pcm = DecodeAudioFile(j.path);
+                mime = "audio/wav";
+                return EncodeWav16kMono(pcm, 0, pcm.frames, data) > 0;
+            }
+            int w = 0, h = 0;
+            std::vector<uint8_t> rgba;
+            mime = "image/jpeg";
+            return th->LoadOrMakeTextureThumb(j.path, j.mtime, j.size, w, h, rgba) && EncodeJpeg(rgba.data(), w, h, data);
+        }, embedSettings.budgetUsd);
+    SemanticNotify("Indexing " + std::to_string(pending.size()) + " assets in " + what + ".");
+    return true;
+}
+
+// "Index 42 assets in <what> (about $0.0049)" as a menu item; disabled with a reason when it can't run.
+void App::EmbedIndexMenuItem(const std::vector<int>& candidates, const char* what) {
+    EmbedEstimate est = EmbedEstimateFor(candidates);
+    char label[160];
+    if (est.count == 0)
+        snprintf(label, sizeof(label), "Nothing to index in %s", what);
+    else if (embedPrices.image > 0)
+        snprintf(label, sizeof(label), "Index %d asset%s in %s (%s$%.4f)", est.count, est.count == 1 ? "" : "s", what,
+                 est.upperBound ? "up to " : "about ", est.cost);
+    else
+        snprintf(label, sizeof(label), "Index %d asset%s in %s", est.count, est.count == 1 ? "" : "s", what);
+    bool can = est.count > 0 && !embedIndexer.Running() && !db.scanning;
+    ImGui::BeginDisabled(!can);
+    if (ImGui::MenuItem(label)) EmbedStartIndexingSubset(candidates, what);
+    ImGui::EndDisabled();
+    if (embedIndexer.Running() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Indexing is already running");
+}
+
 void App::EmbedStartIndexing(bool rebuild, int types) {
     if (embedIndexer.Running() || embedKey.empty() || db.root.empty()) return;
     embedIndexer.Join();
@@ -373,7 +488,7 @@ void App::EmbedStartIndexing(bool rebuild, int types) {
             std::vector<uint8_t> rgba;
             mime = "image/jpeg";
             return th->LoadOrMakeTextureThumb(j.path, j.mtime, j.size, w, h, rgba) && EncodeJpeg(rgba.data(), w, h, data);
-        });
+        }, embedSettings.budgetUsd);
 }
 
 // ---------------------------------------------------------------- model sheets
@@ -736,6 +851,17 @@ void App::DrawEmbedWindow() {
     if (ImGui::Combo("Dimensions", &dimsIdx, dimNames, 2)) { embedSettings.dims = dimsIdx ? 3072 : 768; changed = true; }
     ImGui::SetNextItemWidth(180);
     if (ImGui::SliderInt("Parallel requests", &embedSettings.concurrency, 1, 16)) changed = true;
+    ImGui::SetNextItemWidth(180);
+    float budget = (float)embedSettings.budgetUsd;
+    if (ImGui::InputFloat("Spending cap per run ($)", &budget, 0.5f, 5.0f, "%.2f")) {
+        embedSettings.budgetUsd = (std::max)(0.0, (double)budget);
+        changed = true;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("0 = no cap. A run stops once OpenRouter's reported cost passes this;\n"
+                          "everything embedded so far is kept, so you can continue later.");
     ImGui::EndDisabled();
     if (changed) embedSettings.Save(SettingsFile());
     if (embedPriceModel != embedSettings.model) embedPriceFetched = false;
@@ -874,7 +1000,9 @@ void App::DrawEmbedWindow() {
         snprintf(overlay, sizeof(overlay), "%d / %d   failed %d   ETA %.0fs", done, total, failed, eta);
         ImGui::ProgressBar(frac, ImVec2(-1, 0), overlay);
         ImGui::Text("Spent so far: $%.4f", embedIndexer.costSoFar());
-        if (ImGui::Button("Cancel")) embedIndexer.Cancel();
+        if (ImGui::Button("Stop")) embedIndexer.Cancel();
+        ImGui::SameLine();
+        ImGui::TextDisabled("Progress is kept; run again to continue.");
     } else {
         ImGui::BeginDisabled(!canIndex || todo == 0);
         char label[64];
@@ -891,6 +1019,8 @@ void App::DrawEmbedWindow() {
         else if (db.scanning) { ImGui::SameLine(); ImGui::TextDisabled("(wait for the scan to finish)"); }
         if (embedIndexer.aborted)
             ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "Stopped: %s", embedIndexer.abortReason.c_str());
+        else if (embedIndexer.budgetHit)
+            ImGui::TextColored(Theme::Accent(), "Last run hit the spending cap: %d embedded, $%.4f", embedIndexer.done.load(), embedIndexer.costSoFar());
         else if (embedIndexer.total > 0)
             ImGui::TextDisabled("Last run: %d embedded, %d failed, $%.4f", embedIndexer.done.load(),
                                 embedIndexer.failed.load(), embedIndexer.costSoFar());
@@ -936,6 +1066,8 @@ void App::DrawEmbedWindow() {
     ImGui::BulletText("Select any asset and press S, or right-click > Find similar.");
     ImGui::BulletText("In the audio preview, select a range and click Search similar.");
     ImGui::BulletText("type:, pack:, ext: and the other filters still narrow the ranking.");
+    ImGui::BulletText("Large library? Search with indexed:no, then Semantic > Index current results;\n"
+                      "or right-click a pack, folder or selection to index just that.");
     if (ImGui::Button("Open index folder"))
         ShellExecuteW(nullptr, L"open", EmbedDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     if (!semanticError.empty()) ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "%s", semanticError.c_str());

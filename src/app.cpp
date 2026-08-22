@@ -288,6 +288,7 @@ void App::DrawMenuBar(float& menuH) {
             ImGui::EndDisabled();
             ImGui::EndDisabled();
             ImGui::Separator();
+            if (!embedKey.empty()) EmbedIndexMenuItem(filtered, "current results");
             if (embedUnindexedCount > 0 && !embedKey.empty()) {
                 char label[64];
                 snprintf(label, sizeof(label), "%d new asset%s to index...", embedUnindexedCount, embedUnindexedCount == 1 ? "" : "s");
@@ -347,9 +348,20 @@ void App::DrawSidebar() {
         if (on) ImGui::PopStyleColor();
         if (!embedKey.empty() && ImGui::BeginPopupContextItem()) {
             bool excluded = EmbedFolderExcluded(p.name);
+            if (!excluded) {
+                std::vector<int> inPack;
+                for (int k = 0; k < (int)db.entries.size(); ++k) if (db.entries[k].pack == p.name) inPack.push_back(k);
+                EmbedIndexMenuItem(inPack, "this pack");
+            }
             if (ImGui::MenuItem(excluded ? "Include in semantic indexing" : "Exclude from semantic indexing"))
                 EmbedSetFolderExcluded(p.name, !excluded);
             ImGui::EndPopup();
+        }
+        if (embedIndexLoaded && ImGui::IsItemHovered()) {
+            auto cov = embedPackCoverage.find(p.name);
+            if (EmbedFolderExcluded(p.name)) ImGui::SetTooltip("Excluded from semantic indexing");
+            else if (cov != embedPackCoverage.end() && cov->second.second > 0)
+                ImGui::SetTooltip("Semantic index: %d / %d", cov->second.first, cov->second.second);
         }
         if (clicked) {
             const ImGuiIO& io = ImGui::GetIO();

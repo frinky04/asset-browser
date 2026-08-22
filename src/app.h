@@ -139,6 +139,14 @@ struct App {
     void DrawEmbedWindow();
     enum EmbedTypes { EmbedTex = 1, EmbedAudio = 2, EmbedModel = 4, EmbedAll = 7 };
     void EmbedStartIndexing(bool rebuild, int types = EmbedAll);
+    // Subset indexing: only un-indexed, indexable, non-excluded entries among `candidates`.
+    struct EmbedEstimate { int count = 0; double cost = 0; bool upperBound = false; };
+    EmbedEstimate EmbedEstimateFor(const std::vector<int>& candidates) const;
+    std::vector<int> EmbedPendingIn(const std::vector<int>& candidates) const;
+    std::vector<int> EmbedEntriesUnderFolder(const std::string& relFolder) const; // "" = pack-level match on e.pack
+    bool EmbedStartIndexingSubset(std::vector<int> candidates, const std::string& what);
+    void EmbedIndexMenuItem(const std::vector<int>& candidates, const char* what); // one MenuItem with count + cost
+    std::unordered_map<std::string, std::pair<int, int>> embedPackCoverage; // pack -> {indexed, indexable}
     std::vector<int> EmbedUnindexed(int types = EmbedAll) const; // indexable entries lacking a current vector
     void EmbedProbeDurations();             // kick off / collect background duration probes
     // Model contact sheets need the GPU: workers queue a loaded CpuModel and block

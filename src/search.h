@@ -15,6 +15,7 @@ enum class SearchTermKind : uint8_t {
     Size,
     Age,
     Path,
+    Indexed,   // indexed:yes|no (semantic index membership; resolved by the app)
 };
 
 struct SearchTerm {
