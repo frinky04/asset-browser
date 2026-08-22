@@ -133,12 +133,14 @@ bool TypeMatches(AssetType type, const std::string& value) {
     return value.size() <= name.size() && name.substr(0, value.size()) == value;
 }
 
-bool MatchEntry(const ParsedQuery& query, const AssetEntry& e, uint64_t now, int& score) {
+// skipFuzzy: free-text terms are handled elsewhere (semantic ranking); only apply filters.
+bool MatchEntry(const ParsedQuery& query, const AssetEntry& e, uint64_t now, int& score, bool skipFuzzy = false) {
     score = 0;
     for (const SearchTerm& term : query.terms) {
         int termScore = 0;
         switch (term.kind) {
         case SearchTermKind::Fuzzy:
+            if (skipFuzzy) break;
             if (FuzzyMatch(term.value, e.nameLower, termScore)) termScore += 40;
             else if (!FuzzyMatch(term.value, e.relPathLower, termScore)) return false;
             score += termScore;
@@ -201,6 +203,18 @@ bool CanNarrow(std::string_view oldText, std::string_view newText,
 
 } // namespace
 
+ParsedQuery ParseQueryText(std::string_view input) { return ParseQuery(input); }
+
+std::string SemanticTextFromQuery(const ParsedQuery& query) {
+    std::string text;
+    for (const SearchTerm& term : query.terms) {
+        if (term.kind != SearchTermKind::Fuzzy) continue;
+        if (!text.empty()) text += ' ';
+        text += term.value;
+    }
+    return text;
+}
+
 bool SearchNameMatchPositions(const ParsedQuery& query, const std::string& nameLower,
                               std::vector<int>& positions) {
     positions.clear();
@@ -231,12 +245,16 @@ void App::RebuildFilterIfDirty() {
     bool hasQuery = !query.terms.empty();
     bool sameSidebarFilters = std::equal(std::begin(typeSel), std::end(typeSel), std::begin(lastTypeSel)) &&
                               selectedPacks == lastSelectedPacks;
-    bool narrow = hasQuery && sameSidebarFilters &&
+    bool semantic = SemanticActive();
+    bool narrow = hasQuery && sameSidebarFilters && !semantic &&
                   CanNarrow(lastQuery, queryText, previous, query);
 
     filtered.clear();
     bool anyType = typeSel[0] || typeSel[1] || typeSel[2];
     std::vector<std::pair<int, int>> scored;
+    std::vector<std::pair<float, int>> semanticScored;
+    if (semantic) semanticScore.assign(db.entries.size(), 0.0f);
+    else semanticScore.clear();
     std::vector<int> candidates;
     const std::vector<int>* source = narrow ? &lastCandidates : nullptr;
     size_t sourceSize = source ? source->size() : db.entries.size();
@@ -250,6 +268,19 @@ void App::RebuildFilterIfDirty() {
         if (anyType && !typeSel[(int)e.type]) continue;
         if (!selectedPacks.empty() && !selectedPacks.count(e.pack)) continue;
         int score = 0;
+        if (semantic) {
+            // Rank every indexed texture by cosine to the query; text terms are
+            // the query itself, so only the filter terms narrow the set.
+            const float* v = embedIndex.VectorFor(e);
+            if (!v) continue;
+            if (hasQuery && !MatchEntry(query, e, now, score, /*skipFuzzy*/ true)) continue;
+            float dot = 0;
+            for (int k = 0; k < embedIndex.dims; ++k) dot += v[k] * semanticQuery[k];
+            semanticScore[i] = dot;
+            candidates.push_back(i);
+            semanticScored.emplace_back(dot, i);
+            continue;
+        }
         if (hasQuery && !MatchEntry(query, e, now, score)) continue;
         candidates.push_back(i);
         if (hasQuery) scored.emplace_back(score, i);
@@ -264,7 +295,12 @@ void App::RebuildFilterIfDirty() {
         ++resultTypeCounts[(int)e.type];
         if (e.ext.size() > 1) ++resultExtCounts[e.ext.substr(1)];
     }
-    if (hasQuery) {
+    if (semantic) {
+        std::stable_sort(semanticScored.begin(), semanticScored.end(),
+                         [](const auto& a, const auto& b) { return a.first > b.first; });
+        filtered.reserve(semanticScored.size());
+        for (const auto& item : semanticScored) filtered.push_back(item.second);
+    } else if (hasQuery) {
         constexpr size_t kMaxResults = 5000;
         auto byScore = [](const auto& a, const auto& b) { return a.first > b.first; };
         if (db.entries.size() > 200000 && scored.size() > kMaxResults) {

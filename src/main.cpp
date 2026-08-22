@@ -31,6 +31,14 @@ static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             g_resizeH = HIWORD(lParam);
         }
         return 0;
+    case WM_DROPFILES: {
+        // Image files dropped on the window become a semantic image query.
+        HDROP drop = (HDROP)wParam;
+        wchar_t path[MAX_PATH * 2];
+        if (DragQueryFileW(drop, 0, path, ARRAYSIZE(path))) g_app.pendingDropFile = path;
+        DragFinish(drop);
+        return 0;
+    }
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
@@ -70,6 +78,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
         return 1;
     }
 
+    DragAcceptFiles(hwnd, TRUE);
     ShowWindow(hwnd, SW_SHOWMAXIMIZED);
     UpdateWindow(hwnd);
 

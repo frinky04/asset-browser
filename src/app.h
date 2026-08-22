@@ -5,6 +5,8 @@
 #include "audio.h"
 #include "model.h"
 #include "search.h"
+#include "embed.h"
+#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
@@ -57,6 +59,76 @@ struct App {
     float texPanX = 0, texPanY = 0;
     bool texTile = false;           // tiling (wrap) preview mode
 
+    // embedding search (ui_embed.cpp)
+    enum class SemanticKind : uint8_t { None, Text, Image, Asset };
+    EmbedSettings embedSettings;
+    EmbedIndex embedIndex;
+    EmbedIndexer embedIndexer;
+    std::string embedKey;
+    bool embedKeyFromEnv = false;
+    bool embedWindowOpen = false;
+    bool embedIndexLoaded = false;
+    bool embedPrunedAfterScan = false;
+    bool semanticSearch = false;
+    SemanticKind semanticKind = SemanticKind::None;
+    std::string semanticLabel;                 // what the current ranking is relative to
+    std::vector<float> semanticQuery;          // normalised, embedIndex.dims
+    std::vector<float> semanticScore;          // per db.entries index; valid while semantic ranking active
+    std::unordered_map<std::string, std::vector<float>> semanticTextCache;
+    std::string semanticError;
+    std::string semanticNotice;               // transient hint (e.g. "clipboard has no image")
+    double semanticNoticeUntil = 0;
+    bool semanticBusy = false;
+    ID3D11ShaderResourceView* semanticImageSRV = nullptr; // preview of a pasted/dropped query image
+    int semanticImageW = 0, semanticImageH = 0;
+    int semanticAssetIndex = -1;              // source texture of a "find similar" query
+    int embedIndexableCount = 0, embedUnindexedCount = 0; // refreshed ~1/s in PumpEmbed
+    double embedCountedAt = -1;
+    size_t embedCountedEntries = 0;
+    bool embedIndexerWasRunning = false;
+    // async one-shot jobs (text/image query embed, price fetch, key test)
+    struct EmbedAsync {
+        std::thread thread;
+        std::mutex m;
+        bool ready = false;
+        uint64_t id = 0;
+        EmbedResult result;
+        std::string label;
+        SemanticKind kind = SemanticKind::None;
+    } semanticJob;
+    uint64_t semanticJobId = 0;
+    std::thread embedPriceThread;
+    std::mutex embedPriceMutex;
+    bool embedPriceReady = false, embedPriceFetched = false, embedPriceFetching = false;
+    double embedPricePerToken = 0;
+    std::string embedPriceError;
+    std::string embedPriceModel;
+    std::thread embedKeyTestThread;
+    std::mutex embedKeyTestMutex;
+    bool embedKeyTestReady = false, embedKeyTesting = false;
+    std::string embedKeyTestResult;
+    char embedKeyBuf[256] = "";
+    char embedModelBuf[128] = "";
+
+    void EmbedInit();                       // load settings + key
+    void EmbedLoadIndexForRoot();           // after root change
+    void EmbedShutdown();
+    void PumpEmbed();                       // main thread, per frame
+    void DrawEmbedWindow();
+    void EmbedStartIndexing(bool rebuild);
+    std::vector<int> EmbedUnindexed() const; // indexable entries lacking a current vector
+    std::wstring EmbedIndexPathForRoot() const;
+    bool SemanticReady() const { return !embedKey.empty() && embedIndexLoaded && !embedIndex.Empty(); }
+    void SemanticQueryText(const std::string& text);
+    void SemanticQueryImage(const uint8_t* rgba, int w, int h, const std::string& label);
+    void SemanticQueryAsset(int index);     // "find similar": uses stored vector, no API call
+    void SemanticClear();
+    void SemanticNotify(const std::string& text);
+    bool SemanticActive() const { return semanticSearch && semanticKind != SemanticKind::None && !semanticQuery.empty(); }
+    bool PasteImageQuery();                 // clipboard bitmap or file -> image query
+    bool DropImageQuery(const std::wstring& file); // dropped image file -> image query
+    std::wstring pendingDropFile;           // set by WM_DROPFILES (main.cpp), consumed in Frame
+
     // drag-out (executed by main.cpp after the ImGui frame)
     std::vector<std::wstring> pendingDrag;
     bool requestFolderPicker = false;
@@ -106,4 +178,5 @@ struct App {
 };
 
 std::wstring LoadSavedAssetRoot();
+std::wstring AppDataDir(const wchar_t* sub); // %LocalAppData%\AssetBrowser\<sub>
 bool PickAssetRoot(HWND owner, std::wstring& root);

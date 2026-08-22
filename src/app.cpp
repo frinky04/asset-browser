@@ -14,7 +14,7 @@
 
 namespace fs = std::filesystem;
 
-static std::wstring AppDataDir(const wchar_t* sub) {
+std::wstring AppDataDir(const wchar_t* sub) {
     PWSTR base = nullptr;
     std::wstring dir = L".";
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &base))) {
@@ -87,11 +87,14 @@ void App::Init(Gfx* g, HWND wnd, const std::wstring& root) {
     std::error_code ec;
     fs::create_directories(exportDir, ec);
     SweepOldExports(exportDir);
-    if (!root.empty()) db.StartScan(root);
+    EmbedInit();
+    if (!root.empty()) { db.StartScan(root); EmbedLoadIndexForRoot(); }
 }
 
 void App::SetAssetRoot(const std::wstring& root) {
     if (root.empty() || root == db.root) return;
+    embedIndexer.Cancel();
+    embedIndexer.Join();
     db.StopScan();
     audio.Stop();
     db.entries.clear();
@@ -111,9 +114,12 @@ void App::SetAssetRoot(const std::wstring& root) {
     filterDirty = true;
     db.StartScan(root);
     SaveAssetRoot(root);
+    SemanticClear();
+    EmbedLoadIndexForRoot();
 }
 
 void App::Shutdown() {
+    EmbedShutdown();
     db.StopScan();
     audio.Shutdown();
     SafeRelease(previewTexSRV);
@@ -131,6 +137,7 @@ void App::Frame() {
     }
     thumbs.Pump();
     audio.Update();
+    PumpEmbed();
     RebuildFilterIfDirty();
 
     ImGuiIO& io = ImGui::GetIO();
@@ -143,8 +150,23 @@ void App::Frame() {
         db.entries[previewIndex].type == AssetType::Audio)
         TogglePreviewAudio();
 
+    // Ctrl+V: an image (or copied image file) on the clipboard becomes the
+    // query even while the search box is focused, as long as there is no text
+    // that the box itself would paste.
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false) && SemanticReady()) {
+        bool hasImage = IsClipboardFormatAvailable(CF_DIB) || IsClipboardFormatAvailable(CF_HDROP);
+        bool hasText = IsClipboardFormatAvailable(CF_UNICODETEXT);
+        if (hasImage && (!io.WantTextInput || !hasText)) PasteImageQuery();
+    }
+    if (!pendingDropFile.empty()) {
+        std::wstring file = std::move(pendingDropFile);
+        pendingDropFile.clear();
+        if (SemanticReady()) DropImageQuery(file);
+    }
+
     float menuH = 0;
     DrawMenuBar(menuH);
+    if (embedWindowOpen) DrawEmbedWindow();
 
     const float statusH = ImGui::GetFrameHeight() + 6.0f;
     ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -211,7 +233,8 @@ void App::DrawMenuBar(float& menuH) {
             }
             if (ImGui::MenuItem("Rescan assets")) {
                 // Only allowed once the previous scan finished
-                if (!db.scanning) {
+                if (!db.scanning && !embedIndexer.Running()) {
+                    embedIndexer.Join();
                     db.StopScan();
                     db.entries.clear();
                     db.packs.clear();
@@ -223,6 +246,7 @@ void App::DrawMenuBar(float& menuH) {
                     thumbs.Shutdown();
                     thumbs.Init(gfx, &renderer, AppDataDir(L"thumbs"));
                     filterDirty = true;
+                    embedPrunedAfterScan = false;
                     db.StartScan(db.root);
                 }
             }
@@ -240,6 +264,11 @@ void App::DrawMenuBar(float& menuH) {
         if (ImGui::BeginMenu("View")) {
             ImGui::SetNextItemWidth(160);
             ImGui::SliderFloat("Tile size", &tileSize, 72.0f, 220.0f, "%.0f px");
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Tools")) {
+            if (ImGui::MenuItem("Embedding search...", nullptr, embedWindowOpen))
+                embedWindowOpen = !embedWindowOpen;
             ImGui::EndMenu();
         }
         ImGui::EndMainMenuBar();
@@ -345,6 +374,14 @@ void App::DrawStatusBar(float h) {
     if (pending > 0) {
         ImGui::SameLine(0, 24);
         ImGui::Text("Generating thumbnails: %d queued", pending);
+    }
+    if (embedIndexer.Running()) {
+        ImGui::SameLine(0, 24);
+        ImGui::TextColored(Theme::Accent(0.9f), "Embedding: %d / %d", embedIndexer.done.load(), embedIndexer.total.load());
+    }
+    if (SemanticActive()) {
+        ImGui::SameLine(0, 24);
+        ImGui::TextColored(Theme::Accent(0.9f), "Semantic: %s", semanticLabel.c_str());
     }
     if (!selection.empty()) {
         ImGui::SameLine(0, 24);

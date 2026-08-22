@@ -118,15 +118,31 @@ void App::DrawGrid() {
     }
     float clearW = ImGui::CalcTextSize("Clear").x + ImGui::GetStyle().FramePadding.x * 2.0f;
     float sortW = 122.0f;
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - clearW - sortW - ImGui::GetStyle().ItemSpacing.x * 2.0f);
-    if (ImGui::InputTextWithHint("##search", "Search assets...  (Ctrl+F)", searchBuf, sizeof(searchBuf),
+    bool semanticAvail = SemanticReady();
+    bool semanticMode = semanticSearch && semanticAvail;
+    bool showSemanticBox = semanticAvail || !embedKey.empty();
+    float semanticW = showSemanticBox ? ImGui::CalcTextSize("Semantic").x + ImGui::GetFrameHeight() +
+                                        ImGui::GetStyle().ItemInnerSpacing.x + ImGui::GetStyle().ItemSpacing.x : 0.0f;
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - clearW - sortW - semanticW - ImGui::GetStyle().ItemSpacing.x * 2.0f);
+    if (semanticMode) ImGui::PushStyleColor(ImGuiCol_Border, Theme::Accent(0.7f));
+    const char* hint = semanticMode ? "Describe a texture and press Enter...  (Ctrl+F)" : "Search assets...  (Ctrl+F)";
+    if (ImGui::InputTextWithHint("##search", hint, searchBuf, sizeof(searchBuf),
                                  ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_EscapeClearsAll |
                                  ImGuiInputTextFlags_CallbackAlways,
                                  SearchInputCallback, &selectSearchAll)) {
-        thumbs.FlushPending();
-        filterDirty = true;
+        // Semantic mode searches on Enter only: each query is a paid request and
+        // live fuzzy results would flicker in underneath the ranking.
+        if (!semanticMode) {
+            thumbs.FlushPending();
+            filterDirty = true;
+        }
     }
+    if (semanticMode) ImGui::PopStyleColor();
     searchHasFocus = ImGui::IsItemActive();
+    // Enter deactivates a single-line InputText in the same frame, so the box
+    // reads as inactive by the time we check the key.
+    bool searchEnter = (searchHasFocus || ImGui::IsItemDeactivated()) &&
+                       (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false));
     if (searchHasFocus && (ImGui::IsKeyPressed(ImGuiKey_DownArrow, false) ||
                            (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_N, false)))) {
         int slot = 0;
@@ -136,18 +152,47 @@ void App::DrawGrid() {
         }
         SelectResult(*this, slot);
     }
-    if (searchHasFocus && ImGui::IsKeyPressed(ImGuiKey_Enter, false)) {
-        bool selectedResult = !selection.empty() &&
-            std::find(filtered.begin(), filtered.end(), *selection.begin()) != filtered.end();
-        if (!selectedResult) SelectResult(*this, 0);
-        focusGrid = true;
+    if (searchEnter) {
+        std::string semanticText = semanticMode ? SemanticTextFromQuery(ParseQueryText(searchBuf)) : "";
+        if (semanticMode && semanticBusy) {
+            // a query is already in flight; ignore
+        } else if (!semanticText.empty()) {
+            SemanticQueryText(semanticText); // Enter runs the (paid) text embedding; typing never does
+        } else if (semanticMode && SemanticActive()) {
+            thumbs.FlushPending();
+            filterDirty = true;              // re-apply filter terms to the current image/similar ranking
+        } else {
+            bool selectedResult = !selection.empty() &&
+                std::find(filtered.begin(), filtered.end(), *selection.begin()) != filtered.end();
+            if (!selectedResult) SelectResult(*this, 0);
+            focusGrid = true;
+        }
+    }
+    if (showSemanticBox) {
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!semanticAvail);
+        if (ImGui::Checkbox("Semantic", &semanticSearch)) {
+            thumbs.FlushPending();
+            filterDirty = true;
+            if (semanticSearch) focusSearch = true;
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            if (semanticAvail)
+                ImGui::SetTooltip("Rank indexed textures by meaning.\nDescribe a texture and press Enter, Ctrl+V an image,\n"
+                                  "drop an image file, or right-click a texture > Find similar.");
+            else
+                ImGui::SetTooltip("Index your textures first: Tools > Embedding search.");
+        }
     }
     ImGui::SameLine();
-    if (ImGui::Button("Clear") && searchBuf[0]) {
+    if (ImGui::Button("Clear") && (searchBuf[0] || SemanticActive() || semanticBusy)) {
         searchBuf[0] = 0;
+        SemanticClear();
         thumbs.FlushPending();
         filterDirty = true;
     }
+    if (ImGui::IsItemHovered() && SemanticActive()) ImGui::SetTooltip("Clear the text and the semantic query");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(sortW);
     static const char* sortNames[] = { "Relevance", "Name", "Newest", "Largest" };
@@ -159,7 +204,80 @@ void App::DrawGrid() {
     // normal filter rebuild. Apply them before requesting visible thumbnails.
     RebuildFilterIfDirty();
 
-    ImGui::TextDisabled("%zu results", totalFilterMatches);
+    // --- semantic query chip: what the grid is currently ranked against ---
+    if (semanticMode || semanticBusy) {
+        const float chipH = ImGui::GetFrameHeight();
+        if (semanticBusy) {
+            const char* dots[] = { "   ", ".  ", ".. ", "..." };
+            int phase = (int)(ImGui::GetTime() * 4.0) % 4;
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(Theme::Accent(), "Embedding query%s", dots[phase]);
+        } else if (SemanticActive()) {
+            ImGui::BeginGroup();
+            // query image: pasted / dropped, or the source texture of "find similar"
+            ID3D11ShaderResourceView* srv = semanticImageSRV;
+            int iw = semanticImageW, ih = semanticImageH;
+            if (semanticKind == SemanticKind::Asset && semanticAssetIndex >= 0 &&
+                semanticAssetIndex < (int)db.entries.size()) {
+                thumbs.Request(semanticAssetIndex, db.entries[semanticAssetIndex]);
+                const Thumb& t = thumbs.Get(semanticAssetIndex);
+                if (t.state == ThumbState::Ready && t.srv) { srv = t.srv; iw = t.w; ih = t.h; }
+            }
+            const float side = chipH * 2.0f;
+            if (srv && iw > 0 && ih > 0) {
+                float sc = (std::min)(side / iw, side / ih);
+                ImGui::Image((ImTextureID)(intptr_t)srv, ImVec2(iw * sc, ih * sc));
+                if (ImGui::IsItemHovered()) {
+                    ImGui::BeginTooltip();
+                    float bs = (std::min)(256.0f / iw, 256.0f / ih);
+                    ImGui::Image((ImTextureID)(intptr_t)srv, ImVec2(iw * bs, ih * bs));
+                    if (semanticKind == SemanticKind::Asset) ImGui::TextDisabled("Click to select the source texture");
+                    else ImGui::TextDisabled("%dx%d query image", iw, ih);
+                    ImGui::EndTooltip();
+                }
+                if (semanticKind == SemanticKind::Asset && ImGui::IsItemClicked()) {
+                    selection.clear(); selection.insert(semanticAssetIndex);
+                    scrollToIndex = semanticAssetIndex; SetPreview(semanticAssetIndex);
+                }
+                ImGui::SameLine();
+            }
+            ImGui::BeginGroup();
+            const char* kindName = semanticKind == SemanticKind::Text ? "Ranked by description"
+                                 : semanticKind == SemanticKind::Image ? "Ranked by image" : "Ranked by similarity";
+            ImGui::TextColored(Theme::Accent(), "%s", kindName);
+            if (semanticKind == SemanticKind::Text) ImGui::TextDisabled("\"%s\"", semanticLabel.c_str());
+            else ImGui::TextDisabled("%s", semanticLabel.c_str());
+            ImGui::EndGroup();
+            ImGui::SameLine();
+            if (ImGui::SmallButton("x##clearsem")) {
+                SemanticClear();
+                thumbs.FlushPending();
+                filterDirty = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Clear the semantic query (keeps the text)");
+            ImGui::EndGroup();
+        } else {
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("Describe a texture and press Enter, Ctrl+V an image, drop an image file, or select a texture and press S.");
+        }
+        if (embedUnindexedCount > 0 && !embedIndexer.Running()) {
+            ImGui::TextDisabled("%d texture%s not indexed yet and won't appear in rankings.", embedUnindexedCount,
+                                embedUnindexedCount == 1 ? " is" : "s are");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Index now...")) embedWindowOpen = true;
+        }
+        if (!semanticError.empty())
+            ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "%s", semanticError.c_str());
+    }
+    if (!semanticNotice.empty()) {
+        if (ImGui::GetTime() > semanticNoticeUntil) semanticNotice.clear();
+        else ImGui::TextColored(Theme::Accent(0.9f), "%s", semanticNotice.c_str());
+    }
+
+    if (SemanticActive())
+        ImGui::TextDisabled("%zu indexed textures ranked", totalFilterMatches);
+    else
+        ImGui::TextDisabled("%zu results", totalFilterMatches);
     static const char* typeNames[] = { "textures", "models", "audio" };
     for (int i = 0; i < 3; ++i) {
         ImGui::SameLine(0, 8);
@@ -216,6 +334,13 @@ void App::DrawGrid() {
         if (!selection.empty()) {
             auto it = std::find(filtered.begin(), filtered.end(), *selection.begin());
             if (it != filtered.end()) slot = (int)(it - filtered.begin());
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_S, false) && !io.KeyCtrl && SemanticReady() && !selection.empty()) {
+            int src = *selection.begin();
+            if (db.entries[src].type == AssetType::Texture) {
+                if (embedIndex.VectorFor(db.entries[src])) SemanticQueryAsset(src);
+                else SemanticNotify(db.entries[src].name + " is not in the embedding index.");
+            }
         }
         int next = slot;
         if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, false)) --next;
@@ -296,6 +421,17 @@ void App::DrawGrid() {
                 dl->AddRectFilled(ImVec2(ic.x + 1.5f, ic.y - 4), ImVec2(ic.x + 4, ic.y + 4), IM_COL32_WHITE);
             }
 
+            // similarity badge (semantic ranking)
+            if (SemanticActive() && idx < (int)semanticScore.size()) {
+                char buf[16];
+                snprintf(buf, sizeof(buf), "%.2f", semanticScore[idx]);
+                ImVec2 ts = ImGui::CalcTextSize(buf);
+                ImVec2 bp(imgP1.x - ts.x - 7, imgP0.y + 4);
+                dl->AddRectFilled(ImVec2(bp.x - 3, bp.y - 1), ImVec2(bp.x + ts.x + 3, bp.y + ts.y + 1),
+                                  IM_COL32(0, 0, 0, 160), 3.0f);
+                dl->AddText(bp, slot == 0 ? Theme::kAccent : IM_COL32(210, 210, 210, 255), buf);
+            }
+
             // model variant count badge
             if (e.type == AssetType::Model && !e.variants.empty()) {
                 char buf[16];
@@ -346,6 +482,14 @@ void App::DrawGrid() {
                 if (ImGui::MenuItem("Open in Explorer")) OpenInExplorer(idx);
                 if (e.type == AssetType::Texture) {
                     ImGui::Separator();
+                    if (SemanticReady()) {
+                        bool indexed = embedIndex.VectorFor(e) != nullptr;
+                        ImGui::BeginDisabled(!indexed);
+                        if (ImGui::MenuItem("Find similar textures", "S")) SemanticQueryAsset(idx);
+                        ImGui::EndDisabled();
+                        if (!indexed && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                            ImGui::SetTooltip("Not in the embedding index");
+                    }
                     if (ImGui::BeginMenu("Drag textures at")) {
                         auto radio = [&](const char* label, int opt) {
                             if (ImGui::MenuItem(label, nullptr, texDragOpt == opt))
@@ -402,6 +546,8 @@ void App::DrawGrid() {
                     }
                     ImGui::TextDisabled("%s", fmts.c_str());
                 }
+                if (SemanticActive() && idx < (int)semanticScore.size())
+                    ImGui::TextDisabled("Similarity %.3f", semanticScore[idx]);
                 ImGui::TextDisabled("Drag to copy into another app");
                 ImGui::EndTooltip();
             }

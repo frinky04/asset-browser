@@ -26,12 +26,16 @@ FetchContent_Declare(miniaudio
   GIT_TAG        0.11.22
   GIT_SHALLOW    TRUE
   SOURCE_SUBDIR  _does_not_exist_) # populate only; we compile miniaudio ourselves
+FetchContent_Declare(nlohmann_json
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_TAG        v3.11.3
+  GIT_SHALLOW    TRUE)
 FetchContent_Declare(ufbx
   GIT_REPOSITORY https://github.com/ufbx/ufbx.git
   GIT_TAG        v0.23.0
   GIT_SHALLOW    TRUE)
 
-FetchContent_MakeAvailable(imgui stb cgltf miniaudio ufbx)
+FetchContent_MakeAvailable(imgui stb cgltf miniaudio ufbx nlohmann_json)
 
 add_library(imgui_lib STATIC
   ${imgui_SOURCE_DIR}/imgui.cpp
@@ -56,6 +60,8 @@ add_executable(asset-browser WIN32
   src/ui_grid.cpp
   src/ui_preview.cpp
   src/dragdrop.cpp
+  src/embed.cpp
+  src/ui_embed.cpp
   src/third_party_impl.cpp
   src/stb_vorbis_impl.c
   ${ufbx_SOURCE_DIR}/ufbx.c)
@@ -70,6 +76,6 @@ target_include_directories(asset-browser PRIVATE
   ${cgltf_SOURCE_DIR}
   ${miniaudio_SOURCE_DIR}
   ${ufbx_SOURCE_DIR})
-target_link_libraries(asset-browser PRIVATE imgui_lib d3d11 dxgi d3dcompiler ole32 shell32 shlwapi)
+target_link_libraries(asset-browser PRIVATE imgui_lib nlohmann_json::nlohmann_json d3d11 dxgi d3dcompiler ole32 shell32 shlwapi winhttp crypt32)
 target_compile_options(asset-browser PRIVATE /utf-8 /EHsc /MP)
 target_compile_definitions(asset-browser PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)

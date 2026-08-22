@@ -16,6 +16,8 @@ Explorer.
 - Deduplicates equivalent model formats into one entry while preserving format choice.
 - Exports resized textures, audio selections, and seamless audio loops on demand.
 - Generates thumbnails in background workers and caches them for fast subsequent loads.
+- Optional semantic texture search (bring your own OpenRouter key): rank textures by a
+  text description, a pasted image, or similarity to another texture.
 
 <table>
   <tr>
@@ -47,6 +49,20 @@ Use `asset-browser.exe --root "D:\Assets"` for a one-off override.
 
 Asset Browser scans recursively, ignores unrelated file types, and stores only settings,
 thumbnail caches, and temporary exports under `%LOCALAPPDATA%\AssetBrowser`.
+
+### Semantic texture search
+
+Open **Tools → Embedding search**, paste an [OpenRouter](https://openrouter.ai) API key
+(or set `OPENROUTER_API_KEY`), and click **Index**. Colour textures are embedded with
+`google/gemini-embedding-2` from their 256 px thumbnails; the window shows the count and
+estimated cost before anything is sent (about $0.12 per 1,000 textures). Normal, roughness
+and other auxiliary maps are skipped. Only changed or new files are sent on later runs.
+
+Once indexed, tick **Semantic** next to the search box and press Enter to rank textures by
+description. `type:`, `pack:`, `ext:` and the other filters still apply. Ctrl+V with an image
+or image file on the clipboard ranks by visual similarity, and **Find similar textures** in a
+texture's context menu does the same without any API call. The key is stored encrypted for the
+current Windows user; vectors live in `%LOCALAPPDATA%\AssetBrowser\embeddings`.
 
 ## Build
 

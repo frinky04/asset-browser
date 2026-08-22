@@ -305,6 +305,15 @@ void Thumbs::Pump() {
     }
 }
 
+bool Thumbs::LoadOrMakeTextureThumb(const std::wstring& path, uint64_t mtime, uint64_t size,
+                                    int& w, int& h, std::vector<uint8_t>& rgba) const {
+    std::wstring cachePath = CachePathFor(path);
+    if (LoadCacheFile(cachePath, mtime, size, w, h, rgba)) return true;
+    if (!MakeTextureThumb(path, w, h, rgba)) return false;
+    SaveCacheFile(cachePath, mtime, size, w, h, rgba.data());
+    return true;
+}
+
 void Thumbs::ClearCacheDisk() {
     std::error_code ec;
     for (auto& de : fs::directory_iterator(cacheDir, ec)) {

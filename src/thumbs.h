@@ -41,6 +41,10 @@ public:
 
     int PendingJobs();
 
+    // Thread-safe: cached thumbnail RGBA, or decode + cache it now (textures only).
+    bool LoadOrMakeTextureThumb(const std::wstring& path, uint64_t mtime, uint64_t size,
+                                int& w, int& h, std::vector<uint8_t>& rgba) const;
+
 private:
     struct Job {
         int index = -1;
