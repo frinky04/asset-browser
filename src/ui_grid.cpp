@@ -139,6 +139,12 @@ void App::DrawGrid() {
     }
     if (semanticMode) ImGui::PopStyleColor();
     searchHasFocus = ImGui::IsItemActive();
+    // Esc on an already-empty box drops the semantic ranking too.
+    if (ImGui::IsItemDeactivated() && ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !searchBuf[0] && SemanticActive()) {
+        SemanticClear();
+        thumbs.FlushPending();
+        filterDirty = true;
+    }
     // Enter deactivates a single-line InputText in the same frame, so the box
     // reads as inactive by the time we check the key.
     bool searchEnter = (searchHasFocus || ImGui::IsItemDeactivated()) &&
@@ -182,7 +188,7 @@ void App::DrawGrid() {
                 ImGui::SetTooltip("Rank indexed textures, models and sounds by meaning.\nDescribe one and press Enter, Ctrl+V / drop an image\n"
                                   "or sound file, or select an asset and press S.");
             else
-                ImGui::SetTooltip("Index your assets first: Tools > Embedding search.");
+                ImGui::SetTooltip("Index your assets first: Semantic > Embedding settings & indexing.");
         }
     }
     ImGui::SameLine();
@@ -196,7 +202,9 @@ void App::DrawGrid() {
     ImGui::SameLine();
     ImGui::SetNextItemWidth(sortW);
     static const char* sortNames[] = { "Relevance", "Name", "Newest", "Largest" };
-    if (ImGui::Combo("##sort", &sortMode, sortNames, IM_ARRAYSIZE(sortNames))) filterDirty = true;
+    static const char* sortNamesSemantic[] = { "Similarity", "Name", "Newest", "Largest" };
+    if (ImGui::Combo("##sort", &sortMode, SemanticActive() ? sortNamesSemantic : sortNames, IM_ARRAYSIZE(sortNames)))
+        filterDirty = true;
     if (!searchBuf[0] && sortMode == 0 && ImGui::IsItemHovered())
         ImGui::SetTooltip("Relevance applies when searching");
 
@@ -243,7 +251,8 @@ void App::DrawGrid() {
             }
             ImGui::BeginGroup();
             const char* kindName = semanticKind == SemanticKind::Text ? "Ranked by description"
-                                 : semanticKind == SemanticKind::Image ? "Ranked by example" : "Ranked by similarity";
+                                 : semanticKind == SemanticKind::Image ? "Ranked by image"
+                                 : semanticKind == SemanticKind::Audio ? "Ranked by sound" : "Ranked by similarity";
             ImGui::TextColored(Theme::Accent(), "%s", kindName);
             if (semanticKind == SemanticKind::Text) ImGui::TextDisabled("\"%s\"", semanticLabel.c_str());
             else ImGui::TextDisabled("%s", semanticLabel.c_str());
@@ -335,13 +344,8 @@ void App::DrawGrid() {
             auto it = std::find(filtered.begin(), filtered.end(), *selection.begin());
             if (it != filtered.end()) slot = (int)(it - filtered.begin());
         }
-        if (ImGui::IsKeyPressed(ImGuiKey_S, false) && !io.KeyCtrl && SemanticReady() && !selection.empty()) {
-            int src = *selection.begin();
-            {
-                if (embedIndex.VectorFor(db.entries[src])) SemanticQueryAsset(src);
-                else SemanticNotify(db.entries[src].name + " is not in the embedding index.");
-            }
-        }
+        if (ImGui::IsKeyPressed(ImGuiKey_S, false) && !io.KeyCtrl && !selection.empty())
+            SemanticFindSimilar(*selection.begin());
         int next = slot;
         if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, false)) --next;
         if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, false)) ++next;

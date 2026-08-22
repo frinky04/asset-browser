@@ -110,6 +110,16 @@ void App::DrawPreview() {
     if (ImGui::Button("Copy path", ImVec2(120, 0))) CopyPathToClipboard(previewIndex);
     ImGui::SameLine();
     if (ImGui::Button("Explorer", ImVec2(120, 0))) OpenInExplorer(previewIndex);
+    if (e.type != AssetType::Audio && SemanticReady()) {
+        bool indexed = embedIndex.VectorFor(e) != nullptr;
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!indexed);
+        if (ImGui::Button("Find similar", ImVec2(120, 0))) SemanticFindSimilar(previewIndex);
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(indexed ? "Rank the library by similarity to this asset (S). No API call."
+                                      : "Not in the embedding index");
+    }
     ImGui::Separator();
 
     ImVec2 avail = ImGui::GetContentRegionAvail();

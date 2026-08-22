@@ -62,7 +62,7 @@ struct App {
     bool texTile = false;           // tiling (wrap) preview mode
 
     // embedding search (ui_embed.cpp)
-    enum class SemanticKind : uint8_t { None, Text, Image, Asset };
+    enum class SemanticKind : uint8_t { None, Text, Image, Audio, Asset };
     EmbedSettings embedSettings;
     EmbedIndex embedIndex;
     EmbedIndexer embedIndexer;
@@ -87,6 +87,7 @@ struct App {
     // refreshed ~1/s in PumpEmbed
     int embedIndexableCount = 0, embedUnindexedCount = 0;
     int embedUnindexedTex = 0, embedUnindexedAudio = 0, embedUnindexedModel = 0;
+    int embedIndexedByType[3] = { 0, 0, 0 };  // current vectors per AssetType
     double embedAudioSecondsKnown = 0;        // capped seconds of un-indexed audio with probed durations
     int embedAudioUnknown = 0;                // un-indexed audio still awaiting a duration probe
     // audio duration probing (for the cost estimate)
@@ -155,6 +156,7 @@ struct App {
     void SemanticQueryAsset(int index);     // "find similar": uses stored vector, no API call
     void SemanticClear();
     void SemanticNotify(const std::string& text);
+    bool SemanticFindSimilar(int index);    // S / menu: similar to an indexed asset, with user feedback
     bool SemanticActive() const { return semanticSearch && semanticKind != SemanticKind::None && !semanticQuery.empty(); }
     bool PasteImageQuery();                 // clipboard bitmap or file -> image query
     bool DropFileQuery(const std::wstring& file);  // dropped/copied image or audio file -> query

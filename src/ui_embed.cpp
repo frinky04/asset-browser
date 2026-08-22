@@ -172,6 +172,10 @@ void App::PumpEmbed() {
         for (const AssetEntry& e : db.entries) if (EmbedIsIndexable(e)) ++embedIndexableCount;
         embedUnindexedTex = embedUnindexedAudio = embedUnindexedModel = embedAudioUnknown = 0;
         embedAudioSecondsKnown = 0;
+        embedIndexedByType[0] = embedIndexedByType[1] = embedIndexedByType[2] = 0;
+        if (embedIndexLoaded)
+            for (const AssetEntry& e : db.entries)
+                if (embedIndex.HasCurrent(e)) ++embedIndexedByType[(int)e.type];
         for (int i : EmbedUnindexed()) {
             const AssetEntry& e = db.entries[i];
             if (e.type == AssetType::Model) { ++embedUnindexedModel; continue; }
@@ -487,7 +491,7 @@ void App::SemanticQueryAudio(const PcmData& pcm, uint64_t f0, uint64_t f1, const
         std::lock_guard<std::mutex> lock(semanticJob.m);
         semanticJob.result = std::move(r);
         semanticJob.id = id;
-        semanticJob.kind = SemanticKind::Image;
+        semanticJob.kind = SemanticKind::Audio;
         semanticJob.label = labelSec;
         semanticJob.ready = true;
     });
@@ -500,6 +504,23 @@ void App::SemanticQueryPreviewSelection() {
     uint64_t f0 = 0, f1 = 0;
     bool hasSel = AudioSelectionFrames(f0, f1);
     SemanticQueryAudio(previewPcm, f0, f1, hasSel ? "selection of " + e.name : e.name);
+}
+
+bool App::SemanticFindSimilar(int index) {
+    if (index < 0 || index >= (int)db.entries.size()) return false;
+    const AssetEntry& e = db.entries[index];
+    if (!SemanticReady()) { SemanticNotify("Index your assets first: Semantic > Embedding settings & indexing."); return false; }
+    if (!embedIndex.VectorFor(e)) {
+        if (e.type == AssetType::Model && !EmbedModelRenderable(e.ext))
+            SemanticNotify(e.name + " cannot be rendered, so it is not indexed.");
+        else if (!EmbedIsIndexable(e))
+            SemanticNotify(e.name + " is an auxiliary map and is not indexed.");
+        else
+            SemanticNotify(e.name + " is not indexed yet. Semantic > Embedding settings & indexing.");
+        return false;
+    }
+    SemanticQueryAsset(index);
+    return true;
 }
 
 void App::SemanticQueryAsset(int index) {
@@ -636,13 +657,14 @@ void App::DrawEmbedWindow() {
     }
     ImGui::SetNextItemWidth(180);
     int mode = (int)embedSettings.mode;
-    static const char* modeNames[] = { "Hybrid (image + filename)", "Image only" };
+    static const char* modeNames[] = { "Hybrid (media + names)", "Media only" };
     if (ImGui::Combo("Input", &mode, modeNames, 2)) { embedSettings.mode = (EmbedMode)mode; changed = true; }
     ImGui::SameLine();
     ImGui::TextDisabled("(?)");
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Hybrid sends the filename words with the image; much better for text\n"
-                          "queries when files are named sensibly. Image only is purer for image queries.");
+        ImGui::SetTooltip("Hybrid sends file and folder names with the thumbnail, render or audio;\n"
+                          "much better for text queries when packs are named sensibly.\n"
+                          "Media only ignores names, which is purer for search-by-example.");
     ImGui::SetNextItemWidth(180);
     int dimsIdx = embedSettings.dims == 3072 ? 1 : 0;
     static const char* dimNames[] = { "768 (compact)", "3072 (full)" };
@@ -679,11 +701,14 @@ void App::DrawEmbedWindow() {
     int todo = embedUnindexedCount;
     bool mismatch = embedIndexLoaded && !embedIndex.Empty() && !embedIndex.Matches(embedSettings);
 
-    if (embedIndexLoaded && !embedIndex.Empty())
-        ImGui::Text("Index: %zu vectors, %s, %s, %d dims", embedIndex.entries.size(), embedIndex.model.c_str(),
-                    embedIndex.mode == EmbedMode::Hybrid ? "hybrid" : "media only", embedIndex.dims);
-    else
+    if (embedIndexLoaded && !embedIndex.Empty()) {
+        ImGui::Text("Index: %d textures, %d models, %d sounds", embedIndexedByType[0], embedIndexedByType[1], embedIndexedByType[2]);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%s, %s, %d dims)", embedIndex.model.c_str(),
+                            embedIndex.mode == EmbedMode::Hybrid ? "hybrid" : "media only", embedIndex.dims);
+    } else {
         ImGui::TextDisabled("No index for this library yet.");
+    }
     if (mismatch)
         ImGui::TextColored(Theme::Accent(), "Settings differ from the index. Indexing will rebuild it from scratch.");
 
@@ -702,76 +727,71 @@ void App::DrawEmbedWindow() {
             ImGui::SetTooltip("Settings changed: use \"Rebuild index\" below to re-embed every asset type.");
     };
 
-    // -- textures
+    // -- per-type rows: what is left to index, what it costs, and a button each
     double texCost = embedUnindexedTex * (double)kEmbedTokensPerImage * embedPrices.image;
-    ImGui::AlignTextToFramePadding();
-    if (embedUnindexedTex > 0) {
-        if (priceKnown) ImGui::Text("Textures: %d to index, about $%.4f", embedUnindexedTex, texCost);
-        else ImGui::Text("Textures: %d to index%s", embedUnindexedTex, priceNote().c_str());
-    } else {
-        ImGui::TextDisabled("Textures: all indexed (colour maps; normal/roughness/etc. are skipped)");
-    }
-    if (embedUnindexedTex > 0) {
-        ImGui::SameLine();
-        ImGui::BeginDisabled(!canIndexType);
-        char label[64];
-        snprintf(label, sizeof(label), "Index %d textures##tex", embedUnindexedTex);
-        if (ImGui::Button(label)) EmbedStartIndexing(false, EmbedTex);
-        ImGui::EndDisabled();
-        mismatchTip();
-    }
-
-    // -- models: six rendered views in one contact sheet, priced like an image
     double modelCost = embedUnindexedModel * (double)kEmbedTokensPerImage * embedPrices.image;
-    ImGui::AlignTextToFramePadding();
-    if (embedUnindexedModel > 0) {
-        if (priceKnown) ImGui::Text("Models: %d to index, about $%.4f", embedUnindexedModel, modelCost);
-        else ImGui::Text("Models: %d to index%s", embedUnindexedModel, priceNote().c_str());
-        ImGui::SameLine();
-        ImGui::BeginDisabled(!canIndexType);
-        char label[64];
-        snprintf(label, sizeof(label), "Index %d models##model", embedUnindexedModel);
-        if (ImGui::Button(label)) EmbedStartIndexing(false, EmbedModel);
-        ImGui::EndDisabled();
-        mismatchTip();
-        if (!mismatch && ImGui::IsItemHovered())
-            ImGui::SetTooltip("Each model is rendered in-app from six angles into one image.\n"
-                              "GLB, glTF, FBX and OBJ only; DAE cannot be rendered and is skipped.");
-    } else {
-        ImGui::TextDisabled("Models: all indexed (GLB/glTF/FBX/OBJ; DAE cannot be rendered)");
-    }
-
-    // -- sounds: 25 tokens per second, first 12 s of each clip
     double audioSeconds = embedAudioSecondsKnown + embedAudioUnknown * kEmbedAudioMaxSeconds; // unknown = upper bound
     double audioCost = audioSeconds * kEmbedTokensPerAudioSecond * embedPrices.audio;
-    ImGui::AlignTextToFramePadding();
-    if (embedUnindexedAudio > 0) {
-        char secs[64];
-        if (audioSeconds >= 3600) snprintf(secs, sizeof(secs), "%.1f h", audioSeconds / 3600);
-        else if (audioSeconds >= 60) snprintf(secs, sizeof(secs), "%.1f min", audioSeconds / 60);
-        else snprintf(secs, sizeof(secs), "%.0f s", audioSeconds);
-        if (priceKnown) ImGui::Text("Sounds: %d to index, %s of audio, %s$%.4f", embedUnindexedAudio, secs,
-                                    embedAudioUnknown ? "at most " : "about ", audioCost);
-        else ImGui::Text("Sounds: %d to index, %s of audio%s", embedUnindexedAudio, secs, priceNote().c_str());
-        if (embedAudioUnknown) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("(measuring %d clips...)", embedAudioUnknown);
+    char audioLen[64];
+    if (audioSeconds >= 3600) snprintf(audioLen, sizeof(audioLen), "%.1f h", audioSeconds / 3600);
+    else if (audioSeconds >= 60) snprintf(audioLen, sizeof(audioLen), "%.1f min", audioSeconds / 60);
+    else snprintf(audioLen, sizeof(audioLen), "%.0f s", audioSeconds);
+
+    struct Row { const char* name; int count; double cost; bool upperBound; int type; const char* doneNote; const char* tip; };
+    char audioNote[96];
+    snprintf(audioNote, sizeof(audioNote), "%s of audio%s", audioLen,
+             embedAudioUnknown ? " (measuring...)" : "");
+    const Row rows[] = {
+        { "Textures", embedUnindexedTex, texCost, false, EmbedTex,
+          "colour maps only; normal/roughness/etc. are skipped",
+          "Each texture is sent as its 256 px thumbnail." },
+        { "Models", embedUnindexedModel, modelCost, false, EmbedModel,
+          "GLB/glTF/FBX/OBJ; DAE cannot be rendered",
+          "Each model is rendered in-app from six angles into one image.\nGLB, glTF, FBX and OBJ only." },
+        { "Sounds", embedUnindexedAudio, audioCost, embedAudioUnknown > 0, EmbedAudio,
+          "",
+          "Only the first 12 seconds of each clip are sent (16 kHz mono).\nAudio costs about 14x more per item than textures." },
+    };
+    if (ImGui::BeginTable("embedtypes", 3, ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("type", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableSetupColumn("status", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("action", ImGuiTableColumnFlags_WidthFixed, 150.0f);
+        for (const Row& r : rows) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(r.name);
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            if (r.count > 0) {
+                std::string line = std::to_string(r.count) + " to index";
+                if (r.type == EmbedAudio) line += std::string(", ") + audioNote;
+                if (priceKnown) {
+                    char c[48];
+                    snprintf(c, sizeof(c), ", %s$%.4f", r.upperBound ? "at most " : "about ", r.cost);
+                    line += c;
+                } else {
+                    line += priceNote();
+                }
+                ImGui::TextUnformatted(line.c_str());
+            } else {
+                ImGui::TextDisabled("all indexed%s%s", r.doneNote[0] ? " (" : "", r.doneNote);
+                if (r.doneNote[0]) ImGui::SameLine(0, 0), ImGui::TextDisabled(")");
+            }
+            ImGui::TableNextColumn();
+            if (r.count > 0) {
+                ImGui::BeginDisabled(!canIndexType);
+                char label[64];
+                snprintf(label, sizeof(label), "Index %d##%s", r.count, r.name);
+                if (ImGui::Button(label, ImVec2(-1, 0))) EmbedStartIndexing(false, r.type);
+                ImGui::EndDisabled();
+                mismatchTip();
+                if (!mismatch && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", r.tip);
+            }
         }
-    } else {
-        ImGui::TextDisabled("Sounds: all indexed");
+        ImGui::EndTable();
     }
-    if (embedUnindexedAudio > 0) {
-        ImGui::SameLine();
-        ImGui::BeginDisabled(!canIndexType);
-        char label[64];
-        snprintf(label, sizeof(label), "Index %d sounds##audio", embedUnindexedAudio);
-        if (ImGui::Button(label)) EmbedStartIndexing(false, EmbedAudio);
-        ImGui::EndDisabled();
-        mismatchTip();
-    }
-    if (!mismatch && ImGui::IsItemHovered() && embedUnindexedAudio > 0)
-        ImGui::SetTooltip("Only the first %.0f seconds of each clip are embedded (16 kHz mono).\n"
-                          "Audio costs about 14x more per item than textures.", kEmbedAudioMaxSeconds);
+
     if (todo > 0)
         ImGui::TextDisabled("Roughly %.1f min at %d parallel requests.",
                             (embedUnindexedTex * 0.85 + embedUnindexedModel * 1.2 + embedUnindexedAudio * 2.5) / (std::max)(1, embedSettings.concurrency) / 60.0,

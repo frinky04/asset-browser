@@ -265,8 +265,35 @@ void App::DrawMenuBar(float& menuH) {
             ImGui::SliderFloat("Tile size", &tileSize, 72.0f, 220.0f, "%.0f px");
             ImGui::EndMenu();
         }
-        if (ImGui::BeginMenu("Tools")) {
-            if (ImGui::MenuItem("Embedding search...", nullptr, embedWindowOpen))
+        if (ImGui::BeginMenu("Semantic")) {
+            bool ready = SemanticReady();
+            ImGui::BeginDisabled(!ready);
+            if (ImGui::MenuItem("Semantic search", nullptr, &semanticSearch)) {
+                thumbs.FlushPending();
+                filterDirty = true;
+                if (semanticSearch) focusSearch = true;
+            }
+            int sel = selection.empty() ? -1 : *selection.begin();
+            bool selIndexed = sel >= 0 && embedIndex.VectorFor(db.entries[sel]) != nullptr;
+            ImGui::BeginDisabled(!selIndexed);
+            if (ImGui::MenuItem("Find similar to selection", "S")) SemanticFindSimilar(sel);
+            ImGui::EndDisabled();
+            if (ImGui::MenuItem("Search by clipboard image or sound", "Ctrl+V")) PasteImageQuery();
+            ImGui::BeginDisabled(!SemanticActive());
+            if (ImGui::MenuItem("Clear semantic query", "Esc")) {
+                SemanticClear();
+                thumbs.FlushPending();
+                filterDirty = true;
+            }
+            ImGui::EndDisabled();
+            ImGui::EndDisabled();
+            ImGui::Separator();
+            if (embedUnindexedCount > 0 && !embedKey.empty()) {
+                char label[64];
+                snprintf(label, sizeof(label), "%d new asset%s to index...", embedUnindexedCount, embedUnindexedCount == 1 ? "" : "s");
+                if (ImGui::MenuItem(label)) embedWindowOpen = true;
+            }
+            if (ImGui::MenuItem("Embedding settings & indexing...", nullptr, embedWindowOpen))
                 embedWindowOpen = !embedWindowOpen;
             ImGui::EndMenu();
         }

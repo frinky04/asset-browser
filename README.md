@@ -52,7 +52,7 @@ thumbnail caches, and temporary exports under `%LOCALAPPDATA%\AssetBrowser`.
 
 ### Semantic search (textures, models and sounds)
 
-Open **Tools → Embedding search**, paste an [OpenRouter](https://openrouter.ai) API key
+Open **Semantic → Embedding settings & indexing**, paste an [OpenRouter](https://openrouter.ai) API key
 (or set `OPENROUTER_API_KEY`), and index your textures, models and/or sounds. Assets are
 embedded with `google/gemini-embedding-2`: colour textures from their 256 px thumbnails
 (about $0.12 per 1,000; normal/roughness and other auxiliary maps are skipped), models as a
