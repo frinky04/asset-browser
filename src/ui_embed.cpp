@@ -177,7 +177,7 @@ void App::EmbedLoadIndexForRoot() {
     }
     embedIndexLoaded = embedIndex.Load(EmbedIndexPathForRoot());
     if (embedIndex.loadedFromBackup)
-        SemanticNotify("The embedding index was unreadable; restored it from the newest backup.");
+        SemanticNotify("Index was unreadable; restored from backup.");
     // Query vectors only make sense against the index they were embedded for.
     semanticTextCache.clear();
     SemanticClear();
@@ -222,11 +222,10 @@ void App::PumpEmbed() {
         if (embedIndexer.aborted)
             snprintf(msg, sizeof(msg), "Indexing stopped: %s", embedIndexer.abortReason.c_str());
         else if (embedIndexer.budgetHit)
-            snprintf(msg, sizeof(msg), "Spending cap reached after %d assets ($%.4f). Progress is kept; raise the cap or run again to continue.",
+            snprintf(msg, sizeof(msg), "Spending cap reached: %d indexed, $%.4f. Run again to continue.",
                      embedIndexer.done.load(), embedIndexer.costSoFar());
         else
-            snprintf(msg, sizeof(msg), "Indexed %d assets for $%.4f%s", embedIndexer.done.load(),
-                     embedIndexer.costSoFar(), semanticSearch ? "." : ". Tick Semantic next to the search box to use it.");
+            snprintf(msg, sizeof(msg), "Indexed %d assets, $%.4f.", embedIndexer.done.load(), embedIndexer.costSoFar());
         SemanticNotify(msg);
         embedCountedAt = -1; // refresh counts now
     }
@@ -357,7 +356,7 @@ void App::EmbedKeepStaleVectors() {
         if (!EmbedExcluded(e) && embedIndex.IsStale(e)) { embedIndex.Adopt(e); ++n; }
     embedCountedAt = -1;
     if (SemanticActive()) { thumbs.FlushPending(); filterDirty = true; }
-    SemanticNotify("Kept existing vectors for " + std::to_string(n) + " changed files.");
+    SemanticNotify("Kept vectors for " + std::to_string(n) + " changed files.");
 }
 
 std::vector<int> App::EmbedPendingIn(const std::vector<int>& candidates) const {
@@ -401,11 +400,11 @@ std::vector<int> App::EmbedEntriesUnderFolder(const std::string& relFolder) cons
 }
 
 bool App::EmbedStartIndexingSubset(std::vector<int> candidates, const std::string& what) {
-    if (embedIndexer.Running()) { SemanticNotify("Indexing is already running."); return false; }
-    if (embedKey.empty()) { SemanticNotify("Add an OpenRouter key first: Semantic > Embedding settings & indexing."); return false; }
-    if (db.scanning) { SemanticNotify("Wait for the library scan to finish."); return false; }
+    if (embedIndexer.Running()) { SemanticNotify("Already indexing."); return false; }
+    if (embedKey.empty()) { SemanticNotify("No API key. Semantic > Settings & indexing"); return false; }
+    if (db.scanning) { SemanticNotify("Scan still running."); return false; }
     if (embedIndexLoaded && !embedIndex.Empty() && !embedIndex.Matches(embedSettings)) {
-        SemanticNotify("Embedding settings changed; rebuild the index from the settings window first.");
+        SemanticNotify("Settings changed; rebuild the index first.");
         return false;
     }
     std::vector<int> pending = EmbedPendingIn(candidates);
@@ -441,7 +440,7 @@ bool App::EmbedStartIndexingSubset(std::vector<int> candidates, const std::strin
             mime = "image/jpeg";
             return th->LoadOrMakeTextureThumb(j.path, j.mtime, j.size, w, h, rgba) && EncodeJpeg(rgba.data(), w, h, data);
         }, embedSettings.budgetUsd);
-    SemanticNotify("Indexing " + std::to_string(pending.size()) + " assets in " + what + ".");
+    SemanticNotify("Indexing " + std::to_string(pending.size()) + " in " + what + ".");
     return true;
 }
 
@@ -461,7 +460,7 @@ void App::EmbedIndexMenuItem(const std::vector<int>& candidates, const char* wha
     if (ImGui::MenuItem(label)) EmbedStartIndexingSubset(candidates, what);
     ImGui::EndDisabled();
     if (embedIndexer.Running() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-        ImGui::SetTooltip("Indexing is already running");
+        ImGui::SetTooltip("Already indexing");
 }
 
 void App::EmbedStartIndexing(bool rebuild, int types) {
@@ -701,15 +700,15 @@ void App::SemanticQueryPreviewSelection() {
 bool App::SemanticFindSimilar(int index) {
     if (index < 0 || index >= (int)db.entries.size()) return false;
     const AssetEntry& e = db.entries[index];
-    if (!SemanticReady()) { SemanticNotify("Index your assets first: Semantic > Embedding settings & indexing."); return false; }
-    if (EmbedExcluded(e)) { SemanticNotify(e.name + " is in an excluded folder."); return false; }
+    if (!SemanticReady()) { SemanticNotify("No index yet. Semantic > Settings & indexing"); return false; }
+    if (EmbedExcluded(e)) { SemanticNotify(e.name + " is excluded."); return false; }
     if (!embedIndex.VectorFor(e)) {
         if (e.type == AssetType::Model && !EmbedModelRenderable(e.ext))
-            SemanticNotify(e.name + " cannot be rendered, so it is not indexed.");
+            SemanticNotify(e.name + ": format cannot be rendered.");
         else if (!EmbedIsIndexable(e))
-            SemanticNotify(e.name + " is an auxiliary map and is not indexed.");
+            SemanticNotify(e.name + " is an auxiliary map.");
         else
-            SemanticNotify(e.name + " is not indexed yet. Semantic > Embedding settings & indexing.");
+            SemanticNotify(e.name + " is not indexed.");
         return false;
     }
     SemanticQueryAsset(index);
@@ -749,7 +748,7 @@ bool App::PasteImageQuery() {
     int w = 0, h = 0;
     std::string label;
     if (!ReadClipboardImage(hwnd, rgba, w, h, label)) {
-        SemanticNotify("Clipboard has no image or file. Copy a screenshot region, an image, or a sound file, then Ctrl+V.");
+        SemanticNotify("Clipboard has no image or file.");
         return false;
     }
     SemanticQueryImage(rgba.data(), w, h, label);
@@ -780,19 +779,19 @@ bool App::DropFileQuery(const std::wstring& file) {
 
 void App::DrawEmbedWindow() {
     ImGui::SetNextWindowSize(ImVec2(520, 560), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Embedding search", &embedWindowOpen)) { ImGui::End(); return; }
+    if (!ImGui::Begin("Semantic indexing", &embedWindowOpen)) { ImGui::End(); return; }
 
     bool running = embedIndexer.Running();
 
     // ---- status header
     {
         const char* state; ImVec4 col = Theme::Accent();
-        if (embedKey.empty()) { state = "Not set up: add an OpenRouter API key below."; col = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled); }
-        else if (db.root.empty()) { state = "Choose an asset folder to index."; col = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled); }
+        if (embedKey.empty()) { state = "No API key"; col = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled); }
+        else if (db.root.empty()) { state = "No asset folder"; col = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled); }
         else if (running) state = "Indexing...";
-        else if (!embedIndexLoaded || embedIndex.Empty()) state = "Key ready. Index your assets to enable semantic search.";
-        else if (embedUnindexedCount > 0) state = "Semantic search ready; some assets are not indexed yet.";
-        else state = "Semantic search ready: every indexable asset is indexed.";
+        else if (!embedIndexLoaded || embedIndex.Empty()) state = "Ready to index";
+        else if (embedUnindexedCount > 0) state = "Ready; some assets not indexed";
+        else state = "Fully indexed";
         ImGui::TextColored(col, "%s", state);
         ImGui::Spacing();
     }
@@ -800,11 +799,11 @@ void App::DrawEmbedWindow() {
     // ---- API key
     ImGui::SeparatorText("OpenRouter API key");
     if (embedKey.empty())
-        ImGui::TextDisabled("No key set. Paste a key or set OPENROUTER_API_KEY.");
+        ImGui::TextDisabled("Paste a key, or set OPENROUTER_API_KEY.");
     else if (embedKeyFromEnv)
-        ImGui::TextDisabled("Using key from OPENROUTER_API_KEY environment variable.");
+        ImGui::TextDisabled("From OPENROUTER_API_KEY.");
     else
-        ImGui::TextDisabled("Key stored (encrypted for this Windows user).");
+        ImGui::TextDisabled("Stored, encrypted for this user.");
     ImGui::SetNextItemWidth(-120);
     ImGui::InputTextWithHint("##key", "sk-or-...", embedKeyBuf, sizeof(embedKeyBuf), ImGuiInputTextFlags_Password);
     ImGui::SameLine();
@@ -855,9 +854,7 @@ void App::DrawEmbedWindow() {
     ImGui::SameLine();
     ImGui::TextDisabled("(?)");
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Hybrid sends file and folder names with the thumbnail, render or audio;\n"
-                          "much better for text queries when packs are named sensibly.\n"
-                          "Media only ignores names, which is purer for search-by-example.");
+        ImGui::SetTooltip("Hybrid adds file and folder names: better text search.\nMedia only: purer search-by-example.");
     ImGui::SetNextItemWidth(180);
     int dimsIdx = embedSettings.dims == 3072 ? 1 : 0;
     static const char* dimNames[] = { "768 (compact)", "3072 (full)" };
@@ -873,8 +870,7 @@ void App::DrawEmbedWindow() {
     ImGui::SameLine();
     ImGui::TextDisabled("(?)");
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("0 = no cap. A run stops once OpenRouter's reported cost passes this;\n"
-                          "everything embedded so far is kept, so you can continue later.");
+        ImGui::SetTooltip("0 = no cap. Stops the run at this cost; progress is kept.");
     ImGui::EndDisabled();
     if (changed) embedSettings.Save(SettingsFile());
     if (embedPriceModel != embedSettings.model) embedPriceFetched = false;
@@ -914,7 +910,7 @@ void App::DrawEmbedWindow() {
         ImGui::TextDisabled("No index for this library yet.");
     }
     if (mismatch)
-        ImGui::TextColored(Theme::Accent(), "Settings differ from the index. Indexing will rebuild it from scratch.");
+        ImGui::TextColored(Theme::Accent(), "Settings differ from the index; rebuild required.");
 
     bool priceKnown = embedPrices.image > 0 || embedPrices.audio > 0;
     auto priceNote = [&]() -> std::string {
@@ -928,7 +924,7 @@ void App::DrawEmbedWindow() {
     bool canIndexType = canIndex && !mismatch;
     auto mismatchTip = [&] {
         if (mismatch && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("Settings changed: use \"Rebuild index\" below to re-embed every asset type.");
+            ImGui::SetTooltip("Rebuild required");
     };
 
     // -- per-type rows: what is left to index, what it costs, and a button each
@@ -943,18 +939,17 @@ void App::DrawEmbedWindow() {
 
     struct Row { const char* name; int count; double cost; bool upperBound; int type; const char* doneNote; const char* tip; };
     char audioNote[96];
-    snprintf(audioNote, sizeof(audioNote), "%s of audio%s", audioLen,
-             embedAudioUnknown ? " (measuring...)" : "");
+    snprintf(audioNote, sizeof(audioNote), "%s%s", audioLen, embedAudioUnknown ? " (measuring)" : "");
     const Row rows[] = {
         { "Textures", embedUnindexedTex, texCost, false, EmbedTex,
-          "colour maps only; normal/roughness/etc. are skipped",
-          "Each texture is sent as its 256 px thumbnail." },
+          "aux maps skipped",
+          "256 px thumbnail" },
         { "Models", embedUnindexedModel, modelCost, false, EmbedModel,
-          "GLB/glTF/FBX/OBJ; DAE cannot be rendered",
-          "Each model is rendered in-app from six angles into one image.\nGLB, glTF, FBX and OBJ only." },
+          "DAE skipped",
+          "Six rendered views; GLB, glTF, FBX, OBJ" },
         { "Sounds", embedUnindexedAudio, audioCost, embedAudioUnknown > 0, EmbedAudio,
           "",
-          "Only the first 12 seconds of each clip are sent (16 kHz mono).\nAudio costs about 14x more per item than textures." },
+          "First 12 s, 16 kHz mono; ~14x texture cost" },
     };
     if (ImGui::BeginTable("embedtypes", 3, ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("type", ImGuiTableColumnFlags_WidthFixed, 70.0f);
@@ -997,11 +992,11 @@ void App::DrawEmbedWindow() {
     }
 
     if (todo > 0)
-        ImGui::TextDisabled("Roughly %.1f min at %d parallel requests.",
+        ImGui::TextDisabled("~%.1f min at %d parallel.",
                             (embedUnindexedTex * 0.85 + embedUnindexedModel * 1.2 + embedUnindexedAudio * 2.5) / (std::max)(1, embedSettings.concurrency) / 60.0,
                             embedSettings.concurrency);
     else if (!running)
-        ImGui::TextDisabled("Everything is indexed.");
+        ImGui::TextDisabled("Nothing to index.");
 
     if (running) {
         int done = embedIndexer.done.load(), failed = embedIndexer.failed.load(), total = embedIndexer.total.load();
@@ -1015,7 +1010,7 @@ void App::DrawEmbedWindow() {
         ImGui::Text("Spent so far: $%.4f", embedIndexer.costSoFar());
         if (ImGui::Button("Stop")) embedIndexer.Cancel();
         ImGui::SameLine();
-        ImGui::TextDisabled("Progress is kept; run again to continue.");
+        ImGui::TextDisabled("Progress is kept.");
     } else {
         ImGui::BeginDisabled(!canIndex || todo == 0);
         char label[64];
@@ -1035,20 +1030,19 @@ void App::DrawEmbedWindow() {
         if (ImGui::BeginPopupModal("Rebuild embedding index?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
             embedConfirmRebuild = false;
             size_t n = embedIndex.entries.size();
-            ImGui::Text("This discards all %zu existing vectors and re-embeds every asset.", n);
-            ImGui::TextDisabled("The current index is first copied to a timestamped .bak beside it,\nso you can restore it from this window if needed.");
+            ImGui::Text("Discard %zu vectors and re-embed everything?", n);
+            ImGui::TextDisabled("A backup is kept.");
             ImGui::Spacing();
             if (ImGui::Button("Rebuild", ImVec2(120, 0))) { EmbedStartIndexing(true, embedRebuildTypes); ImGui::CloseCurrentPopup(); }
             ImGui::SameLine();
             if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
         }
-        if (embedKey.empty()) { ImGui::SameLine(); ImGui::TextDisabled("(needs an API key)"); }
-        else if (db.scanning) { ImGui::SameLine(); ImGui::TextDisabled("(wait for the scan to finish)"); }
+        if (db.scanning) { ImGui::SameLine(); ImGui::TextDisabled("(scanning)"); }
         if (embedIndexer.aborted)
             ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "Stopped: %s", embedIndexer.abortReason.c_str());
         else if (embedIndexer.budgetHit)
-            ImGui::TextColored(Theme::Accent(), "Last run hit the spending cap: %d embedded, $%.4f", embedIndexer.done.load(), embedIndexer.costSoFar());
+            ImGui::TextColored(Theme::Accent(), "Last run: spending cap reached, %d embedded, $%.4f", embedIndexer.done.load(), embedIndexer.costSoFar());
         else if (embedIndexer.total > 0)
             ImGui::TextDisabled("Last run: %d embedded, %d failed, $%.4f", embedIndexer.done.load(),
                                 embedIndexer.failed.load(), embedIndexer.costSoFar());
@@ -1062,35 +1056,34 @@ void App::DrawEmbedWindow() {
     }
 
     // ---- maintenance: nothing here happens without a click
-    ImGui::SeparatorText("Index safety");
+    ImGui::SeparatorText("Maintenance");
     if (embedStaleCount > 0) {
         ImGui::AlignTextToFramePadding();
-        ImGui::Text("%d indexed file%s changed on disk since embedding (size or modification time).", embedStaleCount,
-                    embedStaleCount == 1 ? "" : "s");
-        ImGui::TextDisabled("They count as \"to index\" above. If the content is unchanged (e.g. the library was copied), keep the vectors:");
+        ImGui::Text("%d file%s changed on disk since indexing", embedStaleCount, embedStaleCount == 1 ? "" : "s");
+        ImGui::SameLine();
         ImGui::BeginDisabled(running);
-        if (ImGui::Button("Keep existing vectors for changed files")) EmbedKeepStaleVectors();
+        if (ImGui::Button("Keep vectors")) EmbedKeepStaleVectors();
         ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Same content (e.g. copied library): keep instead of re-embedding");
     }
     if (embedMissingCount > 0) {
         ImGui::AlignTextToFramePadding();
-        ImGui::Text("%d vector%s belong to files no longer in the library.", embedMissingCount, embedMissingCount == 1 ? "" : "s");
+        ImGui::Text("%d vector%s for deleted files", embedMissingCount, embedMissingCount == 1 ? "" : "s");
         ImGui::SameLine();
         ImGui::BeginDisabled(running || db.scanning);
-        if (ImGui::Button("Remove them")) {
+        if (ImGui::Button("Remove")) {
             embedIndex.Compact(db.entries);
             embedCountedAt = -1;
         }
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("Keeping them is free; they are only hidden. A backup is taken before removal.");
+            ImGui::SetTooltip("Hidden anyway; a backup is taken first");
     }
-    if (embedStaleCount == 0 && embedMissingCount == 0)
-        ImGui::TextDisabled("Index matches the library. Vectors are never deleted automatically.");
     {
         std::vector<std::wstring> backups = EmbedIndex::ListBackups(EmbedIndexPathForRoot());
         ImGui::BeginDisabled(running || !embedIndexLoaded || embedIndex.Empty());
-        if (ImGui::Button("Back up index now")) {
+        if (ImGui::Button("Back up now")) {
             std::wstring b = embedIndex.Backup();
             SemanticNotify(b.empty() ? "Backup failed." : "Backup written: " + WideToUtf8(fs::path(b).filename().wstring()));
         }
@@ -1119,7 +1112,7 @@ void App::DrawEmbedWindow() {
                         semanticTextCache.clear();
                         SemanticClear();
                         embedCountedAt = -1;
-                        SemanticNotify("Index restored from backup (the replaced index was itself backed up).");
+                        SemanticNotify("Index restored from backup.");
                     } else {
                         SemanticNotify("Restore failed.");
                     }
@@ -1131,9 +1124,8 @@ void App::DrawEmbedWindow() {
 
     // ---- exclusions
     ImGui::SeparatorText("Excluded folders");
-    ImGui::TextDisabled("Assets under these folders are never sent, counted, or ranked.");
     if (embedExcludes.empty()) {
-        ImGui::TextDisabled("None. Right-click a pack in the sidebar or an asset in the grid to exclude its folder.");
+        ImGui::TextDisabled("None. Right-click a pack or asset to exclude its folder.");
     } else {
         std::string remove;
         for (const std::string& x : embedExcludes) {
@@ -1146,7 +1138,7 @@ void App::DrawEmbedWindow() {
         if (!remove.empty()) EmbedSetFolderExcluded(remove, false);
     }
     ImGui::SetNextItemWidth(-80);
-    bool addExclude = ImGui::InputTextWithHint("##exclude", "folder relative to the library, e.g. Packs/OldStuff",
+    bool addExclude = ImGui::InputTextWithHint("##exclude", "Packs/OldStuff",
                                                embedExcludeBuf, sizeof(embedExcludeBuf), ImGuiInputTextFlags_EnterReturnsTrue);
     ImGui::SameLine();
     if (ImGui::Button("Add", ImVec2(-1, 0))) addExclude = true;
@@ -1157,13 +1149,7 @@ void App::DrawEmbedWindow() {
 
     // ---- usage
     ImGui::SeparatorText("Searching");
-    ImGui::BulletText("Tick Semantic next to the search box, describe a texture, press Enter.");
-    ImGui::BulletText("Ctrl+V a screenshot region, or drop / paste an image or sound file onto the window.");
-    ImGui::BulletText("Select any asset and press S, or right-click > Find similar.");
-    ImGui::BulletText("In the audio preview, select a range and click Search similar.");
-    ImGui::BulletText("type:, pack:, ext: and the other filters still narrow the ranking.");
-    ImGui::BulletText("Large library? Search with indexed:no, then Semantic > Index current results;\n"
-                      "or right-click a pack, folder or selection to index just that.");
+    ImGui::TextDisabled("Semantic + Enter  \xC2\xB7  Ctrl+V / drop image or sound  \xC2\xB7  S: similar  \xC2\xB7  indexed:no finds the rest");
     if (ImGui::Button("Open index folder"))
         ShellExecuteW(nullptr, L"open", EmbedDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     if (!semanticError.empty()) ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "%s", semanticError.c_str());

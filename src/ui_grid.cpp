@@ -185,10 +185,9 @@ void App::DrawGrid() {
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
             if (semanticAvail)
-                ImGui::SetTooltip("Rank indexed textures, models and sounds by meaning.\nDescribe one and press Enter, Ctrl+V / drop an image\n"
-                                  "or sound file, or select an asset and press S.");
+                ImGui::SetTooltip("Rank by meaning. Enter to search; Ctrl+V, drop, or S for similar.");
             else
-                ImGui::SetTooltip("Index your assets first: Semantic > Embedding settings & indexing.");
+                ImGui::SetTooltip("No index yet. Semantic > Settings & indexing");
         }
     }
     ImGui::SameLine();
@@ -198,7 +197,7 @@ void App::DrawGrid() {
         thumbs.FlushPending();
         filterDirty = true;
     }
-    if (ImGui::IsItemHovered() && SemanticActive()) ImGui::SetTooltip("Clear the text and the semantic query");
+    if (ImGui::IsItemHovered() && SemanticActive()) ImGui::SetTooltip("Clear text and semantic query");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(sortW);
     static const char* sortNames[] = { "Relevance", "Name", "Newest", "Largest" };
@@ -239,8 +238,8 @@ void App::DrawGrid() {
                     ImGui::BeginTooltip();
                     float bs = (std::min)(256.0f / iw, 256.0f / ih);
                     ImGui::Image((ImTextureID)(intptr_t)srv, ImVec2(iw * bs, ih * bs));
-                    if (semanticKind == SemanticKind::Asset) ImGui::TextDisabled("Click to select the source texture");
-                    else ImGui::TextDisabled("%dx%d query image", iw, ih);
+                    if (semanticKind == SemanticKind::Asset) ImGui::TextDisabled("Click to select");
+                    else ImGui::TextDisabled("%dx%d", iw, ih);
                     ImGui::EndTooltip();
                 }
                 if (semanticKind == SemanticKind::Asset && ImGui::IsItemClicked()) {
@@ -263,17 +262,11 @@ void App::DrawGrid() {
                 thumbs.FlushPending();
                 filterDirty = true;
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Clear the semantic query (keeps the text)");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Clear semantic query");
             ImGui::EndGroup();
         } else {
             ImGui::AlignTextToFramePadding();
-            ImGui::TextDisabled("Describe an asset and press Enter, Ctrl+V / drop an image or sound file, or select an asset and press S.");
-        }
-        if (embedUnindexedCount > 0 && !embedIndexer.Running()) {
-            ImGui::TextDisabled("%d asset%s not indexed yet and won't appear in rankings.", embedUnindexedCount,
-                                embedUnindexedCount == 1 ? " is" : "s are");
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Index now...")) embedWindowOpen = true;
+            ImGui::TextDisabled("Enter to search  \xC2\xB7  Ctrl+V / drop an image or sound  \xC2\xB7  S for similar");
         }
         if (!semanticError.empty())
             ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "%s", semanticError.c_str());
@@ -284,7 +277,7 @@ void App::DrawGrid() {
     }
 
     if (SemanticActive())
-        ImGui::TextDisabled("%zu indexed assets ranked", totalFilterMatches);
+        ImGui::TextDisabled("%zu ranked", totalFilterMatches);
     else
         ImGui::TextDisabled("%zu results", totalFilterMatches);
     static const char* typeNames[] = { "textures", "models", "audio" };
@@ -495,7 +488,7 @@ void App::DrawGrid() {
                         EmbedIndexMenuItem(EmbedEntriesUnderFolder(folder), "this folder");
                     if (!folder.empty()) {
                         bool excluded = EmbedFolderExcluded(folder);
-                        std::string item = (excluded ? "Include folder in semantic indexing" : "Exclude folder from semantic indexing");
+                        std::string item = (excluded ? "Include folder in indexing" : "Exclude folder from indexing");
                         if (ImGui::MenuItem(item.c_str())) EmbedSetFolderExcluded(folder, !excluded);
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", folder.c_str());
                     }
@@ -508,7 +501,7 @@ void App::DrawGrid() {
                         if (ImGui::MenuItem("Find similar textures", "S")) SemanticQueryAsset(idx);
                         ImGui::EndDisabled();
                         if (!indexed && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                            ImGui::SetTooltip("Not in the embedding index");
+                            ImGui::SetTooltip("Not indexed");
                     }
                     if (ImGui::BeginMenu("Drag textures at")) {
                         auto radio = [&](const char* label, int opt) {
@@ -533,7 +526,7 @@ void App::DrawGrid() {
                     if (ImGui::MenuItem("Find similar models", "S")) SemanticQueryAsset(idx);
                     ImGui::EndDisabled();
                     if (!indexed && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                        ImGui::SetTooltip(EmbedModelRenderable(e.ext) ? "Not in the embedding index" : "This format cannot be rendered, so it is not indexed");
+                        ImGui::SetTooltip(EmbedModelRenderable(e.ext) ? "Not indexed" : "Format cannot be rendered");
                 }
                 if (e.type == AssetType::Model && !e.variants.empty()) {
                     ImGui::Separator();
@@ -566,7 +559,7 @@ void App::DrawGrid() {
                         if (ImGui::MenuItem("Find similar sounds", "S")) SemanticQueryAsset(idx);
                         ImGui::EndDisabled();
                         if (!indexed && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                            ImGui::SetTooltip("Not in the embedding index");
+                            ImGui::SetTooltip("Not indexed");
                     }
                 }
                 ImGui::EndPopup();

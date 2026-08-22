@@ -117,8 +117,7 @@ void App::DrawPreview() {
         if (ImGui::Button("Find similar", ImVec2(120, 0))) SemanticFindSimilar(previewIndex);
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip(indexed ? "Rank the library by similarity to this asset (S). No API call."
-                                      : "Not in the embedding index");
+            ImGui::SetTooltip(indexed ? "Rank by similarity (S)" : "Not indexed");
     }
     ImGui::Separator();
 
@@ -359,8 +358,8 @@ void App::DrawPreview() {
                     SemanticQueryPreviewSelection();
                 ImGui::EndDisabled();
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Embed %s (first %.0f s) and rank the library by similarity. One paid request.",
-                                      hasSel ? "the selected range" : "this clip", kEmbedAudioMaxSeconds);
+                    ImGui::SetTooltip("Rank by similarity to %s (first %.0f s). One request.",
+                                      hasSel ? "the selection" : "this clip", kEmbedAudioMaxSeconds);
             }
 
             // --- seamless loop tuning ---
