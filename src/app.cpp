@@ -245,7 +245,6 @@ void App::DrawMenuBar(float& menuH) {
                     thumbs.Shutdown();
                     thumbs.Init(gfx, &renderer, AppDataDir(L"thumbs"));
                     filterDirty = true;
-                    embedPrunedAfterScan = false;
                     db.StartScan(db.root);
                 }
             }

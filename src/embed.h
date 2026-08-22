@@ -36,18 +36,30 @@ struct EmbedIndex {
     std::vector<float> vectors;                     // slot * dims, L2-normalised
     std::wstring file;
 
-    bool Load(const std::wstring& path);             // false = no usable file
+    // Vectors are treated as user data: nothing here deletes them implicitly.
+    // Every destructive step (Reset, Compact, Restore) backs the file up first
+    // and rewrites atomically via a temp file.
+    bool Load(const std::wstring& path);             // false = no usable file (tries the newest backup first)
+    bool loadedFromBackup = false;                   // Load() fell back to a backup
     void Reset(const std::string& model, EmbedMode mode, int dims, const std::wstring& path);
     void Append(const std::string& relPath, uint64_t mtime, uint64_t size, const float* vec); // mem + disk
-    void Prune(const std::vector<AssetEntry>& db);   // drop entries whose files are gone; rewrite
+    int  CountMissing(const std::vector<AssetEntry>& db) const; // vectors whose files are gone
+    void Compact(const std::vector<AssetEntry>& db);  // drop those vectors (explicit user action)
+    bool IsStale(const AssetEntry& e) const;         // indexed, but mtime/size changed since
+    void Adopt(const AssetEntry& e);                 // keep the old vector under the file's new mtime/size
     bool Matches(const EmbedSettings& s) const { return model == s.model && mode == s.mode && dims == s.dims; }
     bool HasCurrent(const AssetEntry& e) const;      // indexed and not stale
     const float* VectorFor(const AssetEntry& e) const;
     bool Empty() const { return entries.empty(); }
     bool Pump();                                     // main thread: merge vectors appended by workers
 
+    std::wstring Backup() const;                     // copy file -> <file>.<timestamp>.bak; "" on failure
+    static std::vector<std::wstring> ListBackups(const std::wstring& indexPath); // newest first
+    bool Restore(const std::wstring& backup);        // backup current, copy backup over, reload
+
 private:
     struct Pending { std::string relPath; uint64_t mtime, size; std::vector<float> vec; };
+    bool LoadFile(const std::wstring& path);
     void Rewrite();
     std::mutex fileMutex;
     std::vector<Pending> pending;

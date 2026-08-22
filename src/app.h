@@ -70,7 +70,9 @@ struct App {
     bool embedKeyFromEnv = false;
     bool embedWindowOpen = false;
     bool embedIndexLoaded = false;
-    bool embedPrunedAfterScan = false;
+    bool embedConfirmRebuild = false;       // modal pending
+    int  embedRebuildTypes = 0;
+    int  embedMissingCount = 0, embedStaleCount = 0; // refreshed with the other counts
     bool semanticSearch = false;
     SemanticKind semanticKind = SemanticKind::None;
     std::string semanticLabel;                 // what the current ranking is relative to
@@ -148,6 +150,7 @@ struct App {
     void EmbedIndexMenuItem(const std::vector<int>& candidates, const char* what); // one MenuItem with count + cost
     std::unordered_map<std::string, std::pair<int, int>> embedPackCoverage; // pack -> {indexed, indexable}
     std::vector<int> EmbedUnindexed(int types = EmbedAll) const; // indexable entries lacking a current vector
+    void EmbedKeepStaleVectors();           // adopt changed files' new mtime/size, keeping their vectors
     void EmbedProbeDurations();             // kick off / collect background duration probes
     // Model contact sheets need the GPU: workers queue a loaded CpuModel and block
     // until the main thread has rendered it (PumpEmbed, a few per frame).

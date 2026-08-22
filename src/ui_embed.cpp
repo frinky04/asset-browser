@@ -176,7 +176,8 @@ void App::EmbedLoadIndexForRoot() {
         }
     }
     embedIndexLoaded = embedIndex.Load(EmbedIndexPathForRoot());
-    embedPrunedAfterScan = false;
+    if (embedIndex.loadedFromBackup)
+        SemanticNotify("The embedding index was unreadable; restored it from the newest backup.");
     // Query vectors only make sense against the index they were embedded for.
     semanticTextCache.clear();
     SemanticClear();
@@ -261,21 +262,15 @@ void App::PumpEmbed() {
             else embedAudioSecondsKnown += (std::min)(it->second, kEmbedAudioMaxSeconds);
         }
         embedUnindexedCount = embedUnindexedTex + embedUnindexedAudio + embedUnindexedModel;
+        embedStaleCount = 0;
+        if (embedIndexLoaded)
+            for (const AssetEntry& e : db.entries)
+                if (!EmbedExcluded(e) && embedIndex.IsStale(e)) ++embedStaleCount;
+        embedMissingCount = (embedIndexLoaded && !db.scanning) ? embedIndex.CountMissing(db.entries) : 0;
     }
     if (embedWindowOpen) EmbedProbeDurations();
-    // Prune index entries for files that vanished, once the scan has settled.
-    // The scan worker clears `scanning` right after queueing its last batch, so
-    // wait until a PumpScan() after that point has come back empty; pruning on
-    // the flag alone could drop vectors for the still-queued batch.
-    if (embedIndexLoaded && !db.scanning && !embedPrunedAfterScan && !db.root.empty()) {
-        if (db.PumpScan()) {
-            thumbs.EnsureCount(db.entries.size());
-            filterDirty = true;
-        } else {
-            embedPrunedAfterScan = true;
-            if (!embedIndexer.Running()) embedIndex.Prune(db.entries);
-        }
-    }
+    // Vectors for files that are no longer in the library are never removed
+    // automatically; the window reports them and offers a button.
     // async query result
     {
         std::lock_guard<std::mutex> lock(semanticJob.m);
@@ -353,6 +348,16 @@ void App::EmbedProbeDurations() {
         std::lock_guard<std::mutex> lock(embedProbeMutex);
         embedProbeDone = true;
     });
+}
+
+void App::EmbedKeepStaleVectors() {
+    if (!embedIndexLoaded || embedIndexer.Running()) return;
+    int n = 0;
+    for (const AssetEntry& e : db.entries)
+        if (!EmbedExcluded(e) && embedIndex.IsStale(e)) { embedIndex.Adopt(e); ++n; }
+    embedCountedAt = -1;
+    if (SemanticActive()) { thumbs.FlushPending(); filterDirty = true; }
+    SemanticNotify("Kept existing vectors for " + std::to_string(n) + " changed files.");
 }
 
 std::vector<int> App::EmbedPendingIn(const std::vector<int>& candidates) const {
@@ -1015,13 +1020,28 @@ void App::DrawEmbedWindow() {
         ImGui::BeginDisabled(!canIndex || todo == 0);
         char label[64];
         snprintf(label, sizeof(label), mismatch ? "Rebuild index (%d items)" : "Index everything (%d)", todo);
-        if (ImGui::Button(label)) EmbedStartIndexing(mismatch, EmbedAll);
+        if (ImGui::Button(label)) {
+            if (mismatch) { embedConfirmRebuild = true; embedRebuildTypes = EmbedAll; }
+            else EmbedStartIndexing(false, EmbedAll);
+        }
         ImGui::EndDisabled();
         if (embedIndexLoaded && !embedIndex.Empty() && !mismatch) {
             ImGui::SameLine();
             ImGui::BeginDisabled(!canIndex);
-            if (ImGui::Button("Rebuild from scratch")) EmbedStartIndexing(true, EmbedAll);
+            if (ImGui::Button("Rebuild from scratch")) { embedConfirmRebuild = true; embedRebuildTypes = EmbedAll; }
             ImGui::EndDisabled();
+        }
+        if (embedConfirmRebuild) ImGui::OpenPopup("Rebuild embedding index?");
+        if (ImGui::BeginPopupModal("Rebuild embedding index?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            embedConfirmRebuild = false;
+            size_t n = embedIndex.entries.size();
+            ImGui::Text("This discards all %zu existing vectors and re-embeds every asset.", n);
+            ImGui::TextDisabled("The current index is first copied to a timestamped .bak beside it,\nso you can restore it from this window if needed.");
+            ImGui::Spacing();
+            if (ImGui::Button("Rebuild", ImVec2(120, 0))) { EmbedStartIndexing(true, embedRebuildTypes); ImGui::CloseCurrentPopup(); }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
         }
         if (embedKey.empty()) { ImGui::SameLine(); ImGui::TextDisabled("(needs an API key)"); }
         else if (db.scanning) { ImGui::SameLine(); ImGui::TextDisabled("(wait for the scan to finish)"); }
@@ -1038,6 +1058,74 @@ void App::DrawEmbedWindow() {
         if (ImGui::TreeNode("Errors", "Errors (%zu shown)", errors.size())) {
             for (const std::string& e : errors) ImGui::TextWrapped("%s", e.c_str());
             ImGui::TreePop();
+        }
+    }
+
+    // ---- maintenance: nothing here happens without a click
+    ImGui::SeparatorText("Index safety");
+    if (embedStaleCount > 0) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::Text("%d indexed file%s changed on disk since embedding (size or modification time).", embedStaleCount,
+                    embedStaleCount == 1 ? "" : "s");
+        ImGui::TextDisabled("They count as \"to index\" above. If the content is unchanged (e.g. the library was copied), keep the vectors:");
+        ImGui::BeginDisabled(running);
+        if (ImGui::Button("Keep existing vectors for changed files")) EmbedKeepStaleVectors();
+        ImGui::EndDisabled();
+    }
+    if (embedMissingCount > 0) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::Text("%d vector%s belong to files no longer in the library.", embedMissingCount, embedMissingCount == 1 ? "" : "s");
+        ImGui::SameLine();
+        ImGui::BeginDisabled(running || db.scanning);
+        if (ImGui::Button("Remove them")) {
+            embedIndex.Compact(db.entries);
+            embedCountedAt = -1;
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Keeping them is free; they are only hidden. A backup is taken before removal.");
+    }
+    if (embedStaleCount == 0 && embedMissingCount == 0)
+        ImGui::TextDisabled("Index matches the library. Vectors are never deleted automatically.");
+    {
+        std::vector<std::wstring> backups = EmbedIndex::ListBackups(EmbedIndexPathForRoot());
+        ImGui::BeginDisabled(running || !embedIndexLoaded || embedIndex.Empty());
+        if (ImGui::Button("Back up index now")) {
+            std::wstring b = embedIndex.Backup();
+            SemanticNotify(b.empty() ? "Backup failed." : "Backup written: " + WideToUtf8(fs::path(b).filename().wstring()));
+        }
+        ImGui::EndDisabled();
+        if (!backups.empty()) {
+            ImGui::SameLine();
+            if (ImGui::TreeNode("Backups", "Backups (%zu)", backups.size())) {
+                std::wstring restore;
+                for (const std::wstring& b : backups) {
+                    std::string name = WideToUtf8(fs::path(b).filename().wstring());
+                    std::error_code ec;
+                    double mb = fs::file_size(b, ec) / (1024.0 * 1024.0);
+                    ImGui::PushID(name.c_str());
+                    ImGui::BeginDisabled(running);
+                    if (ImGui::SmallButton("Restore")) restore = b;
+                    ImGui::EndDisabled();
+                    ImGui::SameLine();
+                    ImGui::Text("%s", name.c_str());
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%.1f MB", mb);
+                    ImGui::PopID();
+                }
+                if (!restore.empty()) {
+                    if (embedIndex.Restore(restore)) {
+                        embedIndexLoaded = true;
+                        semanticTextCache.clear();
+                        SemanticClear();
+                        embedCountedAt = -1;
+                        SemanticNotify("Index restored from backup (the replaced index was itself backed up).");
+                    } else {
+                        SemanticNotify("Restore failed.");
+                    }
+                }
+                ImGui::TreePop();
+            }
         }
     }
 

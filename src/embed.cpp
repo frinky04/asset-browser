@@ -76,7 +76,89 @@ void WriteRecord(FILE* f, const std::string& rel, uint64_t mtime, uint64_t size,
 }
 } // namespace
 
+namespace {
+std::wstring TimestampW() {
+    SYSTEMTIME st; GetLocalTime(&st);
+    wchar_t buf[32];
+    swprintf_s(buf, L"%04d%02d%02d-%02d%02d%02d%03d", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    return buf;
+}
+// Never overwrite an existing backup: suffix until the name is free.
+std::wstring UniquePath(const std::wstring& base, const std::wstring& ext) {
+    std::error_code ec;
+    std::wstring p = base + ext;
+    for (int i = 2; fs::exists(p, ec); ++i) p = base + L"-" + std::to_wstring(i) + ext;
+    return p;
+}
+// Replace `dst` with `tmp` atomically (MoveFileEx with REPLACE_EXISTING is a rename on NTFS).
+bool SwapIn(const std::wstring& tmp, const std::wstring& dst) {
+    return MoveFileExW(tmp.c_str(), dst.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+}
+}
+
+std::wstring EmbedIndex::Backup() const {
+    std::error_code ec;
+    if (file.empty() || !fs::exists(file, ec) || fs::file_size(file, ec) == 0) return L"";
+    std::wstring dst = UniquePath(file + L"." + TimestampW(), L".bak");
+    if (!CopyFileW(file.c_str(), dst.c_str(), TRUE)) return L"";
+    // keep the newest 5 backups
+    std::vector<std::wstring> all = ListBackups(file);
+    for (size_t i = 5; i < all.size(); ++i) fs::remove(all[i], ec);
+    return dst;
+}
+
+std::vector<std::wstring> EmbedIndex::ListBackups(const std::wstring& indexPath) {
+    std::vector<std::wstring> out;
+    std::error_code ec;
+    fs::path base(indexPath);
+    std::wstring stem = base.filename().wstring() + L".";
+    for (auto& de : fs::directory_iterator(base.parent_path(), ec)) {
+        std::wstring name = de.path().filename().wstring();
+        if (name.rfind(stem, 0) == 0 && name.size() > 4 && name.compare(name.size() - 4, 4, L".bak") == 0)
+            out.push_back(de.path().wstring());
+    }
+    std::sort(out.rbegin(), out.rend()); // timestamped names: lexical = chronological
+    return out;
+}
+
+bool EmbedIndex::Restore(const std::wstring& backup) {
+    if (file.empty()) return false;
+    Backup();
+    std::wstring tmp = file + L".tmp";
+    if (!CopyFileW(backup.c_str(), tmp.c_str(), FALSE) || !SwapIn(tmp, file)) return false;
+    return Load(file);
+}
+
 bool EmbedIndex::Load(const std::wstring& path) {
+    loadedFromBackup = false;
+    if (LoadFile(path)) return true;
+    // Unreadable or corrupt: fall back to the newest backup that parses,
+    // preferring one that actually holds vectors over an empty post-reset one.
+    std::error_code ec;
+    bool existed = fs::exists(path, ec) && fs::file_size(path, ec) > 0;
+    std::vector<std::wstring> backups = ListBackups(path);
+    std::wstring chosen;
+    for (const std::wstring& b : backups)
+        if (LoadFile(b) && !entries.empty()) { chosen = b; break; }
+    if (chosen.empty())
+        for (const std::wstring& b : backups)
+            if (LoadFile(b)) { chosen = b; break; }
+    if (!chosen.empty()) {
+        const std::wstring& b = chosen;
+        file = path; // keep appending to the real index path
+        if (existed) {
+            // preserve the corrupt file for forensics, then reinstate the backup
+            fs::rename(path, UniquePath(path + L"." + TimestampW(), L".corrupt"), ec);
+        }
+        std::wstring tmp = path + L".tmp";
+        if (CopyFileW(b.c_str(), tmp.c_str(), FALSE)) SwapIn(tmp, path);
+        loadedFromBackup = true;
+        return true;
+    }
+    return false;
+}
+
+bool EmbedIndex::LoadFile(const std::wstring& path) {
     { std::lock_guard<std::mutex> lock(fileMutex); pending.clear(); } // stale appends from a previous library
     entries.clear(); vectors.clear(); model.clear(); dims = 0; file = path;
     std::vector<uint8_t> b;
@@ -107,15 +189,19 @@ bool EmbedIndex::Load(const std::wstring& path) {
 }
 
 void EmbedIndex::Reset(const std::string& mdl, EmbedMode md, int d, const std::wstring& path) {
+    file = path;
+    Backup(); // the old vectors survive as a timestamped .bak
     std::lock_guard<std::mutex> lock(fileMutex);
     entries.clear(); vectors.clear(); pending.clear();
-    model = mdl; mode = md; dims = d; file = path;
+    model = mdl; mode = md; dims = d;
     std::error_code ec;
     fs::create_directories(fs::path(path).parent_path(), ec);
-    FILE* f = _wfopen(path.c_str(), L"wb");
+    std::wstring tmp = path + L".tmp";
+    FILE* f = _wfopen(tmp.c_str(), L"wb");
     if (!f) return;
     WriteHeader(f, model, mode, dims);
     fclose(f);
+    SwapIn(tmp, path);
 }
 
 void EmbedIndex::Append(const std::string& relPath, uint64_t mtime, uint64_t size, const float* vec) {
@@ -140,20 +226,49 @@ bool EmbedIndex::Pump() {
     return !batch.empty();
 }
 
-void EmbedIndex::Prune(const std::vector<AssetEntry>& db) {
-    std::unordered_map<std::string, const AssetEntry*> live;
-    for (const AssetEntry& e : db) live[e.relPath] = &e;
+int EmbedIndex::CountMissing(const std::vector<AssetEntry>& db) const {
+    std::unordered_map<std::string, bool> live;
+    live.reserve(db.size());
+    for (const AssetEntry& e : db) live[e.relPath] = true;
+    int n = 0;
+    for (auto& [rel, e] : entries) if (!live.count(rel)) ++n;
+    return n;
+}
+
+void EmbedIndex::Compact(const std::vector<AssetEntry>& db) {
+    std::unordered_map<std::string, bool> live;
+    live.reserve(db.size());
+    for (const AssetEntry& e : db) live[e.relPath] = true;
     size_t before = entries.size();
     for (auto it = entries.begin(); it != entries.end();)
         it = live.count(it->first) ? std::next(it) : entries.erase(it);
-    if (entries.size() != before) Rewrite();
+    if (entries.size() != before) { Backup(); Rewrite(); }
 }
 
+bool EmbedIndex::IsStale(const AssetEntry& e) const {
+    auto it = entries.find(e.relPath);
+    return it != entries.end() && (it->second.mtime != e.mtime || it->second.size != e.size);
+}
+
+void EmbedIndex::Adopt(const AssetEntry& e) {
+    auto it = entries.find(e.relPath);
+    if (it == entries.end()) return;
+    it->second.mtime = e.mtime;
+    it->second.size = e.size;
+    // append a record with the new key; Load() keeps the last record per path
+    std::lock_guard<std::mutex> lock(fileMutex);
+    FILE* f = _wfopen(file.c_str(), L"ab");
+    if (f) { WriteRecord(f, e.relPath, e.mtime, e.size, vectors.data() + it->second.slot * dims, dims); fclose(f); }
+}
+
+// Write the in-memory index to <file>.tmp, then swap it in. A crash mid-write
+// leaves the old file untouched.
 void EmbedIndex::Rewrite() {
     std::lock_guard<std::mutex> lock(fileMutex);
     std::vector<float> packed;
     packed.reserve(entries.size() * dims);
-    FILE* f = _wfopen(file.c_str(), L"wb");
+    std::wstring tmp = file + L".tmp";
+    FILE* f = _wfopen(tmp.c_str(), L"wb");
     if (!f) return;
     WriteHeader(f, model, mode, dims);
     for (auto& [rel, e] : entries) {
@@ -162,7 +277,12 @@ void EmbedIndex::Rewrite() {
         e.slot = packed.size() / dims;
         packed.insert(packed.end(), v, v + dims);
     }
+    bool ok = fflush(f) == 0;
     fclose(f);
+    if (!ok || !SwapIn(tmp, file)) {
+        std::error_code ec; fs::remove(tmp, ec);
+        return; // keep the old file and the old slots
+    }
     vectors.swap(packed);
 }
 
