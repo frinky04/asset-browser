@@ -79,10 +79,14 @@ ab search "mossy stone" --type tex --limit 5
 ab search --semantic "creaky wooden door" --type audio --json
 ab search --similar <id>          # rank by an indexed asset, no API call
 ab search rock --type model --limit 12 --sheet candidates.png   # numbered contact sheet
-ab inspect <id>                   # dimensions / triangles / duration
-ab inspect <id> --preview look.png   # fitted texture, waveform, or 6-view model sheet
+ab inspect <id>                   # dimensions / triangles / audio loudness, spectrum, segments
+ab inspect <id> --preview look.png   # fitted texture, waveform + spectrogram, or 6-view model sheet
+ab inspect ./out/loop.wav --preview seam.png --loop   # any file on disk; --loop shows the seam
+ab search step --type audio --max-sec 3 --sheet s.png   # audio sheets are stacked rows
+ab compare <id> <id> <id> --sheet c.png --time shared   # hand-picked shortlist, one image
 ab export <id> --to ./assets/textures --resize 512
 ab export <id> --to ./assets/sfx --range 0-1.5 --trim-silence --loop
+ab export <id> --to ./assets/sfx --segment all --normalize -16   # one file per distinct sound
 ab export <id> --to ./assets/models --format obj   # copies the .mtl too
 ab packs
 ab status
@@ -92,6 +96,13 @@ Run `ab skill --install` to install a skill that explains when and how to use `a
 building a game. It writes to `~/.claude/skills` (Claude Code) and the vendor-neutral
 `~/.agents/skills` (Codex, Cursor, Gemini CLI, Copilot and others); `--project` targets the
 current repo instead. The source is in `skills/finding-game-assets/`.
+
+Audio previews are built for agents that cannot listen: each clip is a strip with a
+dB-scaled waveform (peak and RMS) over a log-frequency spectrogram on a fixed colour scale,
+so strips compare at a glance. Distinct sounds (a footstep in a take of eight) are detected,
+shaded and numbered, and `--segment N` exports one by number. `inspect` reports integrated
+and momentary loudness (BS.1770 LUFS), peak, crest, noise floor, clipping, silence,
+spectral centroid, tonality, band balance, stereo correlation and loop-seam jumps.
 
 Exports append a record to `<dir>/assets-used.json` (source path, pack, transform)
 so a project keeps track of what it pulled from the library.

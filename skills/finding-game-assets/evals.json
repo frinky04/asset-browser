@@ -28,5 +28,16 @@
       "Renders a sheet and picks by looking",
       "Exports with --format obj and notes that the .mtl came along; if a model has no OBJ variant, reports the available formats from the exit-4 message instead of failing silently"
     ]
+  },
+  {
+    "skills": ["finding-game-assets"],
+    "query": "My platformer needs footstep sounds on wood: four separate single steps, all at the same loudness, in assets/sfx/steps.",
+    "expected_behavior": [
+      "Searches audio and renders an audio sheet (about 6 rows), then reads it, using the spectrogram and the numbered bands rather than file names alone",
+      "Picks a multi-step take and runs ab inspect to get its segments before exporting",
+      "Exports single steps with --segment N (or --segment all, then keeps four) rather than guessing --range values",
+      "Uses --normalize so the steps match, and reports any peak-ceiling warning",
+      "Checks at least one exported file with ab inspect <path> and mentions assets-used.json"
+    ]
   }
 ]
