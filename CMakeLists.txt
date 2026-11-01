@@ -57,6 +57,7 @@ add_library(abcore STATIC
   src/model.cpp
   src/model_fbx.cpp
   src/audio.cpp
+  src/audio_analysis.cpp
   src/embed.cpp
   src/preview.cpp
   src/third_party_impl.cpp
@@ -68,7 +69,7 @@ target_include_directories(abcore PUBLIC
   ${cgltf_SOURCE_DIR}
   ${miniaudio_SOURCE_DIR}
   ${ufbx_SOURCE_DIR})
-target_link_libraries(abcore PUBLIC nlohmann_json::nlohmann_json d3d11 dxgi d3dcompiler ole32 shell32 shlwapi winhttp crypt32)
+target_link_libraries(abcore PUBLIC nlohmann_json::nlohmann_json d3d11 dxgi d3dcompiler ole32 shell32 shlwapi winhttp crypt32 gdi32)
 target_compile_options(abcore PRIVATE /utf-8 /EHsc /MP)
 target_compile_definitions(abcore PUBLIC UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 
