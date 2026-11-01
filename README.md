@@ -8,16 +8,9 @@ Explorer.
   <img src="docs/images/asset-browser.png" alt="Asset Browser showing a filtered model library and 3D preview">
 </p>
 
-## What it does
-
-- Fuzzy-searches filenames and paths, with filters for asset type and top-level pack.
-- Previews textures, GLB models, and audio without opening another application.
-- Drags original files or generated variants into any application that accepts files.
-- Deduplicates equivalent model formats into one entry while preserving format choice.
-- Exports resized textures, audio selections, and seamless audio loops on demand.
-- Generates thumbnails in background workers and caches them for fast subsequent loads.
-- Optional semantic search (bring your own OpenRouter key): rank textures, models and sounds
-  by a text description, a pasted image or sound, or similarity to another asset.
+Browse by filename, asset type, or pack. Export resized textures, audio selections,
+and seamless loops. Optional semantic search finds assets by description or similarity
+using your own OpenRouter key.
 
 <table>
   <tr>
@@ -32,99 +25,4 @@ Explorer.
   </tr>
 </table>
 
-Supported formats:
-
-- Textures: PNG, JPG, BMP, TGA, GIF, PSD
-- Models: GLB, glTF, FBX, OBJ, DAE
-- Audio: WAV, OGG, MP3, FLAC
-
-## Use
-
-Launch the app, choose an asset folder, then search or filter the resulting grid. Click an
-asset to preview it, double-click to reveal it in Explorer, or drag it into another app.
-Right-click assets for alternate model formats and export options.
-
-The selected folder is remembered and can be changed from **File → Change asset folder**.
-Use `asset-browser.exe --root "D:\Assets"` for a one-off override.
-
-Asset Browser scans recursively, ignores unrelated file types, and stores only settings,
-thumbnail caches, and temporary exports under `%LOCALAPPDATA%\AssetBrowser`.
-
-### Semantic search (textures, models and sounds)
-
-Open **Semantic → Settings & indexing**, paste an [OpenRouter](https://openrouter.ai) API key
-(or set `OPENROUTER_API_KEY`), and index your textures, models and/or sounds. Assets are
-embedded with `google/gemini-embedding-2`: colour textures from their 256 px thumbnails
-(about $0.12 per 1,000; normal/roughness and other auxiliary maps are skipped), models as a
-six-view contact sheet rendered in-app (same price; GLB/glTF/FBX/OBJ), and sounds from their
-first 12 seconds as 16 kHz mono audio (about $0.002 per clip). The window shows exact counts
-and cost before anything is sent, and only new or changed files are sent on later runs.
-
-Once indexed, tick **Semantic** next to the search box and press Enter to rank assets by
-description; `type:`, `pack:`, `ext:` and the other filters still apply. Ctrl+V a
-screenshot region, or paste/drop an image or sound file, to rank by example. Select an asset
-and press **S** (or right-click → Find similar) to rank by similarity without any API call,
-and in the audio preview select a range and click **Search similar** to search by that part
-of a clip. The key is stored encrypted for the current Windows user; vectors live in
-`%LOCALAPPDATA%\AssetBrowser\embeddings`.
-
-### Headless CLI (`ab.exe`)
-
-`ab.exe` is built alongside the GUI for scripts and coding agents. It uses the same
-library root, query syntax and semantic index as the GUI, prints JSON when piped
-(or with `--json`), and keeps progress on stderr.
-
-```
-ab search "mossy stone" --type tex --limit 5
-ab search --semantic "creaky wooden door" --type audio --json
-ab search --similar <id>          # rank by an indexed asset, no API call
-ab search rock --type model --limit 12 --sheet candidates.png   # numbered contact sheet
-ab inspect <id>                   # dimensions / triangles / audio loudness, spectrum, segments
-ab inspect <id> --preview look.png   # fitted texture, waveform + spectrogram, or 6-view model sheet
-ab inspect ./out/loop.wav --preview seam.png --loop   # any file on disk; --loop shows the seam
-ab search step --type audio --max-sec 3 --sheet s.png   # audio sheets are stacked rows
-ab compare <id> <id> <id> --sheet c.png --time shared   # hand-picked shortlist, one image
-ab export <id> --to ./assets/textures --resize 512
-ab export <id> --to ./assets/sfx --range 0-1.5 --trim-silence --loop
-ab export <id> --to ./assets/sfx --segment all --normalize -16   # one file per distinct sound
-ab export <id> --to ./assets/models --format obj   # copies the .mtl too
-ab packs
-ab status
-```
-
-Run `ab skill --install` to install a skill that explains when and how to use `ab` while
-building a game. It writes to `~/.claude/skills` (Claude Code) and the vendor-neutral
-`~/.agents/skills` (Codex, Cursor, Gemini CLI, Copilot and others); `--project` targets the
-current repo instead. The source is in `skills/finding-game-assets/`.
-
-Audio previews are built for agents that cannot listen: each clip is a strip with a
-dB-scaled waveform (peak and RMS) over a log-frequency spectrogram on a fixed colour scale,
-so strips compare at a glance. Distinct sounds (a footstep in a take of eight) are detected,
-shaded and numbered, and `--segment N` exports one by number. `inspect` reports integrated
-and momentary loudness (BS.1770 LUFS), peak, crest, noise floor, clipping, silence,
-spectral centroid, tonality, band balance, stereo correlation and loop-seam jumps.
-
-Exports append a record to `<dir>/assets-used.json` (source path, pack, transform)
-so a project keeps track of what it pulled from the library.
-
-Results carry a stable `id` (hash of the library-relative path) and the absolute
-`path`. Exit codes: 0 ok, 1 error, 2 usage, 3 semantic unavailable, 4 not found.
-See `ab --help` for the full option list. See `docs/headless-mode-research.md` for
-the design.
-
-## Build
-
-Requires Windows 10+, CMake, and Visual Studio 2022. Dependencies are fetched by CMake.
-
-```powershell
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Release
-.\build\Release\asset-browser.exe
-```
-
-Built with C++20, Dear ImGui, Win32, and Direct3D 11.
-
-## Release
-
-Push a `vMAJOR.MINOR.PATCH` tag, or run the Release workflow manually. GitHub Actions
-publishes a self-contained Windows x64 zip with a SHA-256 checksum.
+[Download for Windows](https://github.com/frinky04/asset-browser/releases/latest)
