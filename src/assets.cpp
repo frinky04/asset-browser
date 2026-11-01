@@ -71,6 +71,15 @@ uint64_t MtimeU64(const fs::directory_entry& de, std::error_code& ec) {
 
 } // namespace
 
+bool AssetTypeForExtension(const std::wstring& extLower, AssetType& type) {
+    switch (Classify(extLower)) {
+    case Kind::Texture: type = AssetType::Texture; return true;
+    case Kind::Model:   type = AssetType::Model;   return true;
+    case Kind::Audio:   type = AssetType::Audio;   return true;
+    default: return false;
+    }
+}
+
 void AssetDatabase::StartScan(const std::wstring& rootDir) {
     root = rootDir;
     scanning = true;

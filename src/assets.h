@@ -22,6 +22,9 @@ struct AssetEntry {
     std::vector<std::wstring> variants; // other-format siblings (models only)
 };
 
+// Asset type for a lowercase extension with the dot (".wav"); false for files the library skips.
+bool AssetTypeForExtension(const std::wstring& extLower, AssetType& type);
+
 struct PackInfo { std::string name; int count = 0; };
 
 // Entries are append-only; indices are stable for the lifetime of the app.
