@@ -41,7 +41,7 @@ jobs:
         run: |
           $name = "asset-browser-$env:RELEASE_TAG-windows-x64"
           New-Item -ItemType Directory -Path $name | Out-Null
-          Copy-Item build/Release/asset-browser.exe, README.md -Destination $name
+          Copy-Item build/Release/asset-browser.exe, build/Release/ab.exe, README.md -Destination $name
           Compress-Archive -Path $name -DestinationPath "$name.zip"
           $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash *$name.zip" | Set-Content "$name.zip.sha256" -Encoding ascii

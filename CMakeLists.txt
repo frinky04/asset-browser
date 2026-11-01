@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(asset_browser VERSION 0.1.0 LANGUAGES C CXX)
+project(asset_browser VERSION 0.2.0 LANGUAGES C CXX)
 
 set(ASSET_BROWSER_VERSION "${PROJECT_VERSION}" CACHE STRING "Version embedded in release builds")
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -15,8 +15,8 @@ FetchContent_Declare(imgui
   GIT_SHALLOW    TRUE)
 FetchContent_Declare(stb
   GIT_REPOSITORY https://github.com/nothings/stb.git
-  GIT_TAG        master
-  GIT_SHALLOW    TRUE)
+  GIT_TAG        2b2e64bc4778df6a06fbea3a5dbe61f7a76ecf19
+  GIT_SHALLOW    FALSE)
 FetchContent_Declare(cgltf
   GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git
   GIT_TAG        v1.14
