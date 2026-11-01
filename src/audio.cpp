@@ -9,6 +9,7 @@ extern "C" int stb_vorbis_decode_memory(const unsigned char* mem, int len,
                                         int* channels, int* sample_rate, short** output);
 struct stb_vorbis;
 extern "C" stb_vorbis* stb_vorbis_open_memory(const unsigned char* data, int len, int* error, const void* alloc);
+extern "C" stb_vorbis* stb_vorbis_open_file(FILE* f, int close_handle_on_close, int* error, const void* alloc);
 extern "C" float stb_vorbis_stream_length_in_seconds(stb_vorbis* f);
 extern "C" void stb_vorbis_close(stb_vorbis* f);
 
@@ -63,11 +64,12 @@ PcmData DecodeWithMiniaudio(const std::wstring& path) {
 double AudioDurationSeconds(const std::wstring& path) {
     std::wstring lower = ToLowerAsciiW(path);
     if (lower.size() >= 4 && lower.compare(lower.size() - 4, 4, L".ogg") == 0) {
-        std::vector<uint8_t> bytes;
-        if (!ReadFileBytes(path, bytes) || bytes.empty()) return 0;
+        // from the file: stb_vorbis seeks to the last page instead of reading the whole stream
+        FILE* f = _wfopen(path.c_str(), L"rb");
+        if (!f) return 0;
         int err = 0;
-        stb_vorbis* v = stb_vorbis_open_memory(bytes.data(), (int)bytes.size(), &err, nullptr);
-        if (!v) return 0;
+        stb_vorbis* v = stb_vorbis_open_file(f, /*close_handle_on_close*/ 1, &err, nullptr);
+        if (!v) return 0; // stb_vorbis closed the handle
         double sec = stb_vorbis_stream_length_in_seconds(v);
         stb_vorbis_close(v);
         return sec > 0 ? sec : 0;
