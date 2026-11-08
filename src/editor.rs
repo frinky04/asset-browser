@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use rune::{Latest, Pixels, Spring, TextEdit, Tx, Waker};
 
-use crate::app::{App, Preview, WAVE_H, WAVE_W};
+use crate::app::{App, Preview, WAVE_W};
 use crate::edit::mesh::{Origin, SurfaceMaterial, TextureFilter};
 use crate::edit::{self, AudioEdit, Decoded, Edit, ImageEdit, MaterialEdit, ModelDoc, ModelEdit, Pcm, Rendered, Shown, ball, sound};
 use crate::export::{self, Options};
@@ -34,9 +34,6 @@ const TIMELINE_ZOOM_SPEED: f32 = 0.006;
 const VIEW_EASE: f64 = 16.0;
 /// Points the pointer travels before a press on the waveform becomes a drag.
 const REGION_TRAVEL: f32 = 3.0;
-/// The picture of the fade curves, scaled over the waveform.
-const FADE_W: u32 = 960;
-const FADE_H: u32 = 480;
 /// How much a fade bends per point the dot is dragged.
 const FADE_SHAPE_SPEED: f32 = 0.012;
 /// Near the middle a fade settles straight, so it's easy to get back there.
@@ -878,8 +875,9 @@ impl App {
         if frames == 0 { return }
         let dark = self.resolved_dark.get();
         let (shade, line) = if dark { ([27, 27, 27], [242, 242, 242]) } else { ([237, 237, 239], [22, 22, 24]) };
-        let px = sound::draw_fades((view_start, view_end), (start, end), rate, &self.audio_edit(), FADE_W, FADE_H, shade, line);
-        self.edit.fade_wave.set(FADE_W, FADE_H, px);
+        let (width, height) = self.wave_size();
+        let px = sound::draw_fades((view_start, view_end), (start, end), rate, &self.audio_edit(), width, height, shade, line, self.scale);
+        self.edit.fade_wave.set(width, height, px);
     }
 
     /// Whether there's a fade to draw over the waveform.
@@ -1074,8 +1072,9 @@ impl App {
     pub(crate) fn redraw_timeline(&mut self) {
         let Some((start, end, _)) = self.audio_view() else { return };
         let (Some(pcm), Some(index)) = (self.audio_source(), self.edit.peak_index.clone()) else { return };
-        let px = sound::draw_timeline(&pcm, &index, start, end, WAVE_W, WAVE_H, self.wave_color());
-        self.edit.timeline_wave.set(WAVE_W, WAVE_H, px);
+        let (width, height) = self.wave_size();
+        let px = sound::draw_timeline_at(&pcm, &index, start, end, width, height, self.wave_color(), self.scale);
+        self.edit.timeline_wave.set(width, height, px);
         self.redraw_fades();
     }
 

@@ -22,8 +22,8 @@ use crate::thumbs::{Thumbs, WAVE_COLOR};
 use crate::{ui, wave};
 
 const DEFAULT_ROOT: &str = r"C:\Users\cuddl\Documents\Dev\Games\Assets";
+/// How many peaks a preview's waveform is read into.
 pub const WAVE_W: u32 = 960;
-pub const WAVE_H: u32 = 480;
 
 /// Rows beyond the viewport, each way, whose thumbnails are fetched ahead of arriving.
 const LOOKAHEAD_ROWS: usize = 12;
@@ -55,7 +55,7 @@ pub enum Preview {
 enum Loaded {
     Texture { full: Arc<Image>, shown: Arc<Image> },
     Model(Arc<Model>),
-    Audio { rgba: Vec<u8>, seconds: f32, rate: u32, channels: u16 },
+    Audio { peaks: Vec<f32>, seconds: f32, rate: u32, channels: u16 },
     Failed(String),
 }
 
@@ -237,6 +237,10 @@ pub struct App {
     pub scale: f32,
     pub drag_last: [f32; 2],
     pub wave: Pixels,
+    /// The peaks `wave` is drawn from, kept so it can be redrawn at the size it's shown.
+    wave_peaks: Vec<f32>,
+    /// The size in pixels the waveform pictures were last drawn at.
+    wave_drawn: (u32, u32),
     pub playhead: Live<[f32; 2]>,
     pub clock: LiveText,
     pub autoplay: bool,
@@ -350,6 +354,8 @@ pub fn init_with(prefs: Prefs) -> App {
         scale: 1.0,
         drag_last: [0.0; 2],
         wave: Pixels::new(),
+        wave_peaks: Vec::new(),
+        wave_drawn: (0, 0),
         playhead: Live::new([0.0, 0.0]),
         clock: LiveText::new("0:00.0"),
         autoplay: saved.autoplay,
@@ -516,7 +522,7 @@ impl App {
             }
             "edit-zoom" => {
                 self.run_scene("edit-trim", tx);
-                self.edit.view = Some((280_000, 520_000));
+                self.edit.view = Some((802_000, 822_000));
             }
             "edit-whole-model" => {
                 self.run_scene("model", tx);
@@ -612,7 +618,10 @@ impl App {
             self.confirmed = None;
             changed = true;
         }
-        if matches!(self.preview, Preview::Audio { .. }) && self.track_playback(tx) { changed = true; }
+        if matches!(self.preview, Preview::Audio { .. }) {
+            self.fit_wave_pictures();
+            if self.track_playback(tx) { changed = true; }
+        }
         // A paused sound is still under way, so the button keeps offering Stop.
         let playing = !self.audio.is_finished();
         if playing != self.showing_playing {
@@ -651,6 +660,23 @@ impl App {
         };
         self.status.set(text);
         if self.scanning || made < total { tx.wake_after(Duration::from_millis(400)); }
+    }
+
+    /// The size in device pixels the waveform is shown at. Pictures are drawn at exactly this,
+    /// because scaling one to fit thins its strokes and makes it shimmer as it moves.
+    pub(crate) fn wave_size(&self) -> (u32, u32) {
+        let pixels = |points: f32| ((points * self.scale).round() as u32).clamp(16, 4096);
+        (pixels(self.stage_size[0]), pixels(self.stage_size[1]))
+    }
+
+    /// Redraws the waveform pictures if the size they're shown at has changed.
+    fn fit_wave_pictures(&mut self) {
+        let size = self.wave_size();
+        if size == self.wave_drawn { return }
+        self.wave_drawn = size;
+        let rgba = wave::draw(&self.wave_peaks, size.0, size.1, self.wave_color());
+        self.wave.set(size.0, size.1, rgba);
+        self.redraw_timeline();
     }
 
     /// Moves the playhead along; true if a zoomed timeline had to page to keep up with it.
@@ -800,11 +826,10 @@ impl App {
     }
 
     fn request_preview(&mut self, path: PathBuf, kind: Kind) {
-        let wave_color = self.wave_color();
         self.awaiting_preview = true;
         let library = self.lib.root.clone();
         let (size, nearest) = (self.texture_size, self.nearest);
-        self.loading.request((path, kind), move |(p, kind)| load_preview(&p, &library, kind, wave_color, size, nearest));
+        self.loading.request((path, kind), move |(p, kind)| load_preview(&p, &library, kind, size, nearest));
     }
 
     /// Shows on button `name` that its action happened.
@@ -1027,8 +1052,9 @@ impl App {
                 self.stage.revision += 1;
                 Preview::Model(m)
             }
-            Loaded::Audio { rgba, seconds, rate, channels } => {
-                self.wave.set(WAVE_W, WAVE_H, rgba);
+            Loaded::Audio { peaks, seconds, rate, channels } => {
+                self.wave_peaks = peaks;
+                self.wave_drawn = (0, 0);
                 Preview::Audio { seconds, rate, channels }
             }
             Loaded::Failed(reason) => Preview::Failed(reason),
@@ -1296,7 +1322,7 @@ fn at_size(full: &Arc<Image>, max: Option<u32>, nearest: bool) -> Arc<Image> {
     Arc::new(Image { width: out.width(), height: out.height(), rgba: out.into_raw() })
 }
 
-fn load_preview(path: &Path, library: &Path, kind: Kind, wave_color: [u8; 3], size: Option<u32>, nearest: bool) -> Loaded {
+fn load_preview(path: &Path, library: &Path, kind: Kind, size: Option<u32>, nearest: bool) -> Loaded {
     let run = || match kind {
         Kind::Texture => load_texture(path).map(|full| {
             let shown = at_size(&full, size, nearest);
@@ -1304,7 +1330,7 @@ fn load_preview(path: &Path, library: &Path, kind: Kind, wave_color: [u8; 3], si
         }),
         Kind::Model => model::load(path, library).map(|m| Loaded::Model(Arc::new(m))),
         Kind::Audio => wave::peaks(path, WAVE_W as usize).map(|p| Loaded::Audio {
-            rgba: wave::draw(&p.values, WAVE_W, WAVE_H, wave_color),
+            peaks: p.values,
             seconds: p.seconds,
             rate: p.rate,
             channels: p.channels,
