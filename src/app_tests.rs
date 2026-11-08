@@ -88,8 +88,15 @@ fn settings_open_apply_and_survive_a_restart() {
     settle(&mut rt);
     assert!(!rt.state.settings_open);
 
+    // Smart search is off until asked for, and its speed is remembered.
+    assert!(!rt.state.smart_on);
+    assert_eq!(rt.state.index_effort, crate::smart::Effort::Cpu, "the graphics card has to be chosen");
+    rt.state.set_index_effort(crate::smart::Effort::Paused);
+    rt.update(|s, tx| { s.poll(tx); });
+
     // A new launch reads what was saved.
     let again = app::init_with(std::mem::replace(&mut rt.state.prefs, rune::prefs::Prefs::memory()));
+    assert_eq!(again.index_effort, crate::smart::Effort::Paused);
     assert_eq!(again.theme, app::Theme::Light);
     assert!(!again.autoplay);
     assert!((again.volume - rt.state.volume).abs() < 1e-3);

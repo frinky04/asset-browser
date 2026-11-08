@@ -371,6 +371,30 @@ impl Query {
         Some(total)
     }
 
+    /// Whether `a` meets everything here except the free words: a file found by what it looks
+    /// like doesn't have those in its name, but still has to answer to `pack:` or `-rust`.
+    pub fn allows(&self, a: &Asset, facts: &dyn Fn(u64) -> Option<Facts>) -> bool {
+        let cx = Context { now: self.now, facts };
+        if self.reject.iter().any(|c| c.fit(a, &cx).is_some()) { return false }
+        self.want.iter().filter(|c| !matches!(c, Check::Text(_) | Check::Any(_))).all(|c| c.fit(a, &cx).is_some())
+    }
+
+    /// The free words as a description to look for, unless they ask for something literal.
+    pub fn description(&self) -> Option<String> {
+        const SHORTEST: usize = 3;
+        let mut words = Vec::new();
+        for check in &self.want {
+            match check {
+                Check::Text(t) if t.exact => return None,
+                Check::Text(t) => words.push(t.raw.as_str()),
+                Check::Any(all) if all.iter().any(|c| matches!(c, Check::Text(_))) => return None,
+                _ => {}
+            }
+        }
+        let text = words.join(" ");
+        (text.chars().count() >= SHORTEST).then_some(text)
+    }
+
     /// Whether the query names this format, which brings back models hidden behind a better one.
     pub fn asks_for_ext(&self, ext: &str) -> bool {
         fn names(c: &Check, ext: &str) -> bool {

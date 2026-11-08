@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use crate::query::Query;
+use crate::smart::Hit;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
@@ -348,13 +349,56 @@ pub fn search(lib: &Library, f: &Filter) -> Results {
     search_with(lib, f, &|_| None)
 }
 
-/// The assets `f` asks for. `facts` says what's been measured about a file, by its key.
+/// [`search_described`], with no descriptions to go on.
+#[cfg(test)]
 pub fn search_with(lib: &Library, f: &Filter, facts: &dyn Fn(u64) -> Option<crate::thumbs::Facts>) -> Results {
+    search_described(lib, f, facts, &[])
+}
+
+/// What to look for by meaning in the search box's text, if anything.
+pub fn description_in(text: &str) -> Option<String> {
+    Query::parse(text, 0).description()
+}
+
+/// How far below its best a kind's matches may fall, and how many of them are shown.
+const DESCRIBED_WINDOW: f32 = 0.07;
+const MOST_DESCRIBED: usize = 60;
+/// Ranks files found by description after everything matched by name.
+const DESCRIBED_FIT: u32 = 1_000_000;
+
+/// Of `hits`, best first, the ones this search would show, as the place each comes in.
+fn described(lib: &Library, f: &Filter, query: &Query, facts: &dyn Fn(u64) -> Option<crate::thumbs::Facts>, hits: &[Hit]) -> HashMap<u32, u32> {
+    if hits.is_empty() { return HashMap::new() }
+    let rank_of: HashMap<u64, usize> = hits.iter().enumerate().map(|(rank, h)| (h.key, rank)).collect();
+    let mut found: Vec<(usize, u32)> = lib.assets.iter().enumerate()
+        .filter_map(|(i, a)| Some((*rank_of.get(&a.key)?, i as u32, a)))
+        .filter(|(_, _, a)| f.pack.is_none_or(|p| p == a.pack) && f.ext.is_none_or(|e| e == a.ext) && query.allows(a, facts))
+        .map(|(rank, i, _)| (rank, i))
+        .collect();
+    found.sort_unstable();
+    let mut best = [None; 3];
+    let mut taken = [0usize; 3];
+    let mut places = HashMap::new();
+    for (rank, i) in found {
+        let kind = lib.assets[i as usize].kind.index();
+        let score = hits[rank].score;
+        let top = *best[kind].get_or_insert(score);
+        if score < top - DESCRIBED_WINDOW || taken[kind] >= MOST_DESCRIBED { continue }
+        taken[kind] += 1;
+        places.insert(i, rank as u32);
+    }
+    places
+}
+
+/// The assets `f` asks for: those whose names match, then those whose look matched the search
+/// text. `facts` says what's been measured about a file, by its key.
+pub fn search_described(lib: &Library, f: &Filter, facts: &dyn Fn(u64) -> Option<crate::thumbs::Facts>, hits: &[Hit]) -> Results {
     let now = std::time::SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let query = Query::parse(&f.text, now);
-    let found = run(lib, f, &query, facts);
+    let places = described(lib, f, &query, facts, hits);
+    let found = run(lib, f, &query, facts, &places);
     if found.ids.is_empty() && let Some((fixed, words)) = query.corrected(lib.vocabulary()) {
-        let mut second = run(lib, f, &fixed, facts);
+        let mut second = run(lib, f, &fixed, facts, &HashMap::new());
         if !second.ids.is_empty() {
             second.corrected = Some(words);
             return second;
@@ -363,14 +407,14 @@ pub fn search_with(lib: &Library, f: &Filter, facts: &dyn Fn(u64) -> Option<crat
     found
 }
 
-fn run(lib: &Library, f: &Filter, query: &Query, facts: &dyn Fn(u64) -> Option<crate::thumbs::Facts>) -> Results {
+fn run(lib: &Library, f: &Filter, query: &Query, facts: &dyn Fn(u64) -> Option<crate::thumbs::Facts>, places: &HashMap<u32, u32>) -> Results {
     let mut out = Results { by_pack: vec![0; lib.packs.len()], uses_facts: query.needs_facts(), ..Results::default() };
     let mut ext_counts = [0u32; FORMATS.len()];
     let rank = f.sort == Sort::Pack && query.has_words();
     let mut fits: Vec<u32> = Vec::new();
     for (i, a) in lib.assets.iter().enumerate() {
         if a.shadowed && !f.all_formats && f.ext != Some(a.ext) && !query.asks_for_ext(a.ext) { continue }
-        let Some(fit) = query.fit(a, facts) else { continue };
+        let Some(fit) = query.fit(a, facts).or_else(|| places.get(&(i as u32)).map(|place| DESCRIBED_FIT + place)) else { continue };
         let kind_ok = f.kind.is_none_or(|k| k == a.kind);
         let pack_ok = f.pack.is_none_or(|p| p == a.pack);
         let ext_ok = f.ext.is_none_or(|e| e == a.ext);
@@ -431,6 +475,60 @@ mod tests {
 
     fn names(l: &Library, r: &Results) -> Vec<String> {
         r.ids.iter().map(|i| l.assets[*i as usize].name().to_owned()).collect()
+    }
+
+    fn hit(l: &Library, name: &str, score: f32) -> Hit {
+        Hit { key: l.assets.iter().find(|a| a.name() == name).unwrap().key, score }
+    }
+
+    #[test]
+    fn a_description_finds_files_after_the_ones_named_that_way() {
+        let l = Library::build(PathBuf::from("C:/lib"), vec![entry("P/old_door.png"), entry("P/T_0012.png"), entry("P/T_0013.png")]);
+        let hits = [hit(&l, "T_0013.png", 0.8), hit(&l, "old_door.png", 0.75), hit(&l, "T_0012.png", 0.74)];
+        let r = search_described(&l, &Filter { text: "door".into(), ..Filter::default() }, &|_| None, &hits);
+        assert_eq!(names(&l, &r), ["old_door.png", "T_0013.png", "T_0012.png"]);
+    }
+
+    #[test]
+    fn a_description_fills_in_what_names_alone_found_nothing_for() {
+        let l = Library::build(PathBuf::from("C:/lib"), vec![entry("P/T_0012.png"), entry("P/T_0013.png")]);
+        let hits = [hit(&l, "T_0012.png", 0.8)];
+        let r = search_described(&l, &Filter { text: "something to sit on".into(), ..Filter::default() }, &|_| None, &hits);
+        assert_eq!(names(&l, &r), ["T_0012.png"]);
+        assert_eq!(r.corrected, None);
+    }
+
+    #[test]
+    fn fields_and_exclusions_still_apply_to_files_found_by_description() {
+        let l = Library::build(PathBuf::from("C:/lib"), vec![entry("Keep/T_1.png"), entry("Other/T_2.png"), entry("Keep/rusty_3.png")]);
+        let hits = [hit(&l, "T_2.png", 0.8), hit(&l, "T_1.png", 0.78), hit(&l, "rusty_3.png", 0.77)];
+        let r = search_described(&l, &Filter { text: "wall pack:keep -rusty".into(), ..Filter::default() }, &|_| None, &hits);
+        assert_eq!(names(&l, &r), ["T_1.png"]);
+    }
+
+    #[test]
+    fn matches_far_below_the_best_of_their_kind_are_dropped() {
+        let l = Library::build(PathBuf::from("C:/lib"), vec![entry("P/a_1.png"), entry("P/b_2.png"), entry("P/c_3.glb")]);
+        let hits = [hit(&l, "a_1.png", 0.80), hit(&l, "b_2.png", 0.70), hit(&l, "c_3.glb", 0.68)];
+        let r = search_described(&l, &Filter { text: "zzz".into(), ..Filter::default() }, &|_| None, &hits);
+        assert_eq!(names(&l, &r), ["a_1.png", "c_3.glb"], "the model is judged against other models");
+    }
+
+    #[test]
+    fn counts_include_what_a_description_found() {
+        let l = Library::build(PathBuf::from("C:/lib"), vec![entry("P/a_1.png"), entry("P/b_2.glb")]);
+        let hits = [hit(&l, "a_1.png", 0.8), hit(&l, "b_2.glb", 0.8)];
+        let r = search_described(&l, &Filter { text: "zzz".into(), kind: Some(Kind::Texture), ..Filter::default() }, &|_| None, &hits);
+        assert_eq!(names(&l, &r), ["a_1.png"]);
+        assert_eq!(r.by_kind[Kind::Model.index()], 1, "the tab still shows what's waiting there");
+    }
+
+    #[test]
+    fn only_free_words_are_a_description() {
+        assert_eq!(description_in("old hospital tiles pack:mega -rust").as_deref(), Some("old hospital tiles"));
+        assert_eq!(description_in("is:model size:>1mb"), None);
+        assert_eq!(description_in("\"exact door\""), None, "quotes ask for those words only");
+        assert_eq!(description_in("ab"), None, "too short to mean anything");
     }
 
     #[test]

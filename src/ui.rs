@@ -173,6 +173,7 @@ const PAUSE: Icon = Icon { name: "ab-pause", view: 16.0, body: r#"<path d="M4.5 
 pub(crate) const REFRESH: Icon = Icon { name: "ab-refresh", view: 16.0, body: r#"<path d="M13.2 7A5.3 5.3 0 003.4 5.2M2.8 9a5.3 5.3 0 009.8 1.8M3.2 2.6v2.9h2.9M12.8 13.4v-2.9H9.9" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>"# };
 pub(crate) const TRASH: Icon = Icon { name: "ab-trash", view: 16.0, body: r#"<path d="M2.8 4.3h10.4M6.2 4.1V2.9h3.6v1.2M4 4.5l.6 8.2c0 .5.5.9 1 .9h4.8c.5 0 1-.4 1-.9l.6-8.2" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>"# };
 pub(crate) const CLOSE: Icon = Icon { name: "ab-close", view: 16.0, body: r#"<path d="M3.8 3.8l8.4 8.4M12.2 3.8l-8.4 8.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>"# };
+pub(crate) const DOWNLOAD: Icon = Icon { name: "ab-download", view: 16.0, body: r#"<path d="M8 2.5v7.8M4.7 7.2L8 10.5l3.3-3.3M3 13.5h10" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>"# };
 const SLIDERS: Icon = Icon { name: "ab-sliders", view: 16.0, body: r#"<path d="M2.5 5h6.2M12.2 5h1.3M2.5 11h1.3M7.2 11h6.3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="10.4" cy="5" r="1.8" stroke="currentColor" stroke-width="1.4" fill="none"/><circle cx="5.5" cy="11" r="1.8" stroke="currentColor" stroke-width="1.4" fill="none"/>"# };
 pub(crate) const FOLDER: Icon =Icon { name: "ab-folder", view: 16.0, body: r#"<path d="M2 4.5A1.5 1.5 0 013.5 3h2.6l1.5 1.7h4.9A1.5 1.5 0 0114 6.2v5.3a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 11.5v-7z" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linejoin="round"/>"# };
 const COPY: Icon = Icon { name: "ab-copy", view: 16.0, body: r#"<rect x="5.5" y="5.5" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M10.5 3.5v-.0A1 1 0 009.5 2.5h-6a1 1 0 00-1 1v6a1 1 0 001 1" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round"/>"# };
@@ -649,7 +650,7 @@ fn status_bar(s: &App) -> El {
     let sizes = vec![plain("S", 120.0f32), plain("M", 158.0), plain("L", 232.0)];
     let drag_sizes = vec![plain("Full size", None), plain("1024", Some(1024u32)), plain("512", Some(512)), plain("256", Some(256))];
     let (made, total) = s.thumbs.progress();
-    let working = s.scanning || made < total;
+    let working = s.scanning || made < total || s.smart_status.working_on_gpu.is_some();
     let mut bar = row().key("status").w_full().h(46.0).px(GRID_PAD).gap(12.0).items_center();
     // The idle hint only shows when all of it fits; progress always shows.
     bar = if working || s.grid_width >= 960.0 {
