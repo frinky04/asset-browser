@@ -64,7 +64,7 @@ pub fn sheet(s: &App) -> El {
     let library = section("Library", vec![
         setting("Folder", Some(s.library_folder()), outlined("Change", "Change", false, &FOLDER, |_, tx| pick_library_folder(tx))),
         setting("Check for new files", Some("Happens at every launch, and here on demand".to_owned()), outlined("Rescan", "Scanning", s.scanning, &REFRESH, |s, _| s.rescan())),
-        switch_row("Show every format of a model", "When a pack ships it as GLB, OBJ and DAE", s.filter.all_formats, |s| s.toggle_all_formats_now()),
+        switch_row("Show every format of a model", "When a pack ships it as GLB, OBJ and DAE", s.filter.all_formats, |s| s.toggle_all_formats()),
     ]);
 
     let previews = section("Previews", vec![

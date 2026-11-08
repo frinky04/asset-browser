@@ -277,7 +277,7 @@ fn kind_tabs(s: &App) -> El {
 }
 
 fn search_box(s: &App) -> El {
-    let mut field = TextInput::new(&s.search)
+    let field = TextInput::new(&s.search)
         .placeholder("Search assets")
         .label("Search assets")
         .plain()
@@ -285,14 +285,18 @@ fn search_box(s: &App) -> El {
         .on_edit(|s: &mut App| &mut s.search)
         .on_change(|s: &mut App, tx| s.refilter(tx));
     let empty = s.search.text.is_empty();
-    if !empty { field = field.clear_button(); }
-    let mut bar = row().key("searchbar").w(320.0).h(CONTROL_H).pl(11.0).pr(GROUP_PAD).gap(4.0).radius(GROUP_RADIUS).items_center().border(1.0, T.line).cursor(Cursor::Text)
+    let bar = row().key("searchbar").w(320.0).h(CONTROL_H).pl(11.0).pr(GROUP_PAD).gap(4.0).radius(GROUP_RADIUS).items_center().border(1.0, T.line).cursor(Cursor::Text)
         .child(icon(&SEARCH, 15.0).color(T.muted))
         .child(el().grow(1.0).min_w(0.0).child(field.build(kit()).key("search")));
+    // The end of the bar holds the shortcut hint, or the way back to it, in the same slot.
     if empty {
-        bar = bar.child(el().px(7.0).h(SEGMENT_H).radius(SEGMENT_RADIUS).center_y().fill(T.raised).a11y_hidden().child(label("/", SMALL, T.muted)));
+        bar.child(el().size(SEGMENT_H, SEGMENT_H).radius(SEGMENT_RADIUS).center().fill(T.raised).a11y_hidden().child(label("/", SMALL, T.muted)))
+    } else {
+        bar.child(el().key("search-clear").role("button").focusable(true).label("Clear search").size(SEGMENT_H, SEGMENT_H).radius(SEGMENT_RADIUS).center()
+            .hover(T.hover).press(T.press).press_scale(0.92).cursor(Cursor::Pointer)
+            .on_press_tx(|s: &mut App, tx| s.clear_search(tx))
+            .child(icon(&CLOSE, 12.0).color(T.muted)))
     }
-    bar
 }
 
 /// The window's own title bar: a band that drags the window, holding the app's main controls.
@@ -376,10 +380,9 @@ fn filter_bar(s: &App) -> El {
     // Whole chips only: the rarest formats go behind "+N" when they don't all fit.
     let chip_width = |e: &str| 18.0 + e.len() as f32 * 7.0 + 2.0;
     const MORE_WIDTH: f32 = 42.0;
-    // What's left beside the tabs and the toggle: the row's padding, three gaps and the
-    // format group's own inset come out of it too.
-    const TOGGLE_WIDTH: f32 = 124.0;
-    let mut room = s.grid_width - GRID_PAD * 2.0 - 12.0 * 3.0 - kind_tabs_width(s) - TOGGLE_WIDTH - GROUP_PAD * 2.0;
+    // What's left beside the tabs: the row's padding, the gap and the group's own inset come
+    // out of it too.
+    let mut room = s.grid_width - GRID_PAD * 2.0 - 12.0 - kind_tabs_width(s) - GROUP_PAD * 2.0;
     let mut all: Vec<(&'static str, u32)> = s.results.by_ext.clone();
     let total: f32 = all.iter().map(|(e, _)| chip_width(e)).sum();
     if total > room { room -= MORE_WIDTH; }
@@ -412,8 +415,7 @@ fn filter_bar(s: &App) -> El {
     }
     let mut filters = row().key("filters").w_full().py(12.0).px(GRID_PAD).gap(12.0).items_center().child(kind_tabs(s));
     if !all.is_empty() { filters = filters.child(formats.key("format-group").h(CONTROL_H).radius(GROUP_RADIUS).border(1.0, T.line).padding(GROUP_PAD)); }
-    filters.child(el().grow(1.0))
-        .child(toggle("Every format", s.filter.all_formats, |s, tx| s.toggle_all_formats(tx)).help("Show every copy of a model when a pack ships it as GLB, OBJ and DAE"))
+    filters
 }
 
 fn sidebar(s: &App) -> El {
@@ -452,13 +454,7 @@ fn sidebar(s: &App) -> El {
     if !open { panel = panel.inert(); }
     panel.child(col().w(SIDEBAR_W).h_full().min_h(0.0)
         .child(el().w_full().grow(1.0).min_h(0.0).pt(PACK_LEFT).child(scroller))
-        .child(hairline())
-        .child(el().w_full().padding(8.0).child(
-            row().key("change-root").role("button").focusable(true).label("Change library folder").w_full().h(32.0).px(10.0).gap(8.0).radius(CONTROL_RADIUS).items_center()
-                .hover(T.hover).press(T.press).press_scale(0.985).cursor(Cursor::Pointer)
-                .on_press_tx(|_: &mut App, tx: &mut Tx| pick_library_folder(tx))
-                .child(icon(&FOLDER, 14.0).color(T.muted))
-                .child(label("Change library folder", BODY, T.muted)))))
+    )
 }
 
 fn facts_line(asset: &Asset, facts: Option<Facts>) -> String {
@@ -548,7 +544,7 @@ impl App {
 
     /// A narrow grid drops the counts and captions its controls can live without.
     fn is_compact(&self) -> bool {
-        self.grid_width < 830.0
+        self.grid_width < 720.0
     }
 
     /// Waveforms are wide and thin, so an audio-only view doesn't spend a square on each.

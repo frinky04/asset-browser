@@ -45,10 +45,9 @@ fn the_filter_row_stays_inside_its_panel_at_every_width() {
                 rt.set_viewport((width as f32, 900.0), 1.0);
                 rt.invalidate();
                 for _ in 0..3 { rt.frame(1.0); }
-                let (main, toggle, group, tabs) = (rect_of(&rt, "panels/main"), rect_of(&rt, "filters/Every format"), rect_of(&rt, "filters/format-group"), rect_of(&rt, "filters/kinds"));
+                let (main, group, tabs) = (rect_of(&rt, "panels/main"), rect_of(&rt, "filters/format-group"), rect_of(&rt, "filters/kinds"));
                 let at = format!("window {width}, inspector {inspector}, sidebar {open}, grid {}", rt.state.grid_width);
-                assert!(toggle[0] + toggle[2] <= main[0] + main[2] - 15.0, "toggle past the panel at {at}: {toggle:?} in {main:?}");
-                assert!(group[0] + group[2] <= toggle[0] - 1.0, "formats touch the toggle at {at}: {group:?}, {toggle:?}");
+                assert!(group[0] + group[2] <= main[0] + main[2] - 15.0, "formats past the panel at {at}: {group:?} in {main:?}");
                 assert!(tabs[0] + tabs[2] <= group[0], "tabs overlap the formats at {at}");
             }
         }
@@ -346,6 +345,12 @@ fn browsing_previewing_and_dragging_out_end_to_end() {
     settle(&mut rt);
     assert_eq!(rt.state.results.ids.len(), 0);
     assert!(rt.elements().iter().any(|e| e.text.as_deref().is_some_and(|t| t.starts_with("Nothing matches"))));
+
+    // The X clears the search, brings everything back and goes away.
+    click(&mut rt, "search-clear");
+    assert!(rt.state.search.text.is_empty());
+    assert_eq!(rt.state.results.ids.len(), 13);
+    assert!(rt.find("search-clear").is_none());
 
     drop(rt);
     let _ = std::fs::remove_dir_all(root.parent().unwrap());

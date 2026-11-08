@@ -607,7 +607,14 @@ impl App {
         self.start_loading(root);
     }
 
-    pub fn toggle_all_formats_now(&mut self) {
+    /// Empties the search and leaves the field ready for typing.
+    pub fn clear_search(&mut self, tx: &mut Tx) {
+        self.search = TextEdit::new("");
+        self.search.focused = true;
+        self.refilter(tx);
+    }
+
+    pub fn toggle_all_formats(&mut self) {
         self.filter.all_formats = !self.filter.all_formats;
         self.grid_glide.forget();
         self.refilter_keeping_scroll();
@@ -700,11 +707,6 @@ impl App {
 
     pub fn set_sort(&mut self, sort: Sort, tx: &mut Tx) {
         self.filter.sort = sort;
-        self.refilter(tx);
-    }
-
-    pub fn toggle_all_formats(&mut self, tx: &mut Tx) {
-        self.filter.all_formats = !self.filter.all_formats;
         self.refilter(tx);
     }
 
