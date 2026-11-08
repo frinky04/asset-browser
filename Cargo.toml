@@ -1,0 +1,49 @@
+[package]
+name = "asset-browser"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+rune = { git = "https://github.com/anomalyco/rune", rev = "f2fb51eaed6de6e4fae5f8ef86084be89af9e04a", features = ["native-file-dialog"] }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "f2fb51eaed6de6e4fae5f8ef86084be89af9e04a" }
+# Must match the wgpu Rune is built on: the preview stage draws into Rune's encoder.
+wgpu = { version = "~30.0.1", default-features = false, features = ["wgsl"] }
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.30"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tga", "webp", "gif"] }
+qoi = "0.4"
+gltf = "1"
+tobj = "4"
+roxmltree = "0.20"
+symphonia = { version = "0.5", features = ["all"] }
+rodio = { version = "0.20", default-features = false, features = ["symphonia-all"] }
+walkdir = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Ole",
+    "Win32_System_SystemServices",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-core = "0.62"
+winit_raw = { package = "raw-window-handle", version = "0.6" }
+
+[profile.dev]
+opt-level = 1
+
+# Image, audio and mesh decoding are unusable unoptimized.
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
+
+[profile.release]
+codegen-units = 16
+incremental = true
