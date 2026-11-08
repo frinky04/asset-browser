@@ -862,6 +862,7 @@ fn pane(s: &App, id: u32, asset: &Asset) -> Pane {
             let zoomed = s.edit.view.is_some();
             let wave = el().key("waveform").w_full().h(wave_h).cursor(if s.edit.open { Cursor::Crosshair } else { Cursor::Pointer })
                 .pixels(if s.timeline_ready() { &s.edit.timeline_wave } else { &s.wave })
+                .pointer_buttons([PointerButton::Middle])
                 .on_layout(|s: &mut App, r: [f32; 4]| s.stage_size = [r[2], r[3]])
                 .on_drag(|s: &mut App, drag, tx| s.drag_waveform(drag, tx))
                 .on_wheel(|s: &mut App, wheel, tx| s.wheel_timeline(wheel, tx))

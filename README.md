@@ -57,7 +57,7 @@ Editing a GLB or glTF keeps its nodes, skins and animation. Other model formats 
 
 ## Keys
 
-Arrows move the selection. Space plays or pauses audio, and always does while the pointer is over the sound. Scroll over a waveform to zoom it, Shift-scroll to pan. `/` focuses search and Escape clears it.
+Arrows move the selection. Space plays or pauses audio, and always does while the pointer is over the sound. Scroll over a waveform to zoom it, and drag with the middle button or Shift-scroll to pan. `/` focuses search and Escape clears it.
 
 ## Checking it headlessly
 

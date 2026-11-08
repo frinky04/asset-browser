@@ -117,6 +117,8 @@ pub struct Editor {
     view_goal: Option<(f64, f64)>,
     view_now: (f64, f64),
     view_ticked: Instant,
+    /// Where a middle-button pan began: the view's start and span.
+    pan_from: (f64, f64),
     /// The source was asked for by zooming, without the panel being open.
     timeline_wanted: bool,
     /// Zoom that arrived while the source was still being read: where, and how much.
@@ -192,6 +194,7 @@ impl Default for Editor {
             view_goal: None,
             view_now: (0.0, 0.0),
             view_ticked: Instant::now(),
+            pan_from: (0.0, 0.0),
             timeline_wanted: false,
             pending_zoom: None,
             timeline_wave: Pixels::new(),
@@ -889,6 +892,9 @@ impl App {
     fn show_view(&mut self, edges: (f64, f64)) {
         let frames = self.audio_source().map_or(0.0, |pcm| pcm.frames() as f64);
         self.edit.view = (edges.1 - edges.0 < frames - 0.5).then_some((edges.0 as u64, edges.1 as u64));
+        // If this puts the playhead off screen, that was the view moving, not playback leaving
+        // it, and follow_playhead must not drag the view back.
+        self.edit.playhead_was_in_view = false;
         self.redraw_timeline();
     }
 
@@ -1007,10 +1013,28 @@ impl App {
         tx.instant();
     }
 
+    /// A middle-button drag: the sound follows the pointer, as if held in place by it.
+    fn pan_timeline(&mut self, drag: &rune::Drag, tx: &mut Tx) {
+        if drag.phase == rune::Phase::Down {
+            let Some((start, end, _)) = self.audio_view() else { return };
+            self.edit.view_goal = None;
+            self.edit.pan_from = (start as f64, (end - start) as f64);
+            return;
+        }
+        let (start, span) = self.edit.pan_from;
+        if span <= 0.0 { return }
+        self.set_view(start - f64::from(drag.dx) * span / f64::from(self.stage_size[0].max(1.0)), span);
+        tx.instant();
+    }
+
     /// The waveform's own drag. In the editor it picks out a section and a plain click seeks;
     /// otherwise it scrubs.
     pub fn drag_waveform(&mut self, drag: &rune::Drag, tx: &mut Tx) {
         use rune::Phase;
+        if tx.button() == rune::PointerButton::Middle {
+            self.pan_timeline(drag, tx);
+            return;
+        }
         let editing = self.edit.open && self.audio_section().is_some();
         if !editing {
             if drag.phase != Phase::Up {
@@ -1056,9 +1080,13 @@ impl App {
 
     /// Pages a zoomed timeline along when playback runs off its edge; true if it moved.
     pub(crate) fn follow_playhead(&mut self, seconds: f32) -> bool {
+        self.follow_playhead_while(self.audio.is_playing(), seconds)
+    }
+
+    pub(crate) fn follow_playhead_while(&mut self, playing: bool, seconds: f32) -> bool {
         let (Some((start, end)), Some((rate, _))) = (self.edit.view, self.source_format()) else { return false };
         let frame = (f64::from(seconds) * f64::from(rate)) as u64;
-        let target = self.audio.is_playing().then(|| sound::follow_view((start, end), frame, self.edit.playhead_was_in_view)).flatten();
+        let target = playing.then(|| sound::follow_view((start, end), frame, self.edit.playhead_was_in_view)).flatten();
         if let Some(from) = target { self.aim_view(from as f64, (end - start) as f64); }
         self.edit.playhead_was_in_view = target.is_some() || (start..end).contains(&frame);
         target.is_some()

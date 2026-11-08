@@ -954,6 +954,96 @@ fn the_zoom_eases_there_and_keeps_the_pointer_on_the_same_moment() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Zooms the open timeline in on the middle of its width and waits for it to arrive.
+fn zoom_in(rt: &mut Runtime<App>, notches: usize) {
+    let box_ = rect(rt, "waveform");
+    let (x, y) = (box_[0] + box_[2] * 0.5, box_[1] + box_[3] * 0.5);
+    rt.pointer_move(x, y);
+    for _ in 0..notches {
+        rt.wheel_event(rune::WheelEvent::new(0.0, 80.0).at(x, y));
+        rt.frame(1.0 / 60.0);
+    }
+    wait_for_edit(rt);
+}
+
+#[test]
+fn zooming_past_the_playhead_is_not_pulled_back_to_it() {
+    let root = edit_fixture();
+    let mut rt = app_on(&root);
+    open_editor(&mut rt, "tone.wav");
+    for _ in 0..40 { rt.frame(1.0 / 60.0); }
+    zoom_in(&mut rt, 1);
+
+    // The playhead sits inside the view, then a zoom about the far right leaves it behind.
+    let (start, _) = rt.state.edit.view.unwrap();
+    let playhead = (start + 2_000) as f32 / 44_100.0;
+    rt.update(move |s, _| { s.follow_playhead_while(true, playhead); });
+    let box_ = rect(&rt, "waveform");
+    let (x, y) = (box_[0] + box_[2] * 0.9, box_[1] + box_[3] * 0.5);
+    rt.pointer_move(x, y);
+    for _ in 0..8 { rt.wheel_event(rune::WheelEvent::new(0.0, 80.0).at(x, y)); }
+    rt.frame(1.0 / 60.0);
+
+    // Ticking through the whole ease, playback never gets to redirect it.
+    let began = Instant::now();
+    while rt.state.edit.timeline_moving() && began.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(4));
+        let mut followed = false;
+        rt.update(|s, tx| {
+            s.poll(tx);
+            followed = s.follow_playhead_while(true, playhead);
+        });
+        assert!(!followed, "the zoom was overruled");
+        rt.frame(1.0 / 60.0);
+    }
+    let (first, last) = rt.state.edit.view.unwrap();
+    let frame = (playhead * 44_100.0) as u64;
+    assert!(!(first..last).contains(&frame), "the zoom went past the playhead: {first}..{last} at {frame}");
+    let mut followed = false;
+    rt.update(|s, _| followed = s.follow_playhead_while(true, playhead));
+    assert!(!followed, "and it stays there once it has stopped");
+
+    // Playback itself running off the edge still pages along.
+    let inside = (first + 10) as f32 / 44_100.0;
+    let beyond = (last + 10) as f32 / 44_100.0;
+    rt.update(move |s, _| { s.follow_playhead_while(true, inside); });
+    let mut paged = false;
+    rt.update(|s, _| paged = s.follow_playhead_while(true, beyond));
+    assert!(paged);
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_middle_button_pans_the_timeline_and_nothing_else() {
+    let root = edit_fixture();
+    let mut rt = app_on(&root);
+    open_editor(&mut rt, "tone.wav");
+    for _ in 0..40 { rt.frame(1.0 / 60.0); }
+    zoom_in(&mut rt, 6);
+    let (start, end) = rt.state.edit.view.unwrap();
+    let section = rt.state.audio_section();
+
+    // Dragging right pulls the sound right, so the view moves toward the start.
+    let box_ = rect(&rt, "waveform");
+    let (x, y, width) = (box_[0] + box_[2] * 0.5, box_[1] + box_[3] * 0.5, box_[2]);
+    rt.pointer_move(x, y);
+    rt.button_down(x, y, rune::PointerButton::Middle);
+    settle(&mut rt);
+    rt.pointer_move(x + width * 0.25, y);
+    settle(&mut rt);
+    rt.button_up(x + width * 0.25, y, rune::PointerButton::Middle);
+    settle(&mut rt);
+    let (moved_start, moved_end) = rt.state.edit.view.unwrap();
+    let span = end - start;
+    assert_eq!(moved_end - moved_start, span, "panning doesn't zoom");
+    assert!(((start - moved_start) as i64 - (span / 4) as i64).abs() < 300, "moved {} of {span}", start - moved_start);
+    assert_eq!(rt.state.audio_section(), section, "and it selects nothing");
+    assert!(!rt.state.edit.is_edited(rt.state.selected_asset().unwrap().key));
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn zooming_works_without_opening_the_editor() {
     let root = edit_fixture();
