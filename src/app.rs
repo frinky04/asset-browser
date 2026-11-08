@@ -16,7 +16,7 @@ use crate::library::{self, Filter, Kind, Library, Results, Sort};
 use crate::model::{self, Image, Model};
 use crate::query::Suggestion;
 use crate::native_drag::{self, Ended};
-use crate::stage::{Look, Scene, StageState, View};
+use crate::stage::{Look, Scene, StageState, View, actual_size_zoom};
 use crate::thumbs::{Thumbs, WAVE_COLOR};
 use crate::{ui, wave};
 
@@ -52,7 +52,7 @@ pub enum Preview {
 }
 
 enum Loaded {
-    Texture(Arc<Image>),
+    Texture { full: Arc<Image>, shown: Arc<Image> },
     Model(Arc<Model>),
     Audio { rgba: Vec<u8>, seconds: f32, rate: u32, channels: u16 },
     Failed(String),
@@ -226,6 +226,10 @@ pub struct App {
     pub preview: Preview,
     awaiting_preview: bool,
     loading: Latest<Loaded>,
+    /// A preview at another size: the image it was made from, and the result.
+    rescaling: Latest<(Arc<Image>, Arc<Image>)>,
+    /// The size the selected texture is shown and dragged at, `None` being its own.
+    pub texture_size: Option<u32>,
     pub stage: StageState,
     /// The stage's size in points.
     pub stage_size: [f32; 2],
@@ -336,6 +340,8 @@ pub fn init_with(prefs: Prefs) -> App {
         preview: Preview::None,
         awaiting_preview: false,
         loading: Latest::default(),
+        rescaling: Latest::default(),
+        texture_size: saved.drag_max,
         stage: StageState { view: View { smooth: saved.smooth, ..View::default() }, ease: motion.speed(), ..StageState::default() },
         stage_size: [320.0, 320.0],
         scale: 1.0,
@@ -393,6 +399,7 @@ pub fn init_with(prefs: Prefs) -> App {
 
 pub fn setup(s: &mut App, waker: Waker) {
     s.loading.set_waker(waker.clone());
+    s.rescaling.set_waker(waker.clone());
     s.storage_job.set_waker(waker.clone());
     s.waker = Some(waker);
     let root = s.root.clone();
@@ -471,6 +478,10 @@ impl App {
             }
             "small" => self.tile_size = 120.0,
             "settings" => self.open_settings(),
+            "texture-sized" => {
+                self.drag_max = Some(64);
+                self.run_scene("texture", tx);
+            }
             "settings-over-model" => {
                 self.run_scene("model", tx);
                 self.open_settings();
@@ -525,6 +536,10 @@ impl App {
         }
         if let Some(loaded) = self.loading.take() {
             self.land_preview(loaded);
+            changed = true;
+        }
+        if let Some((from, shown)) = self.rescaling.take() {
+            self.land_rescaled(&from, shown);
             changed = true;
         }
         if self.advance_drag() { changed = true; }
@@ -738,7 +753,8 @@ impl App {
         let wave_color = self.wave_color();
         self.awaiting_preview = true;
         let library = self.lib.root.clone();
-        self.loading.request((path, kind), move |(p, kind)| load_preview(&p, &library, kind, wave_color));
+        let (size, nearest) = (self.texture_size, self.nearest);
+        self.loading.request((path, kind), move |(p, kind)| load_preview(&p, &library, kind, wave_color, size, nearest));
     }
 
     /// Shows on button `name` that its action happened.
@@ -850,6 +866,7 @@ impl App {
     pub fn select(&mut self, id: u32, tx: &mut Tx) {
         if self.selected == Some(id) { return }
         self.selected = Some(id);
+        self.texture_size = self.drag_max;
         let Some(asset) = self.lib.assets.get(id as usize).cloned() else { return };
         let path = self.lib.path(&asset);
         self.message = None;
@@ -868,7 +885,7 @@ impl App {
 
     fn finish_preview_blocking(&mut self) {
         let start = std::time::Instant::now();
-        while self.awaiting_preview && self.loading.is_pending() && start.elapsed() < Duration::from_secs(20) {
+        while self.awaiting_preview && (self.loading.is_pending() || self.rescaling.is_pending()) && start.elapsed() < Duration::from_secs(20) {
             std::thread::sleep(Duration::from_millis(2));
         }
     }
@@ -879,16 +896,63 @@ impl App {
         !self.awaiting_preview
     }
 
+    /// Pixels of the texture the preview is showing now.
+    pub fn shown_size(&self) -> Option<(u32, u32)> {
+        match &self.stage.scene {
+            Scene::Texture(image) => Some((image.width, image.height)),
+            _ => None,
+        }
+    }
+
+    /// Shows and drags the selected texture at `size`.
+    pub fn set_texture_size(&mut self, size: Option<u32>) {
+        self.texture_size = size;
+        self.rescale_preview();
+    }
+
+    /// The size textures start at, and the one grid drags use.
+    pub fn set_drag_max(&mut self, size: Option<u32>) {
+        self.drag_max = size;
+        self.set_texture_size(size);
+    }
+
+    pub fn set_nearest(&mut self, nearest: bool) {
+        self.nearest = nearest;
+        self.rescale_preview();
+    }
+
+    fn rescale_preview(&mut self) {
+        let Preview::Texture(full) = &self.preview else { return };
+        let (full, size, nearest) = (full.clone(), self.texture_size, self.nearest);
+        self.awaiting_preview = true;
+        self.rescaling.request(full, move |full| {
+            let shown = at_size(&full, size, nearest);
+            (full, shown)
+        });
+    }
+
+    /// Swaps the picture without moving the view, unless it's at 1:1, which is per pixel.
+    fn land_rescaled(&mut self, from: &Arc<Image>, shown: Arc<Image>) {
+        let Preview::Texture(full) = &self.preview else { return };
+        if !Arc::ptr_eq(full, from) { return }
+        self.awaiting_preview = false;
+        let at_actual_size = self.shown_size().is_some_and(|size| !self.stage.view.tile && (self.stage.view.zoom - actual_size_zoom(self.stage_size, size, self.scale)).abs() < 1e-3);
+        let size = (shown.width, shown.height);
+        self.stage.scene = Scene::Texture(shown);
+        self.stage.revision += 1;
+        if at_actual_size { self.stage.view.zoom = actual_size_zoom(self.stage_size, size, self.scale); }
+    }
+
     fn land_preview(&mut self, loaded: Loaded) {
         self.awaiting_preview = false;
         let keep = self.stage.view;
         self.stage.view = View { tile: keep.tile, seams: keep.seams, smooth: keep.smooth, zoom: if keep.tile { 0.34 } else { 1.0 }, ..View::default() };
         self.playhead.set([0.0, 0.0]);
         self.preview = match loaded {
-            Loaded::Texture(img) => {
-                self.stage.scene = Scene::Texture(img.clone());
+            Loaded::Texture { full, shown } => {
+                self.stage.scene = Scene::Texture(shown);
                 self.stage.revision += 1;
-                Preview::Texture(img)
+                Preview::Texture(full)
             }
             Loaded::Model(m) => {
                 self.stage.scene = Scene::Model(m.clone());
@@ -1098,9 +1162,20 @@ fn drag_picture((w, h, rgba): (u32, u32, Vec<u8>)) -> (u32, u32, Vec<u8>) {
     (fw, fh, fitted.into_raw())
 }
 
-fn load_preview(path: &Path, library: &Path, kind: Kind, wave_color: [u8; 3]) -> Loaded {
+/// `full` with its longest side at `max`, or itself if that wouldn't make it smaller.
+fn at_size(full: &Arc<Image>, max: Option<u32>, nearest: bool) -> Arc<Image> {
+    let Some(max) = max.filter(|m| *m < full.width.max(full.height)) else { return full.clone() };
+    let Some(pixels) = image::RgbaImage::from_raw(full.width, full.height, full.rgba.clone()) else { return full.clone() };
+    let out = export::scale(&image::DynamicImage::ImageRgba8(pixels), max, nearest).into_rgba8();
+    Arc::new(Image { width: out.width(), height: out.height(), rgba: out.into_raw() })
+}
+
+fn load_preview(path: &Path, library: &Path, kind: Kind, wave_color: [u8; 3], size: Option<u32>, nearest: bool) -> Loaded {
     let run = || match kind {
-        Kind::Texture => load_texture(path).map(Loaded::Texture),
+        Kind::Texture => load_texture(path).map(|full| {
+            let shown = at_size(&full, size, nearest);
+            Loaded::Texture { full, shown }
+        }),
         Kind::Model => model::load(path, library).map(|m| Loaded::Model(Arc::new(m))),
         Kind::Audio => wave::peaks(path, WAVE_W as usize).map(|p| Loaded::Audio {
             rgba: wave::draw(&p.values, WAVE_W, WAVE_H, wave_color),

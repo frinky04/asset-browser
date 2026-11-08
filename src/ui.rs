@@ -33,7 +33,6 @@ pub struct Tokens {
     pub(crate) press: Color,
     well_hover: Color,
     well_edge: Color,
-    edge_strong: Color,
     scroll_thumb: Color,
     scroll_thumb_hover: Color,
 }
@@ -58,7 +57,6 @@ static DARK: LazyLock<Tokens> = LazyLock::new(|| Tokens {
     press: color("#FFFFFF18"),
     well_hover: color("#FFFFFF10"),
     well_edge: color("#3A3A3A"),
-    edge_strong: color("#484848"),
     scroll_thumb: color("#3C3C3C"),
     scroll_thumb_hover: color("#6A6A6A"),
 });
@@ -79,7 +77,6 @@ static LIGHT: LazyLock<Tokens> = LazyLock::new(|| Tokens {
     press: color("#00000016"),
     well_hover: color("#00000010"),
     well_edge: color("#C4C4C8"),
-    edge_strong: color("#B4B4B9"),
     scroll_thumb: color("#C8C8CC"),
     scroll_thumb_hover: color("#9A9AA0"),
 });
@@ -227,6 +224,11 @@ pub(crate) fn plain<V>(name: impl Into<String>, value: V) -> Segment<V> {
 
 /// A row of mutually exclusive choices inside a hairline. The current one is raised.
 pub(crate) fn segments<V: Copy + PartialEq + 'static>(key: &str, items: Vec<Segment<V>>, current: V, on: impl Fn(&mut App, V, &mut Tx) + Clone + 'static) -> El {
+    segments_inset(key, items, current, on, 10.0)
+}
+
+/// [`segments`] with `inset` beside each label, for many choices in a narrow place.
+fn segments_inset<V: Copy + PartialEq + 'static>(key: &str, items: Vec<Segment<V>>, current: V, on: impl Fn(&mut App, V, &mut Tx) + Clone + 'static, inset: f32) -> El {
     let mut bar = row().key(key.to_owned()).role("radiogroup").h(CONTROL_H).radius(GROUP_RADIUS).border(1.0, T.line).padding(GROUP_PAD).equal_columns(items.len());
     // The indicator shares the chosen segment's cell, so it slides when the choice moves.
     if let Some(at) = items.iter().position(|i| i.value == current) {
@@ -236,7 +238,7 @@ pub(crate) fn segments<V: Copy + PartialEq + 'static>(key: &str, items: Vec<Segm
         let selected = value == current;
         let on = on.clone();
         let whole = count.as_ref().map_or_else(|| name.clone(), |c| format!("{name} {c}"));
-        let mut item = row().role("radio").checked(selected).label(whole.clone()).focusable(true).key(whole).grid_cell(at).px(10.0).h(SEGMENT_H).gap(6.0).radius(SEGMENT_RADIUS).center()
+        let mut item = row().role("radio").checked(selected).label(whole.clone()).focusable(true).key(whole).grid_cell(at).px(inset).h(SEGMENT_H).gap(6.0).radius(SEGMENT_RADIUS).center()
             .hover(if selected { Color::TRANSPARENT } else { T.hover })
             .press(T.press)
             .press_scale(0.96)
@@ -589,11 +591,11 @@ fn grid_row(s: &App, r: usize) -> El {
 impl App {
     /// Which of Fit (0) or 1:1 (1) the texture preview is at, or neither (2).
     fn zoom_mode(&self) -> u8 {
-        let Preview::Texture(image) = &self.preview else { return 2 };
+        let Some(size) = self.shown_size() else { return 2 };
         let view = &self.stage.view;
         if view.tile { 2 }
         else if view.zoom == 1.0 { 0 }
-        else if (view.zoom - actual_size_zoom(self.stage_size, (image.width, image.height), self.scale)).abs() < 1e-3 { 1 }
+        else if (view.zoom - actual_size_zoom(self.stage_size, size, self.scale)).abs() < 1e-3 { 1 }
         else { 2 }
     }
 
@@ -664,7 +666,7 @@ fn status_bar(s: &App) -> El {
     if s.filter.kind.is_none_or(|k| k == Kind::Texture) {
         let mut drag_at = row().gap(8.0).items_center();
         if !s.is_compact() { drag_at = drag_at.child(label("Drag textures at", SMALL, T.muted)); }
-        bar = bar.child(drag_at.child(segments("dragmax", drag_sizes, s.drag_max, |s, v, _| s.drag_max = v)));
+        bar = bar.child(drag_at.child(segments("dragmax", drag_sizes, s.drag_max, |s, v, _| s.set_drag_max(v))));
     }
     bar.child(segments("tilesize", sizes, s.tile_size, |s, v, _| s.set_tile_size(v)))
 }
@@ -724,35 +726,17 @@ fn model_stage_handlers(stage: El) -> El {
         .on_double_press(|s: &mut App| s.reset_view())
 }
 
-/// A rung of the export ladder: a square sized by the export, ready to be dragged out.
-fn rung(id: u32, name: String, max: Option<u32>, side: f32, on: bool) -> El {
-    col().key(format!("rung-{name}")).role("button").label(format!("Drag out at {name}")).items_center().justify_end().gap(6.0).h(84.0).cursor(Cursor::Grab)
-        .help(format!("Drag out at {name}"))
-        .press_scale(0.96)
-        .on_drag(move |s: &mut App, drag, tx| {
-            s.drag_gesture(id, max, drag);
-            if drag.phase == Phase::Move { tx.live_only(); }
-        })
-        .child(el().w(side).h(side).radius(6.0).center().fill(T.raised).hover(T.hover).press(T.press).motion(motion::SNAPPY).border(1.0, if on { T.accent } else { T.edge_strong })
-            .child(icon(&GRIP, 12.0).color(if on { T.text } else { T.muted })))
-        .child(label(name, SMALL, if on { T.text } else { T.muted }))
-}
-
-fn texture_ladder(s: &App, id: u32, width: u32, height: u32) -> Option<El> {
-    let longest = width.max(height);
+/// Which size the selected texture is shown and dragged at, and how it gets there.
+fn texture_sizes(s: &App, longest: u32, current: Option<u32>) -> Option<El> {
     let sizes = ladder(longest);
     if sizes.is_empty() { return None }
-    let side = |n: u32| 24.0 + 34.0 * (n as f32 / longest as f32).sqrt();
-    let mut steps = row().key("ladder").w_full().gap(8.0).items_end().justify_between()
-        .child(rung(id, format!("{width}×{height}"), None, side(longest), s.drag_max.is_none()));
-    for n in sizes { steps = steps.child(rung(id, n.to_string(), Some(n), side(n), s.drag_max == Some(n))); }
+    let items = std::iter::once(plain("Full", None)).chain(sizes.into_iter().map(|n| plain(n.to_string(), Some(n)))).collect();
     let filters = vec![plain("Smooth", false), plain("Hard pixels", true)];
     Some(col().w_full().gap(8.0)
-        .child(label("Or drag out a specific size", SMALL, T.muted))
-        .child(steps)
+        .child(segments_inset("texture-size", items, current, |s, v, _| s.set_texture_size(v), 4.0).w_full())
         .child(row().w_full().justify_between().items_center()
             .child(label("Resize filter", SMALL, T.muted))
-            .child(segments("filter", filters, s.nearest, |s, v, _| s.nearest = v))))
+            .child(segments("filter", filters, s.nearest, |s, v, _| s.set_nearest(v)))))
 }
 
 /// The panel's main action: a white bar you grab.
@@ -801,7 +785,8 @@ fn pane(s: &App, id: u32, asset: &Asset) -> Pane {
     match &s.preview {
         Preview::Texture(image) => {
             let view = s.stage.view;
-            let size = (image.width, image.height);
+            let longest = image.width.max(image.height);
+            let size = s.shown_size().unwrap_or((image.width, image.height));
             let zoom = vec![plain("Fit", 0u8), plain("1:1", 1u8)];
             let tools = row().key("tools").w_full().flex_wrap().gap(6.0).items_center()
                 .child(segments("zoom", zoom, s.zoom_mode(), move |s, mode, _| {
@@ -816,12 +801,9 @@ fn pane(s: &App, id: u32, asset: &Asset) -> Pane {
                 }))
                 .child(el().grow(1.0))
                 .child(segments("sampling", vec![plain("Pixels", false), plain("Smooth", true)], view.smooth, |s, v, _| s.stage.view.smooth = v));
-            let detail = match s.drag_max.filter(|m| *m < image.width.max(image.height)) {
-                Some(max) => format!("at {max}"),
-                None => format!("{}×{}", image.width, image.height),
-            };
-            let mut actions = vec![drag_bar(id, s.drag_max, "Drag texture out", detail)];
-            actions.extend(texture_ladder(s, id, image.width, image.height));
+            let current = s.texture_size.filter(|m| *m < longest);
+            let mut actions: Vec<El> = texture_sizes(s, longest, current).into_iter().collect();
+            actions.push(drag_bar(id, current, "Drag texture out", format!("{}×{}", size.0, size.1)));
             Pane { tools: Some(tools), stage: texture_stage_handlers(stage_el()), hint: None, corner: None, dock: None, actions }
         }
         Preview::Model(m) => {

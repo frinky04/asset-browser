@@ -76,8 +76,8 @@ pub fn sheet(s: &App) -> El {
     ]);
 
     let export = section("Dragging out", vec![
-        setting("Texture size", Some("The largest side when dragging from the grid".to_owned()), segments("default-drag", vec![plain("Full", None), plain("1024", Some(1024u32)), plain("512", Some(512)), plain("256", Some(256))], s.drag_max, |s, v, _| s.drag_max = v)),
-        setting("Resize filter", Some("Hard pixels keeps pixel art crisp".to_owned()), segments("default-filter", vec![plain("Smooth", false), plain("Hard pixels", true)], s.nearest, |s, v, _| s.nearest = v)),
+        setting("Texture size", Some("The largest side when dragging from the grid".to_owned()), segments("default-drag", vec![plain("Full", None), plain("1024", Some(1024u32)), plain("512", Some(512)), plain("256", Some(256))], s.drag_max, |s, v, _| s.set_drag_max(v))),
+        setting("Resize filter", Some("Hard pixels keeps pixel art crisp".to_owned()), segments("default-filter", vec![plain("Smooth", false), plain("Hard pixels", true)], s.nearest, |s, v, _| s.set_nearest(v))),
         switch_row("Bring model files along", "OBJ, DAE and FBX keep their materials and textures", s.companions, |s| s.companions = !s.companions),
     ]);
 

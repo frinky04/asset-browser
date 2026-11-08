@@ -105,6 +105,12 @@ pub fn resized_name(name: &str, max: u32) -> String {
     }
 }
 
+/// `img` with its longest side at `max`, as a drag hands it over. The preview shows this too.
+pub fn scale(img: &image::DynamicImage, max: u32, nearest: bool) -> image::DynamicImage {
+    let filter = if nearest { image::imageops::FilterType::Nearest } else { image::imageops::FilterType::Lanczos3 };
+    img.resize(max, max, filter)
+}
+
 fn write_resized(dir: &Path, source: &Path, asset: &Asset, max: u32, nearest: bool) -> Result<String, String> {
     use image::ImageDecoder;
     let reader = image::ImageReader::open(source).map_err(|e| e.to_string())?.with_guessed_format().map_err(|e| e.to_string())?;
@@ -117,8 +123,7 @@ fn write_resized(dir: &Path, source: &Path, asset: &Asset, max: u32, nearest: bo
         std::fs::copy(source, dir.join(&name)).map_err(|e| e.to_string())?;
         return Ok(name);
     }
-    let filter = if nearest { image::imageops::FilterType::Nearest } else { image::imageops::FilterType::Lanczos3 };
-    let out = img.resize(max, max, filter);
+    let out = scale(&img, max, nearest);
     let path = dir.join(&name);
     // A resized file keeps its format, so a material that names `.jpg` still finds one.
     match format {

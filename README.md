@@ -8,7 +8,7 @@ A fast browser for a folder of game assets on Windows, built with [Rune](https:/
 - Search names and folders, filter by pack, type and format. See [Searching](#searching).
 - Orbit, pan and zoom models. Pan, zoom and tile textures. Scrub audio.
 - Drag anything out to a folder or another program. Drags hand over a staged copy, so the library file is never touched.
-- Drag a texture at a smaller size from the size ladder, or set a size for all grid drags.
+- Pick a smaller size for a texture to preview it and drag it out at that size, or set a size for all grid drags.
 
 ```sh
 cargo run --release

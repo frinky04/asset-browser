@@ -240,17 +240,22 @@ fn browsing_previewing_and_dragging_out_end_to_end() {
     assert_eq!(rt.state.results.ids.len(), 12);
     click(&mut rt, "All packs");
 
-    // Clicking selects; the size ladder offers smaller sizes and never larger.
+    // Clicking selects; the size buttons offer smaller sizes and never larger.
     let brick = tile_key(&rt, "brick_0.png");
     click(&mut rt, &brick);
     wait_for_preview(&mut rt);
     assert!(matches!(rt.state.preview, Preview::Texture(_)));
-    assert!(rt.find("rung-512").is_some() && rt.find("rung-1024").is_none());
+    assert!(rt.find("texture-size/512").is_some() && rt.find("texture-size/1024").is_none());
+    assert_eq!(rt.state.shown_size(), Some((800, 400)));
 
-    // Dragging a rung stages a downscaled copy and leaves the source alone.
+    // A size button changes what's shown, and the drag follows it.
+    click(&mut rt, "texture-size/256");
+    wait_for_preview(&mut rt);
+    assert_eq!(rt.state.shown_size(), Some((256, 128)));
+    assert_eq!(rt.state.drag_max, None, "only this texture changed");
     let source = root.join("Bricks/brick_0.png");
     let modified = std::fs::metadata(&source).unwrap().modified().unwrap();
-    let (x, y) = rt.find("rung-256").unwrap();
+    let (x, y) = rt.find("drag-card").unwrap();
     rt.pointer_move(x, y);
     rt.pointer_down(x, y);
     rt.pointer_move(x + 30.0, y + 10.0);
@@ -265,9 +270,16 @@ fn browsing_previewing_and_dragging_out_end_to_end() {
     assert_eq!(std::fs::metadata(&source).unwrap().modified().unwrap(), modified);
     assert!(!staged[0].starts_with(&root), "the staged copy lives outside the library");
 
-    // The tile honours the toolbar's drag size.
-    click(&mut rt, "512");
+    // Full goes back, and the filter shows in the preview too.
+    click(&mut rt, "texture-size/Full");
+    wait_for_preview(&mut rt);
+    assert_eq!(rt.state.shown_size(), Some((800, 400)));
+
+    // The tile honours the toolbar's drag size, and so does the next texture opened.
+    click(&mut rt, "dragmax/512");
+    wait_for_preview(&mut rt);
     assert_eq!(rt.state.drag_max, Some(512));
+    assert_eq!(rt.state.shown_size(), Some((512, 256)));
     let (x, y) = rt.find(&tile_key(&rt, "brick_1.png")).unwrap();
     rt.pointer_move(x, y);
     rt.pointer_down(x, y);
