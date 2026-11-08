@@ -119,6 +119,50 @@ fn tail(tokens: &[String]) -> (Option<&str>, Option<&str>) {
     (words.next(), words.next())
 }
 
+/// Which texture map a file's name says it is, or `""`. Reads the end of the name, where
+/// these words go, so `brick_rough_blue` isn't a roughness map.
+pub fn map_named_by(file: &str) -> &'static str {
+    let stem = file.rsplit_once('.').map_or(file, |(s, _)| s);
+    let tokens = tokens_of(stem);
+    if tokens.len() < 2 { return "" }
+    tokens.iter().rev().map(String::as_str).find(|t| !skipped_in_map_name(t)).map_or("", map_word)
+}
+
+/// Numbers and API names trail a map's word: `Material_Normal_DirectX`, `brick_rough_2k`.
+fn skipped_in_map_name(word: &str) -> bool {
+    is_number(word) || matches!(word, "directx" | "dx" | "opengl" | "gl" | "k")
+}
+
+fn map_word(word: &str) -> &'static str {
+    match word {
+        "ao" | "occlusion" | "ambientocclusion" => "ao",
+        "normal" | "normals" | "nrm" | "norm" | "nor" | "n" => "normal",
+        "roughness" | "rough" | "rgh" | "glossiness" | "gloss" | "r" => "roughness",
+        "metallic" | "metalness" | "metal" | "m" => "metallic",
+        "height" | "displacement" | "disp" | "bump" => "height",
+        "emission" | "emissive" | "emit" | "glow" | "e" => "emissive",
+        "specular" | "spec" | "s" => "specular",
+        "opacity" | "alpha" | "mask" => "opacity",
+        "albedo" | "diffuse" | "diff" | "basecolor" | "base" | "bc" | "color" | "colour" | "col" | "d" => "color",
+        _ => "",
+    }
+}
+
+/// Whether a map's name is only a map's name beside other maps: `metal_6` is a picture of
+/// metal, `wall_metal` next to `wall_normal` is a metalness map.
+pub fn map_name_is_ambiguous(file: &str) -> bool {
+    let stem = file.rsplit_once('.').map_or(file, |(s, _)| s);
+    tokens_of(stem).iter().rev().find(|t| !skipped_in_map_name(t)).is_some_and(|t| WEAK_DATA_WORDS.contains(&t.as_str()))
+}
+
+/// What a set of maps is of: `T_Brick_N` and `T_Brick_D` are both `t brick`.
+pub fn map_surface(file: &str) -> String {
+    let stem = file.rsplit_once('.').map_or(file, |(s, _)| s);
+    let mut tokens = tokens_of(stem);
+    while tokens.last().is_some_and(|t| skipped_in_map_name(t) || !map_word(t).is_empty()) { tokens.pop(); }
+    tokens.join(" ")
+}
+
 fn role_of(tokens: &[String]) -> Role {
     let (last, before) = tail(tokens);
     let Some(last) = last else { return Role::Unknown };

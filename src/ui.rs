@@ -111,6 +111,7 @@ pub const TITLEBAR_H: f32 = 46.0;
 pub const SIDEBAR_W: f32 = 244.0;
 /// The outer height a segmented control comes to, shared with the controls beside them.
 const CONTROL_H: f32 = 30.0;
+const SEARCH_W: f32 = 320.0;
 /// The inset of a group's contents, the same on every side. Rune draws borders inside the box.
 const GROUP_PAD: f32 = 3.0;
 /// What's left for a segment inside a group.
@@ -276,6 +277,21 @@ fn kind_tabs(s: &App) -> El {
     segments("kinds", items, s.filter.kind, |s, v, tx| s.set_kind(v, tx))
 }
 
+/// Keys in the search box: Escape leaves it, and the rest work the list under it.
+fn search_key(s: &mut App, event: &rune::KeyEvent, tx: &mut Tx) -> bool {
+    use rune::Key;
+    let count = s.suggestions().len();
+    match event.key {
+        Key::Escape => tx.blur(),
+        Key::Down if count > 0 => s.step_suggestion(1, count),
+        Key::Up if count > 0 => s.step_suggestion(-1, count),
+        Key::Tab if count > 0 => s.accept_suggestion(s.suggestion_at.unwrap_or(0), tx),
+        Key::Enter if s.suggestion_at.is_some() => s.accept_suggestion(s.suggestion_at.unwrap_or(0), tx),
+        _ => return false,
+    }
+    true
+}
+
 fn search_box(s: &App) -> El {
     let field = TextInput::new(&s.search)
         .placeholder("Search assets")
@@ -283,9 +299,10 @@ fn search_box(s: &App) -> El {
         .plain()
         .width(None)
         .on_edit(|s: &mut App| &mut s.search)
-        .on_change(|s: &mut App, tx| s.refilter(tx));
+        .on_change(|s: &mut App, tx| s.refilter(tx))
+        .on_key(search_key);
     let empty = s.search.text.is_empty();
-    let bar = row().key("searchbar").w(320.0).h(CONTROL_H).pl(11.0).pr(GROUP_PAD).gap(4.0).radius(GROUP_RADIUS).items_center().border(1.0, T.line).cursor(Cursor::Text)
+    let bar = row().key("searchbar").w(SEARCH_W).h(CONTROL_H).pl(11.0).pr(GROUP_PAD).gap(4.0).radius(GROUP_RADIUS).items_center().border(1.0, T.line).cursor(Cursor::Text)
         .child(icon(&SEARCH, 15.0).color(T.muted))
         .child(el().grow(1.0).min_w(0.0).child(field.build(kit()).key("search")));
     // The end of the bar holds the shortcut hint, or the way back to it, in the same slot.
@@ -299,6 +316,35 @@ fn search_box(s: &App) -> El {
     }
 }
 
+/// The list under the search box: what the query's last piece could become, or with an empty
+/// box, what can be asked for at all.
+fn search_suggestions(s: &App) -> Option<El> {
+    let rows = s.suggestions();
+    if rows.is_empty() { return None }
+    let cheat_sheet = s.search.text.trim().is_empty();
+    let mut list = col().key("search-suggestions").w(SEARCH_W).padding(4.0).gap(1.0).radius(WELL_RADIUS + 3.0).fill(T.raised).border(1.0, T.line)
+        .shadow(10.0, 28.0, rune::Color::BLACK.alpha(0.35))
+        .preserve_focus_on_press(true)
+        .anchored("searchbar", rune::Side::Bottom, rune::Align::Start, 6.0);
+    for (i, row_data) in rows.iter().enumerate() {
+        let picked = s.suggestion_at == Some(i);
+        let shown = row_data.insert.trim_end().trim_matches('-').to_owned();
+        let line = row().key(format!("suggest-{i}")).role("button").label(shown.clone()).w_full().h(28.0).px(8.0).gap(12.0).radius(SEGMENT_RADIUS).items_center().cursor(Cursor::Pointer)
+            .fill(if picked { T.press } else { rune::Color::TRANSPARENT })
+            .hover(T.hover)
+            .on_press_tx(move |s: &mut App, tx| s.accept_suggestion(i, tx))
+            .child(el().shrink().min_w(0.0).child(text(shown).font(BODY).color(T.text).truncate()))
+            .child(el().grow(1.0).min_w(0.0))
+            .child(el().shrink().min_w(0.0).child(label(row_data.hint, SMALL, T.muted).truncate()));
+        list = list.child(line);
+    }
+    if cheat_sheet {
+        list = list.child(hairline().mt(3.0).mb(3.0))
+            .child(el().px(8.0).pb(4.0).pt(2.0).child(label("\"exact words\"   -leave out   this|that", SMALL, T.muted)));
+    }
+    Some(list)
+}
+
 /// The window's own title bar: a band that drags the window, holding the app's main controls.
 /// Rune draws the caption buttons over its trailing edge and keeps Windows' snap behaviour.
 fn titlebar(s: &App, cx: &mut Cx<App>) -> El {
@@ -307,7 +353,9 @@ fn titlebar(s: &App, cx: &mut Cx<App>) -> El {
     let mut title = row().grow(1.0).min_w(0.0).gap(10.0).items_end()
         .child(el().min_w(0.0).child(text(scope.to_owned()).key("scope").font(TITLE).color(T.text).truncate()));
     if !s.is_compact() {
-        title = title.child(label(format!("{} assets", commas(s.results.ids.len())), SMALL, T.muted).mb(2.0));
+        let count = commas(s.results.ids.len());
+        let summary = s.results.corrected.as_ref().map_or_else(|| format!("{count} assets"), |word| format!("{count} assets for \u{201c}{word}\u{201d}"));
+        title = title.child(label(summary, SMALL, T.muted).mb(2.0));
     }
     let toggle_panel = el().key("sidebar-toggle").role("button").focusable(true).label("Toggle library panel").help("Toggle library panel (Ctrl+B)").size(30.0, 30.0).radius(CONTROL_RADIUS).center()
         .hover(T.hover).press(T.press).press_scale(0.94).cursor(Cursor::Pointer)
@@ -579,7 +627,13 @@ fn grid(s: &App) -> El {
         if (r[2] - s.grid_width).abs() > 0.5 { s.set_grid_width(r[2]); }
     });
     if empty && !s.lib.assets.is_empty() {
-        pane = pane.center().child(label("Nothing matches. Remove a word or clear the filters.", BODY, T.muted));
+        let (made, total) = s.thumbs.progress();
+        let message = if s.results.uses_facts && made < total {
+            "Nothing matches yet. Sizes and lengths are still being read."
+        } else {
+            "Nothing matches. Remove a word or clear the filters."
+        };
+        pane = pane.center().child(label(message, BODY, T.muted));
     } else if empty {
         pane = pane.center().child(label("This folder has no textures, models or audio. Choose another with Change library folder.", BODY, T.muted));
     } else {
@@ -920,6 +974,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         .on_layout(|s: &mut App, r: [f32; 4]| { s.window_width = r[2]; s.window_height = r[3]; })
         .child(titlebar(s, cx))
         .child(panels)
+        .children(search_suggestions(s))
         .children(s.settings_open.then(|| settings::sheet(s)))
 }
 
@@ -935,10 +990,7 @@ pub fn on_key(s: &mut App, event: &rune::KeyEvent, tx: &mut Tx) -> bool {
         s.toggle_sidebar(tx);
         return true;
     }
-    if tx.focused().is_some_and(|f| f.contains("search")) {
-        if matches!(event.key, Key::Escape) { tx.blur(); return true; }
-        return false;
-    }
+    if tx.focused().is_some_and(|f| f.contains("search")) { return false }
     let cols = s.columns.max(1) as isize;
     match &event.key {
         Key::Left => s.step_selection(-1, tx),

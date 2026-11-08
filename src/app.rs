@@ -14,6 +14,7 @@ use crate::audio::Audio;
 use crate::export::{self, Options};
 use crate::library::{self, Filter, Kind, Library, Results, Sort};
 use crate::model::{self, Image, Model};
+use crate::query::Suggestion;
 use crate::native_drag::{self, Ended};
 use crate::stage::{Look, Scene, StageState, View};
 use crate::thumbs::{Thumbs, WAVE_COLOR};
@@ -38,6 +39,8 @@ const SIDEBAR_PREF: &str = "sidebar_open";
 const SIDEBAR_SPRING: Spring = Spring::new(0.3, 0.0);
 /// How long a button shows that its action happened.
 const CONFIRM_FOR: Duration = Duration::from_millis(1400);
+/// How often a search on measured facts picks up what thumbnailing has found.
+const MEASURE_EVERY: Duration = Duration::from_millis(800);
 
 pub enum Preview {
     None,
@@ -257,6 +260,10 @@ pub struct App {
     pub resolved_dark: Cell<bool>,
     applied_dark: Option<bool>,
     pub settings_open: bool,
+    /// The row picked with the arrow keys in the list under the search box.
+    pub suggestion_at: Option<usize>,
+    measured: usize,
+    measured_at: Instant,
     pub volume: f32,
     /// Holds off saving until a slider is let go.
     pub volume_dragging: bool,
@@ -359,6 +366,9 @@ pub fn init_with(prefs: Prefs) -> App {
         resolved_dark: Cell::new(theme != Theme::Light),
         applied_dark: None,
         settings_open: false,
+        suggestion_at: None,
+        measured: 0,
+        measured_at: Instant::now(),
         volume: saved.volume,
         volume_dragging: false,
         storage: None,
@@ -450,6 +460,13 @@ impl App {
             "audio" => self.set_kind(Some(Kind::Audio), tx),
             "search" => {
                 self.search = TextEdit::new("rust metal");
+                self.refilter(tx);
+            }
+            "search-help" => self.search.focused = true,
+            "search-values" => {
+                self.search = TextEdit::new("brick is:");
+                self.search.focused = true;
+                self.search.set_caret(self.search.text.len());
                 self.refilter(tx);
             }
             "small" => self.tile_size = 120.0,
@@ -551,6 +568,13 @@ impl App {
 
     fn update_status(&mut self, tx: &mut Tx) {
         let (made, total) = self.thumbs.progress();
+        // A search on what's measured gains matches as thumbnailing measures more.
+        let due = made == total || self.measured_at.elapsed() >= MEASURE_EVERY;
+        if self.results.uses_facts && made != self.measured && due {
+            self.measured = made;
+            self.measured_at = Instant::now();
+            self.refilter_keeping_scroll();
+        }
         let text = if total == 0 {
             if self.scanning { "Reading library".to_owned() } else { "No supported files in this folder".to_owned() }
         } else if made < total {
@@ -649,6 +673,29 @@ impl App {
         self.start_loading(root);
     }
 
+    /// What the list under the search box offers right now.
+    pub fn suggestions(&self) -> Vec<Suggestion> {
+        if !self.search.focused || self.search.focus != self.search.text.len() { return Vec::new() }
+        crate::query::suggestions(&self.search.text, &self.lib)
+    }
+
+    /// Puts a row of that list into the search box.
+    pub fn accept_suggestion(&mut self, index: usize, tx: &mut Tx) {
+        let Some(row) = self.suggestions().into_iter().nth(index) else { return };
+        let text = crate::query::apply(&self.search.text, &row);
+        let end = text.len();
+        self.search.replace_text(text);
+        self.search.set_caret(end);
+        self.search.focused = true;
+        self.refilter(tx);
+    }
+
+    /// Moves the picked row, or takes it off the list past either end.
+    pub fn step_suggestion(&mut self, by: isize, count: usize) {
+        let next = self.suggestion_at.map_or(if by > 0 { 0 } else { count as isize - 1 }, |at| at as isize + by);
+        self.suggestion_at = (next >= 0 && (next as usize) < count).then_some(next as usize);
+    }
+
     /// Empties the search and leaves the field ready for typing.
     pub fn clear_search(&mut self, tx: &mut Tx) {
         self.search = TextEdit::new("");
@@ -720,12 +767,14 @@ impl App {
 
     fn refilter_keeping_scroll(&mut self) {
         self.filter.text = self.search.text.clone();
-        self.results = library::search(&self.lib, &self.filter);
+        let thumbs = &self.thumbs;
+        self.results = library::search_with(&self.lib, &self.filter, &|key| thumbs.facts(key));
         self.generation += 1;
         self.request_range(0..FIRST_SCREEN_ROWS);
     }
 
     pub fn refilter(&mut self, tx: &mut Tx) {
+        self.suggestion_at = None;
         self.refilter_keeping_scroll();
         self.grid_glide.forget();
         tx.scroll_to_instant("grid", 0.0, 0.0);

@@ -393,3 +393,52 @@ fn browsing_previewing_and_dragging_out_end_to_end() {
     drop(rt);
     let _ = std::fs::remove_dir_all(root.parent().unwrap());
 }
+
+#[test]
+fn the_list_under_the_search_box_completes_a_query() {
+    let files = ["Bricks/brick.png", "Bricks/brick_normal.png", "Props/crate.glb", "Sfx/hit.wav"]
+        .map(|rel| library::Entry { rel: rel.into(), size: 1, mtime: 1 }).into_iter().collect();
+    let mut state = app::init_with(rune::prefs::Prefs::memory());
+    state.lib = Arc::new(library::Library::build(PathBuf::from("Z:/none"), files));
+    state.results = library::search(&state.lib, &state.filter);
+    state.scanning = false;
+    let mut rt = Runtime::new(state, ui::view, (1520.0, 900.0), Env::new(true, 1.0));
+    settle(&mut rt);
+    let tab = |rt: &mut Runtime<App>, key: Key| { rt.key(KeyEvent { key, mods: Default::default() }); settle(rt); };
+    assert!(rt.find("search-suggestions").is_none(), "only while the box is in use");
+
+    // Focused and empty, it lists what can be asked for. Clicking a row keeps the box in use.
+    click(&mut rt, "search");
+    assert!(rt.find("search-suggestions").is_some());
+    click(&mut rt, "suggest-0");
+    assert_eq!(rt.state.search.text, "is:");
+    assert!(rt.state.search.focused, "typing carries on from the click");
+
+    // Arrows pick a value, Tab takes it, and the search runs.
+    tab(&mut rt, Key::Down);
+    tab(&mut rt, Key::Down);
+    assert_eq!(rt.state.suggestion_at, Some(1));
+    tab(&mut rt, Key::Tab);
+    assert_eq!(rt.state.search.text, "is:texture ");
+    assert_eq!(rt.state.results.ids.len(), 2);
+    assert_eq!(rt.state.search.focus, rt.state.search.text.len(), "the caret follows");
+    assert!(rt.find("search-suggestions").is_none(), "a finished piece has nothing to add");
+
+    // Fields and words combine with the sidebar's facets.
+    rt.update(|s, tx| { s.search = rune::TextEdit::new("is:normal"); s.refilter(tx); });
+    settle(&mut rt);
+    assert_eq!(rt.state.results.ids.len(), 1);
+
+    // A typo says what it searched for instead.
+    rt.update(|s, tx| { s.search = rune::TextEdit::new("cratte"); s.refilter(tx); });
+    settle(&mut rt);
+    assert_eq!(rt.state.results.corrected.as_deref(), Some("crate"));
+    assert!(rt.elements().iter().any(|e| e.text.as_deref().is_some_and(|t| t.contains("for \u{201c}crate\u{201d}"))));
+
+    // Escape leaves the box and the list goes with it.
+    rt.update(|s, _| { s.search = rune::TextEdit::new(""); s.search.focused = true; });
+    settle(&mut rt);
+    assert!(rt.find("search-suggestions").is_some());
+    tab(&mut rt, Key::Escape);
+    assert!(rt.find("search-suggestions").is_none());
+}

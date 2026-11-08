@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use crate::query::Query;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
     Texture,
@@ -60,6 +62,10 @@ pub struct Asset {
     pub key: u64,
     /// Lowercase `rel`, what searches read.
     pub hay: String,
+    /// `rel` split into lowercase words: `Props/woodDoor_2.obj` is `props/wood door 2 obj`.
+    pub words: String,
+    /// The texture map its name says it is (`normal`, `roughness`, `color`...), or `""`.
+    pub map: &'static str,
     /// A model that a better format of the same model in this pack stands in for.
     pub shadowed: bool,
 }
@@ -85,12 +91,46 @@ pub struct Pack {
 }
 
 pub const LOOSE_PACK: &str = "Loose files";
+pub const LOOSE_PACK_LOWER: &str = "loose files";
 
 #[derive(Default)]
 pub struct Library {
     pub root: PathBuf,
     pub assets: Vec<Asset>,
     pub packs: Vec<Pack>,
+    vocabulary: std::sync::OnceLock<Vec<(String, u32)>>,
+}
+
+/// `text` as lowercase words: punctuation, camelCase and letter/digit boundaries become single
+/// spaces. Slashes stay, so a phrase can't match across folders.
+pub fn words_of(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut previous = ' ';
+    for c in text.chars() {
+        if c == '/' {
+            if out.ends_with(' ') { out.pop(); }
+            out.push('/');
+            previous = '/';
+        } else if c.is_alphanumeric() {
+            let boundary = (previous.is_lowercase() && c.is_uppercase()) || (previous.is_alphabetic() && c.is_numeric()) || (previous.is_numeric() && c.is_alphabetic());
+            if boundary && !out.ends_with(' ') { out.push(' '); }
+            out.extend(c.to_lowercase());
+            previous = c;
+        } else if !out.is_empty() && !out.ends_with([' ', '/']) {
+            out.push(' ');
+            previous = ' ';
+        }
+    }
+    if out.ends_with(' ') { out.pop(); }
+    out
+}
+
+pub fn known_ext(ext: &str) -> Option<&'static str> {
+    FORMATS.iter().find(|(name, _)| ext.eq_ignore_ascii_case(name)).map(|(name, _)| *name)
+}
+
+pub fn known_exts() -> impl Iterator<Item = &'static str> {
+    FORMATS.iter().map(|(name, _)| *name)
 }
 
 /// One file the walk found.
@@ -156,15 +196,49 @@ impl Library {
             // Bumped when model thumbnails change meaning, so cached ones are redrawn.
             let key = if kind == Kind::Model { fnv(key, b"model-thumbs-2") } else { key };
             let hay = f.rel.to_lowercase();
-            assets.push(Asset { rel: f.rel, name_at, pack, ext, kind, size: f.size, mtime: f.mtime, key, hay, shadowed: false });
+            let words = words_of(&f.rel);
+            let map = if kind == Kind::Texture { crate::texture_guess::map_named_by(&f.rel[name_at as usize..]) } else { "" };
+            assets.push(Asset { rel: f.rel, name_at, pack, ext, kind, size: f.size, mtime: f.mtime, key, hay, words, map, shadowed: false });
         }
         mark_shadowed(&mut assets);
-        Library { root, assets, packs }
+        confirm_ambiguous_maps(&mut assets);
+        Library { root, assets, packs, vocabulary: std::sync::OnceLock::new() }
+    }
+
+    /// Every word in the library with how often it's used, for correcting typos. Only built
+    /// once a search comes up empty.
+    fn vocabulary(&self) -> &[(String, u32)] {
+        self.vocabulary.get_or_init(|| {
+            let mut counts: HashMap<&str, u32> = HashMap::new();
+            for a in &self.assets {
+                for word in a.words.split([' ', '/']).filter(|w| w.len() >= 3 && w.chars().all(char::is_alphabetic)) {
+                    *counts.entry(word).or_default() += 1;
+                }
+            }
+            counts.into_iter().map(|(w, n)| (w.to_owned(), n)).collect()
+        })
     }
 
     pub fn path(&self, asset: &Asset) -> PathBuf {
         self.root.join(&asset.rel)
     }
+}
+
+/// `metal_6.png` is a picture of metal unless another map of the same surface sits beside it.
+fn confirm_ambiguous_maps(assets: &mut [Asset]) {
+    use crate::texture_guess::{map_name_is_ambiguous, map_surface};
+    let ambiguous: Vec<usize> = assets.iter().enumerate().filter(|(_, a)| !a.map.is_empty() && map_name_is_ambiguous(a.name())).map(|(i, _)| i).collect();
+    let folders: std::collections::HashSet<&str> = ambiguous.iter().map(|i| assets[*i].folder()).collect();
+    // Two variants of one picture aren't a set: it takes maps of different kinds.
+    let mut kinds: HashMap<(&str, String), std::collections::HashSet<&'static str>> = HashMap::new();
+    for a in assets.iter().filter(|a| !a.map.is_empty() && folders.contains(a.folder())) {
+        kinds.entry((a.folder(), map_surface(a.name()))).or_default().insert(a.map);
+    }
+    let lonely: Vec<usize> = ambiguous.into_iter().filter(|i| {
+        let surface = map_surface(assets[*i].name());
+        surface.is_empty() || kinds.get(&(assets[*i].folder(), surface)).is_none_or(|k| k.len() < 2)
+    }).collect();
+    for i in lonely { assets[i].map = ""; }
 }
 
 /// Packs ship the same model as GLB, OBJ, DAE and FBX: keep the most self-contained one in view.
@@ -262,23 +336,41 @@ pub struct Results {
     pub by_pack: Vec<u32>,
     pub any_pack: u32,
     pub by_ext: Vec<(&'static str, u32)>,
+    /// The words searched for instead, when what was typed found nothing.
+    pub corrected: Option<String>,
+    /// The answer can grow as thumbnailing measures more files.
+    pub uses_facts: bool,
 }
 
+/// [`search_with`], knowing nothing that thumbnailing measures.
+#[cfg(test)]
 pub fn search(lib: &Library, f: &Filter) -> Results {
-    let lowered = f.text.to_lowercase();
-    let (mut want, mut reject) = (Vec::new(), Vec::new());
-    for token in lowered.split_whitespace() {
-        match token.strip_prefix('-') {
-            Some(t) if !t.is_empty() => reject.push(t),
-            Some(_) => {}
-            None => want.push(token),
+    search_with(lib, f, &|_| None)
+}
+
+/// The assets `f` asks for. `facts` says what's been measured about a file, by its key.
+pub fn search_with(lib: &Library, f: &Filter, facts: &dyn Fn(u64) -> Option<crate::thumbs::Facts>) -> Results {
+    let now = std::time::SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let query = Query::parse(&f.text, now);
+    let found = run(lib, f, &query, facts);
+    if found.ids.is_empty() && let Some((fixed, words)) = query.corrected(lib.vocabulary()) {
+        let mut second = run(lib, f, &fixed, facts);
+        if !second.ids.is_empty() {
+            second.corrected = Some(words);
+            return second;
         }
     }
-    let mut out = Results { by_pack: vec![0; lib.packs.len()], ..Results::default() };
+    found
+}
+
+fn run(lib: &Library, f: &Filter, query: &Query, facts: &dyn Fn(u64) -> Option<crate::thumbs::Facts>) -> Results {
+    let mut out = Results { by_pack: vec![0; lib.packs.len()], uses_facts: query.needs_facts(), ..Results::default() };
     let mut ext_counts = [0u32; FORMATS.len()];
+    let rank = f.sort == Sort::Pack && query.has_words();
+    let mut fits: Vec<u32> = Vec::new();
     for (i, a) in lib.assets.iter().enumerate() {
-        if a.shadowed && !f.all_formats && f.ext != Some(a.ext) { continue }
-        if !want.iter().all(|t| a.hay.contains(t)) || reject.iter().any(|t| a.hay.contains(t)) { continue }
+        if a.shadowed && !f.all_formats && f.ext != Some(a.ext) && !query.asks_for_ext(a.ext) { continue }
+        let Some(fit) = query.fit(a, facts) else { continue };
         let kind_ok = f.kind.is_none_or(|k| k == a.kind);
         let pack_ok = f.pack.is_none_or(|p| p == a.pack);
         let ext_ok = f.ext.is_none_or(|e| e == a.ext);
@@ -292,8 +384,17 @@ pub fn search(lib: &Library, f: &Filter) -> Results {
         }
         if kind_ok && pack_ok {
             if let Some(slot) = FORMATS.iter().position(|(e, _)| *e == a.ext) { ext_counts[slot] += 1; }
-            if ext_ok { out.ids.push(i as u32); }
+            if ext_ok {
+                out.ids.push(i as u32);
+                if rank { fits.push(fit); }
+            }
         }
+    }
+    if rank {
+        // Best fits first; among equals the library's own order stands.
+        let mut ranked: Vec<(u32, u32)> = fits.into_iter().zip(out.ids.iter().copied()).collect();
+        ranked.sort_by_key(|(fit, _)| *fit);
+        out.ids = ranked.into_iter().map(|(_, id)| id).collect();
     }
     out.by_ext = FORMATS.iter().zip(ext_counts).filter(|(_, n)| *n > 0).map(|((e, _), n)| (*e, n)).collect();
     out.by_ext.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
