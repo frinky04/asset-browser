@@ -72,6 +72,30 @@ impl Theme {
     }
 }
 
+/// How much the interface animates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Motion {
+    Off,
+    Slow,
+    Normal,
+    Fast,
+}
+
+impl Motion {
+    fn code(self) -> u8 {
+        match self { Motion::Off => 0, Motion::Slow => 1, Motion::Normal => 2, Motion::Fast => 3 }
+    }
+
+    fn from_code(code: u8) -> Motion {
+        match code { 0 => Motion::Off, 1 => Motion::Slow, 3 => Motion::Fast, _ => Motion::Normal }
+    }
+
+    /// How fast animations run compared to normal; 0 when there are none.
+    pub fn speed(self) -> f32 {
+        match self { Motion::Off => 0.0, Motion::Slow => 0.55, Motion::Normal => 1.0, Motion::Fast => 1.7 }
+    }
+}
+
 const DEFAULT_TILE: f32 = 158.0;
 const DEFAULT_VOLUME: f32 = 0.7;
 const LIGHT_WAVE_COLOR: [u8; 3] = [72, 72, 80];
@@ -80,6 +104,7 @@ const LIGHT_WAVE_COLOR: [u8; 3] = [72, 72, 80];
 #[derive(Clone, Debug, PartialEq)]
 struct Saved {
     theme: u8,
+    motion: u8,
     volume: f32,
     autoplay: bool,
     smooth: bool,
@@ -94,6 +119,7 @@ impl Saved {
     fn load(prefs: &Prefs) -> Saved {
         Saved {
             theme: prefs.get("theme").unwrap_or(Theme::Dark.code()),
+            motion: prefs.get("motion").unwrap_or(Motion::Normal.code()),
             volume: prefs.get("volume").unwrap_or(DEFAULT_VOLUME),
             autoplay: prefs.get("autoplay").unwrap_or(true),
             smooth: prefs.get("smooth").unwrap_or(false),
@@ -107,6 +133,7 @@ impl Saved {
 
     fn write(&self, prefs: &mut Prefs) {
         let _ = prefs.set("theme", &self.theme);
+        let _ = prefs.set("motion", &self.motion);
         let _ = prefs.set("volume", &self.volume);
         let _ = prefs.set("autoplay", &self.autoplay);
         let _ = prefs.set("smooth", &self.smooth);
@@ -225,6 +252,7 @@ pub struct App {
     /// The largest side textures are dragged out of the grid at.
     pub drag_max: Option<u32>,
     pub theme: Theme,
+    pub motion: Motion,
     /// Whether the view last drew dark, which `Theme::System` decides at view time.
     pub resolved_dark: Cell<bool>,
     applied_dark: Option<bool>,
@@ -285,6 +313,7 @@ pub fn init_with(prefs: Prefs) -> App {
     let sidebar_open = prefs.get(SIDEBAR_PREF).unwrap_or(true);
     let saved = Saved::load(&prefs);
     let theme = Theme::from_code(saved.theme);
+    let motion = Motion::from_code(saved.motion);
     let audio = Audio::new();
     audio.set_volume(saved.volume);
     App {
@@ -300,7 +329,7 @@ pub fn init_with(prefs: Prefs) -> App {
         preview: Preview::None,
         awaiting_preview: false,
         loading: Latest::default(),
-        stage: StageState { view: View { smooth: saved.smooth, ..View::default() }, ..StageState::default() },
+        stage: StageState { view: View { smooth: saved.smooth, ..View::default() }, ease: motion.speed(), ..StageState::default() },
         stage_size: [320.0, 320.0],
         scale: 1.0,
         drag_last: [0.0; 2],
@@ -326,6 +355,7 @@ pub fn init_with(prefs: Prefs) -> App {
         nearest: saved.nearest,
         companions: saved.companions,
         theme,
+        motion,
         resolved_dark: Cell::new(theme != Theme::Light),
         applied_dark: None,
         settings_open: false,
@@ -569,6 +599,11 @@ impl App {
         tx.color_motion(rune::tok::motion::CALM);
     }
 
+    pub fn set_motion(&mut self, motion: Motion) {
+        self.motion = motion;
+        self.stage.ease = motion.speed();
+    }
+
     pub fn set_volume(&mut self, volume: f32) {
         self.volume = volume.clamp(0.0, 1.0);
         self.audio.set_volume(self.volume);
@@ -578,6 +613,7 @@ impl App {
         if self.volume_dragging || headless() { return }
         let now = Saved {
             theme: self.theme.code(),
+            motion: self.motion.code(),
             volume: self.volume,
             autoplay: self.autoplay,
             smooth: self.stage.view.smooth,

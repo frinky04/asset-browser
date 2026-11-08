@@ -83,6 +83,8 @@ pub struct StageState {
     /// Bumped when the camera should jump rather than ease.
     pub snap: u64,
     pub look: Look,
+    /// How quickly the camera eases, relative to normal. 0 moves it at once.
+    pub ease: f32,
 }
 
 /// Colours the stage paints itself, sRGB-encoded, to match the UI's theme.
@@ -100,7 +102,7 @@ impl Look {
 
 impl Default for StageState {
     fn default() -> Self {
-        StageState { scene: Scene::Empty, revision: 0, view: View::default(), snap: 0, look: Look::DARK }
+        StageState { scene: Scene::Empty, revision: 0, view: View::default(), snap: 0, look: Look::DARK, ease: 1.0 }
     }
 }
 
@@ -529,11 +531,12 @@ impl Compositor<App> for StageCompositor {
         // Ease the camera; a headless run lands at once, so a snapshot is exact.
         let look = state.look;
         let target = state.view;
-        let jump = state.snap != self.seen_snap || rune::tooling::headless_run().is_some();
+        let ease = state.ease;
+        let jump = state.snap != self.seen_snap || ease <= 0.0 || rune::tooling::headless_run().is_some();
         self.seen_snap = state.snap;
         let view = match self.current {
             Some(current) if !jump => {
-                let eased = current.eased(target, 1.0 - (-(f.dt.min(0.1) as f32) * 24.0).exp());
+                let eased = current.eased(target, 1.0 - (-(f.dt.min(0.1) as f32) * 24.0 * ease).exp());
                 if eased.close_to(&target) { target } else { eased }
             }
             _ => target,

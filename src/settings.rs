@@ -4,7 +4,7 @@ use rune::tok::motion;
 use rune::{Color, Cursor, El, Phase, ScrollSpec, Transition, col, el, icon, row, text};
 use rune_kit::ScrollBar;
 
-use crate::app::{App, Theme, bytes};
+use crate::app::{App, Motion, Theme, bytes};
 use crate::ui::{BODY, CLOSE, FOLDER, NUMBERS, PANEL_RADIUS, REFRESH, SMALL, T, TITLE, TRASH, WELL_RADIUS, checkbox, hairline, label, outlined, pick_library_folder, plain, scroll_style, segments, surface};
 
 const SHEET_W: f32 = 560.0;
@@ -59,6 +59,7 @@ fn storage_detail(amount: Option<u64>, what: &str) -> String {
 pub fn sheet(s: &App) -> El {
     let appearance = section("Appearance", vec![
         setting("Theme", None, segments("theme", vec![plain("System", Theme::System), plain("Light", Theme::Light), plain("Dark", Theme::Dark)], s.theme, |s, v, tx| s.set_theme(v, tx))),
+        setting("Animations", None, segments("animations", vec![plain("Off", Motion::Off), plain("Slow", Motion::Slow), plain("Normal", Motion::Normal), plain("Fast", Motion::Fast)], s.motion, |s, v, _| s.set_motion(v))),
     ]);
 
     let library = section("Library", vec![

@@ -10,7 +10,7 @@ use rune::tok::motion;
 use rune::{Color, Cursor, Cx, El, GrowthSpec, Icon, Phase, PointerButton, ScrollSpec, Spring, SurfaceFit, TextStyle, Transition, Tx, col, el, icon, memo, row, text};
 use rune_kit::{Kit, PaletteSeed, ScrollBar, ScrollBarStyle, TextInput};
 
-use crate::app::{App, GRID_GAP, GRID_INSET, GRID_PAD, INSPECTOR_DEFAULT, TILE_PAD, Preview, Theme, bytes, clock, commas, ladder};
+use crate::app::{App, GRID_GAP, GRID_INSET, GRID_PAD, INSPECTOR_DEFAULT, Motion, TILE_PAD, Preview, Theme, bytes, clock, commas, ladder};
 use crate::library::{Asset, Kind, Sort};
 use crate::settings;
 use crate::stage::{FOV_DEGREES, STAGE_KEY, STAGE_MARK, actual_size_zoom, zoom_about};
@@ -126,7 +126,7 @@ const PACK_GAP: f32 = 1.0;
 const PACK_LEFT: f32 = 8.0;
 const PACK_RIGHT: f32 = 12.0;
 /// How long a thumbnail takes to appear once it has arrived.
-const THUMB_FADE: Spring = Spring::new(0.16, 0.0);
+const THUMB_FADE_SECONDS: f32 = 0.16;
 /// Below this the inspector gives its details' room to the preview.
 const SHORT_WINDOW: f32 = 740.0;
 
@@ -483,7 +483,11 @@ fn tile(s: &App, id: u32, width: f32, selected: bool) -> El {
     let inner = width - TILE_PAD * 2.0;
     // A waveform is drawn to its edges, so it's the one thumbnail that needs a margin.
     let (image_w, image_h) = if asset.kind == Kind::Audio { (inner - 24.0, (s.picture_height() - 14.0).max(1.0)) } else { (inner, s.picture_height()) };
-    let image = el().w(image_w).h(image_h).radius(WELL_RADIUS).pixels_fit(&px, SurfaceFit::Fit).live_opacity(fade.smooth(THUMB_FADE));
+    let image = el().w(image_w).h(image_h).radius(WELL_RADIUS).pixels_fit(&px, SurfaceFit::Fit);
+    let image = match s.motion.speed() {
+        off if off <= 0.0 => image.live_opacity(&fade),
+        speed => image.live_opacity(fade.smooth(Spring::new(THUMB_FADE_SECONDS / speed, 0.0))),
+    };
     let mut picture = el().w(inner).h(s.picture_height()).radius(WELL_RADIUS).fill(T.well).center().child(image);
     if failed { picture = picture.child(icon(kind_icon(asset.kind), 22.0).color(T.faint)); }
     // Lifts the well under the pointer too, without the view running for every tile crossed.
@@ -521,7 +525,7 @@ fn grid_row(s: &App, r: usize) -> El {
     let selected = s.selected.and_then(|sel| ids[from..to].iter().position(|i| *i == sel));
     let drag = s.dragging.and_then(|d| ids[from..to].iter().position(|i| *i == d));
     let any_facts = ids[from..to].iter().filter(|i| s.thumbs.facts(s.lib.assets[**i as usize].key).is_some()).count();
-    let version = (s.generation, cols, width.to_bits(), selected, drag, any_facts, s.drag_max, is_dark());
+    let version = (s.generation, cols, width.to_bits(), selected, drag, any_facts, s.drag_max, is_dark(), s.motion);
     memo(format!("r{r}"), version, || {
         let mut line = row().w_full().h(s.row_height()).px(GRID_INSET).gap(GRID_GAP).items_start();
         for (i, id) in ids[from..to].iter().enumerate() {
@@ -886,6 +890,15 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     };
     set_dark(dark);
     s.resolved_dark.set(dark);
+    match s.motion {
+        // Rune still gives colours a short fade under reduced motion; run its clock flat out
+        // so "Off" really is off. Windows' own animation setting still applies to the others.
+        Motion::Off => {
+            cx.reduced_motion(true);
+            cx.time_scale(8.0);
+        }
+        speed => cx.time_scale(speed.speed()),
+    }
     let main = surface(col().key("main").grow(1.0).h_full().min_w(0.0).min_h(0.0))
         .child(filter_bar(s))
         .child(hairline())

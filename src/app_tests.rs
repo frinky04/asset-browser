@@ -95,6 +95,44 @@ fn settings_open_apply_and_survive_a_restart() {
     assert!((again.volume - rt.state.volume).abs() < 1e-3);
 }
 
+/// One app per motion setting, each with a list that overflows, measuring two animations a
+/// fixed number of frames in: the sidebar's closing width and a wheel notch's travel.
+fn motion_samples(motion: app::Motion) -> (f32, f32) {
+    isolate();
+    let files = (0..400).map(|i| library::Entry { rel: format!("Pack/a{i}.png"), size: 1, mtime: 1 }).collect();
+    let mut state = app::init_with(rune::prefs::Prefs::memory());
+    state.lib = Arc::new(library::Library::build(PathBuf::from("Z:/none"), files));
+    state.results = library::search(&state.lib, &state.filter);
+    state.scanning = false;
+    state.set_motion(motion);
+    let mut rt = Runtime::new(state, ui::view, (1520.0, 900.0), Env::new(true, 1.0));
+    for _ in 0..30 { rt.frame(1.0 / 60.0); }
+
+    let (x, y) = rt.find("grid").unwrap();
+    rt.pointer_move(x, y);
+    let start = rt.presented("rows").unwrap().0[1];
+    rt.wheel_event(rune::WheelEvent::new(0.0, -40.0).at(x, y).precise(false));
+    for _ in 0..4 { rt.frame(1.0 / 60.0); }
+    let travelled = start - rt.presented("rows").unwrap().0[1];
+    for _ in 0..80 { rt.frame(1.0 / 60.0); }
+
+    let (x, y) = rt.find("sidebar-toggle").unwrap();
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    for _ in 0..5 { rt.frame(1.0 / 60.0); }
+    (rt.presented("sidebar").unwrap().0[2], travelled)
+}
+
+#[test]
+fn the_animation_setting_changes_how_fast_things_move() {
+    let [off, slow, normal, fast] = [app::Motion::Off, app::Motion::Slow, app::Motion::Normal, app::Motion::Fast].map(motion_samples);
+    assert!(off.0 < 1.0, "off closes at once: {off:?}");
+    assert!(slow.0 > normal.0 && normal.0 > fast.0, "the sidebar follows the speed: {slow:?} {normal:?} {fast:?}");
+    assert!(slow.1 < normal.1 && normal.1 < fast.1, "so does a wheel glide: {slow:?} {normal:?} {fast:?}");
+    assert!((off.1 - 100.0).abs() < 1.0, "off scrolls at once: {off:?}");
+}
+
 fn fixture() -> (PathBuf, Vec<u8>) {
     let dir = std::env::temp_dir().join(format!("ab-app-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
