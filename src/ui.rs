@@ -126,7 +126,7 @@ const SEGMENT_RADIUS: f32 = GROUP_RADIUS - GROUP_PAD;
 const COUNT_SLOT: f32 = 36.0;
 const TILE_GAP: f32 = 7.0;
 const TILE_RADIUS: f32 = 11.0;
-const PACK_ROW: f32 = 32.0;
+const PACK_ROW: f32 = 30.0;
 const PACK_GAP: f32 = 1.0;
 const PACK_LEFT: f32 = 8.0;
 const PACK_RIGHT: f32 = 12.0;
@@ -156,13 +156,12 @@ unsafe impl Send for KitCell {}
 // SAFETY: as above.
 unsafe impl Sync for KitCell {}
 
-const NAME: TextStyle = TextStyle::new(13.0, 500.0).lh(18.0);
-const LABEL: TextStyle = TextStyle::new(12.5, 500.0).lh(16.0);
-pub(crate) const BODY: TextStyle = TextStyle::new(13.0, 500.0).lh(17.0);
-pub(crate) const SMALL: TextStyle = TextStyle::new(12.0, 400.0).lh(16.0).features("'tnum' 1");
-pub(crate) const NUMBERS: TextStyle = TextStyle::new(12.0, 500.0).lh(16.0).features("'tnum' 1");
 pub(crate) const TITLE: TextStyle = TextStyle::new(16.0, 600.0).lh(21.0);
-const FILE_TITLE: TextStyle = TextStyle::new(15.0, 600.0).lh(20.0);
+const HEADING: TextStyle = TextStyle::new(14.0, 600.0).lh(19.0);
+pub(crate) const BODY: TextStyle = TextStyle::new(13.0, 500.0).lh(18.0);
+/// Controls and values.
+pub(crate) const LABEL: TextStyle = TextStyle::new(12.0, 500.0).lh(16.0).features("'tnum' 1");
+pub(crate) const SMALL: TextStyle = TextStyle::new(12.0, 400.0).lh(16.0).features("'tnum' 1");
 
 const SEARCH: Icon = Icon { name: "ab-search", view: 16.0, body: r#"<circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.4" fill="none"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>"# };
 const IMAGE: Icon = Icon { name: "ab-image", view: 16.0, body: r#"<rect x="2" y="3" width="12" height="10" rx="2" stroke="currentColor" stroke-width="1.3" fill="none"/><circle cx="5.6" cy="6.4" r="1" fill="currentColor"/><path d="M2.6 11.4L6.2 8.2l2.3 2.1 1.9-1.6 3 2.7" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linejoin="round" stroke-linecap="round"/>"# };
@@ -480,7 +479,7 @@ fn sidebar(s: &App) -> El {
             .press_scale(0.985)
             .cursor(Cursor::Pointer)
             .on_press_tx(move |s: &mut App, tx| s.set_pack(pack, tx))
-            .child(el().grow(1.0).min_w(0.0).child(text(name).font(BODY).color(if on { T.text } else { T.muted }).truncate()))
+            .child(el().grow(1.0).min_w(0.0).child(text(name).font(if on { LABEL } else { SMALL }).color(if on { T.text } else { T.muted }).truncate()))
             .child(label(commas(count), SMALL, if on { T.muted } else { T.faint }))
     };
     list = list.child(row_for("All packs".to_owned(), s.results.any_pack as usize, s.filter.pack.is_none(), None));
@@ -563,7 +562,7 @@ fn tile(s: &App, id: u32, width: f32, selected: bool) -> El {
         .child(col().w_full().px(2.0)
             // The extension has its own column, and what tells siblings apart is usually a
             // number at the end, so a long name gives way in the middle.
-            .child(text(asset.stem().to_owned()).font(NAME).color(T.text).truncate_middle().w_full())
+            .child(text(asset.stem().to_owned()).font(BODY).color(T.text).truncate_middle().w_full())
             .child(row().w_full().justify_between()
                 .child(label(facts_line(asset, facts), SMALL, T.muted))
                 .child(label(asset.ext.to_owned(), SMALL, T.faint))))
@@ -777,7 +776,7 @@ fn facts_card(rows: Vec<(&str, String)>) -> El {
         if i > 0 { card = card.child(hairline()); }
         card = card.child(row().w_full().h(30.0).px(12.0).gap(12.0).items_center().justify_between()
             .child(label(name.to_owned(), SMALL, T.muted))
-            .child(el().min_w(0.0).child(text(value).font(NUMBERS).color(T.text).truncate())));
+            .child(el().min_w(0.0).child(text(value).font(LABEL).color(T.text).truncate())));
     }
     card
 }
@@ -852,7 +851,7 @@ fn pane(s: &App, id: u32, asset: &Asset) -> Pane {
                 .child(el().key("play").role("button").label(if playing { "Pause" } else { "Play" }).focusable(true).size(30.0, 30.0).radius(15.0).center().fill(T.accent).press_scale(0.9).cursor(Cursor::Pointer)
                     .on_press_tx(|s: &mut App, tx| s.toggle_playback(tx))
                     .child(swap(icon(&PLAY, 14.0).color(T.on_accent), icon(&PAUSE, 14.0).color(T.on_accent), playing)))
-                .child(text("0:00.0 / 0:00.0").live_text(&s.clock).font(NUMBERS).color(T.muted).grow(1.0))
+                .child(text("0:00.0 / 0:00.0").live_text(&s.clock).font(LABEL).color(T.muted).grow(1.0))
                 .child(toggle("Play on select", s.autoplay, |s, _| s.autoplay = !s.autoplay));
             let detail = format!("{}, {} Hz, {} ch", clock(*seconds), commas(*rate as usize), channels);
             Pane { tools: None, stage: col().w_full().px(16.0).pb(36.0).child(wave), hint: None, corner: None, dock: Some(dock), actions: vec![drag_bar(id, None, "Drag sound out", detail)] }
@@ -874,7 +873,7 @@ fn inspector(s: &App) -> El {
     let Some((id, asset)) = s.selected.and_then(|i| s.lib.assets.get(i as usize).map(|a| (i, a))) else {
         return shell.center()
             .child(icon(&GRID, 24.0).color(T.faint))
-            .child(text("Select an asset").font(TextStyle::new(14.0, 600.0).lh(19.0)).color(T.text).mt(12.0))
+            .child(text("Select an asset").font(HEADING).color(T.text).mt(12.0))
             .child(label("Preview textures, models and audio here.", SMALL, T.muted).mt(4.0));
     };
     let Pane { tools, stage, hint, corner, dock, actions } = pane(s, id, asset);
@@ -883,7 +882,7 @@ fn inspector(s: &App) -> El {
     let mut body = col().key(kind_key).w_full().padding(14.0).gap(12.0).min_h(0.0).grow(1.0).instant_changes()
         .transition(Transition::asymmetric(Transition::opacity(), Transition::none()));
     body = body.child(col().w_full().gap(2.0)
-        .child(text(asset.name().to_owned()).key("name").font(FILE_TITLE).color(T.text).wrap_anywhere().max_lines(2))
+        .child(text(asset.name().to_owned()).key("name").font(HEADING).color(T.text).wrap_anywhere().max_lines(2))
         .child(text(asset.folder().to_owned()).font(SMALL).color(T.muted).truncate_head().w_full()));
     if let Some(t) = tools { body = body.child(t); }
     let mut well = col().w_full().grow(1.0).min_h(120.0).justify_center().radius(WELL_RADIUS).fill(T.well).child(stage);

@@ -5,7 +5,7 @@ use rune::{Color, Cursor, El, Phase, ScrollSpec, Transition, col, el, icon, row,
 use rune_kit::ScrollBar;
 
 use crate::app::{App, Motion, Theme, bytes};
-use crate::ui::{BODY, CLOSE, FOLDER, NUMBERS, PANEL_RADIUS, REFRESH, SMALL, T, TITLE, TRASH, WELL_RADIUS, checkbox, hairline, label, outlined, pick_library_folder, plain, scroll_style, segments, surface};
+use crate::ui::{BODY, CLOSE, FOLDER, LABEL, PANEL_RADIUS, REFRESH, SMALL, T, TITLE, TRASH, WELL_RADIUS, checkbox, hairline, label, outlined, pick_library_folder, plain, scroll_style, segments, surface};
 
 const SHEET_W: f32 = 560.0;
 const HEADER_H: f32 = 56.0;
@@ -50,7 +50,7 @@ fn volume_slider(s: &App) -> El {
             })
             .child(track)
             .child(el().size(KNOB, KNOB).radius(KNOB / 2.0).fill(T.accent).absolute(v * (W - KNOB), 4.0)))
-        .child(row().w(34.0).justify_end().child(label(format!("{:.0}%", v * 100.0), NUMBERS, T.muted)))
+        .child(row().w(34.0).justify_end().child(label(format!("{:.0}%", v * 100.0), LABEL, T.muted)))
 }
 
 fn storage_detail(amount: Option<u64>, what: &str) -> String {
