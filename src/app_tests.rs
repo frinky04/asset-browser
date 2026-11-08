@@ -592,6 +592,7 @@ fn material_edits_show_on_the_stage_and_leave_as_a_glb() {
     wait_for_edit(&mut rt);
 
     // Shrinking textures reaches the stage too.
+    click(&mut rt, "model-tab/Whole model");
     click(&mut rt, "all-textures/64");
     wait_for_edit(&mut rt);
     assert_eq!(rt.state.stage.surface.as_ref().unwrap().images[0].width, 64);
@@ -716,6 +717,7 @@ fn flipping_to_the_original_and_back_keeps_a_models_edits_on_stage() {
     open_editor(&mut rt, "tri.obj");
     rt.update(|s, _| s.set_material(0, true, |m| m.roughness = Some(0.2)));
     wait_for_edit(&mut rt);
+    click(&mut rt, "model-tab/Whole model");
     click(&mut rt, "all-textures/64");
     wait_for_edit(&mut rt);
     let shown = |rt: &Runtime<App>| {
@@ -740,6 +742,7 @@ fn a_render_finishing_while_comparing_is_there_when_flipping_back() {
     let root = edit_fixture();
     let mut rt = app_on(&root);
     open_editor(&mut rt, "tri.obj");
+    click(&mut rt, "model-tab/Whole model");
     click(&mut rt, "all-textures/64");
     click(&mut rt, "compare/Original");
     wait_for_edit(&mut rt);
@@ -794,11 +797,13 @@ fn texture_filters_reach_the_stage_and_the_exported_file() {
     assert_eq!(base_filter(&rt), None, "an OBJ doesn't say");
 
     // The whole model, in one click.
+    click(&mut rt, "model-tab/Whole model");
     click(&mut rt, "model-filter/Pixels");
     wait_for_edit(&mut rt);
     assert_eq!(base_filter(&rt), Some(Pixels));
 
     // One texture can differ, from the thumbnail that shows it.
+    click(&mut rt, "model-tab/Materials");
     click(&mut rt, "material-0");
     for _ in 0..40 { rt.frame(1.0 / 60.0); }
     click(&mut rt, "map-0-Base");
@@ -814,12 +819,92 @@ fn texture_filters_reach_the_stage_and_the_exported_file() {
     assert_eq!(doc.file_filter(0), Some(Smooth));
 
     // Choosing for the whole model again takes over, and Original shows the file's.
+    click(&mut rt, "model-tab/Whole model");
     click(&mut rt, "model-filter/Smooth");
     wait_for_edit(&mut rt);
     assert!(rt.state.model_edit().textures.is_empty());
     click(&mut rt, "compare/Original");
     wait_for_edit(&mut rt);
     assert_eq!(base_filter(&rt), None);
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn level_fades_and_normalize_reach_the_exported_sound() {
+    let root = edit_fixture();
+    let before = snapshot_tree(&root);
+    let mut rt = app_on(&root);
+    open_editor(&mut rt, "tone.wav");
+    for _ in 0..40 { rt.frame(1.0 / 60.0); }
+    let panel = rect(&rt, "edit-panel");
+
+    click(&mut rt, "audio-tab/Level");
+    assert_eq!(rect(&rt, "edit-panel"), panel, "the new tab fits the same panel");
+    click(&mut rt, "Normalize");
+    wait_for_edit(&mut rt);
+    assert!((rt.state.edit.peak_db.unwrap() - crate::edit::sound::NORMALIZE_PEAK_DB).abs() < 0.05, "{:?}", rt.state.edit.peak_db);
+    click(&mut rt, "fade-out/200");
+    wait_for_edit(&mut rt);
+    assert_eq!(rt.state.audio_edit().fade_out_ms, 200);
+
+    let staged = drag_out(&mut rt, "drag-card");
+    let heard = crate::edit::sound::decode_file(&staged[0]).unwrap();
+    let frames = heard.samples.len();
+    let loudest = |slice: &[f32]| slice.iter().fold(0f32, |m, v| m.max(v.abs()));
+    assert!(loudest(&heard.samples[frames / 2..frames / 2 + 4000]) > 0.8, "normalized up");
+    assert!(loudest(&heard.samples[frames - 40..]) < 0.1, "faded out");
+
+    // A loop has no ends to fade, so those controls stand down without moving anything.
+    click(&mut rt, "audio-tab/Loop");
+    click(&mut rt, "Loop");
+    wait_for_edit(&mut rt);
+    assert_eq!(rect(&rt, "edit-panel"), panel);
+    assert_eq!(snapshot_tree(&root), before);
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_whole_model_tab_moves_the_origin_and_scales_the_export() {
+    let root = edit_fixture();
+    let before = snapshot_tree(&root);
+    let mut rt = app_on(&root);
+    open_editor(&mut rt, "tri.obj");
+    let marker = |rt: &Runtime<App>| rt.state.stage.surface.as_ref().unwrap().origin;
+    assert_eq!(marker(&rt), None, "the marker belongs to the Whole model tab");
+
+    click(&mut rt, "model-tab/Whole model");
+    assert_eq!(marker(&rt), Some([0.0; 3]), "it starts where the file puts it");
+    click(&mut rt, "model-origin/Bottom");
+    wait_for_edit(&mut rt);
+    assert_eq!(marker(&rt), Some([0.5, 0.0, 0.0]));
+    click(&mut rt, "scale-preset/\u{00f7}100");
+    wait_for_edit(&mut rt);
+    assert_eq!(rt.state.model_edit().scale, Some(0.01));
+    assert_eq!(rt.state.edit.scale_text.text, "0.01", "the field follows the preset");
+
+    // Typing wins, and half-typed text does nothing until it's a number.
+    rt.update(|s, _| {
+        s.edit.scale_text.replace_text("2.".to_owned());
+        s.scale_typed();
+        s.edit.scale_text.replace_text("oops".to_owned());
+        s.scale_typed();
+    });
+    wait_for_edit(&mut rt);
+    assert_eq!(rt.state.model_edit().scale, Some(2.0));
+
+    let staged = drag_out(&mut rt, "drag-card");
+    let exported = crate::model::load(&staged[0], &root).unwrap();
+    let lowest = exported.vertices.iter().map(|v| v.pos[1]).fold(f32::MAX, f32::min);
+    let widest = exported.vertices.iter().map(|v| v.pos[0]).fold(f32::MIN, f32::max);
+    assert_eq!((lowest, widest), (0.0, 1.0), "based at the origin, twice as wide either side of it");
+
+    // Reset clears the field as well as the edit.
+    click(&mut rt, "edit-foot/Reset");
+    wait_for_edit(&mut rt);
+    assert_eq!(rt.state.edit.scale_text.text, "1");
+    assert_eq!(snapshot_tree(&root), before);
     drop(rt);
     let _ = std::fs::remove_dir_all(&root);
 }

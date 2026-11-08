@@ -133,7 +133,7 @@ const THUMB_FADE_SECONDS: f32 = 0.16;
 /// Below this the inspector gives its details' room to the preview.
 const SHORT_WINDOW: f32 = 740.0;
 /// Below this the open Edit panel and the preview can't both fit, so the inspector scrolls.
-const EDIT_SCROLL_WINDOW: f32 = 810.0;
+const EDIT_SCROLL_WINDOW: f32 = 850.0;
 /// What an audio inspector needs besides the waveform, with the Edit panel open.
 const AUDIO_EDIT_CHROME: f32 = 644.0;
 const SCROLLING_WELL_H: f32 = 190.0;
@@ -147,7 +147,7 @@ fn kit_for(t: &Tokens) -> KitCell {
     KitCell(k)
 }
 
-fn kit() -> &'static Kit {
+pub(crate) fn kit() -> &'static Kit {
     static DARK_KIT: LazyLock<KitCell> = LazyLock::new(|| kit_for(&DARK));
     static LIGHT_KIT: LazyLock<KitCell> = LazyLock::new(|| kit_for(&LIGHT));
     if is_dark() { &DARK_KIT.0 } else { &LIGHT_KIT.0 }
@@ -1041,7 +1041,7 @@ pub fn on_key(s: &mut App, event: &rune::KeyEvent, tx: &mut Tx) -> bool {
         s.toggle_sidebar(tx);
         return true;
     }
-    if tx.focused().is_some_and(|f| f.contains("search")) { return false }
+    if tx.focused().is_some_and(|f| f.contains("search") || f.contains("scale-input")) { return false }
     let cols = s.columns.max(1) as isize;
     // A focused slider in the Edit panel uses the arrow keys itself.
     let on_edit_control = tx.focused().is_some_and(|f| f.contains("edit-panel") || f.contains("mark-"));

@@ -5,14 +5,14 @@
 
 use rune::tok::motion;
 use rune::{Color, Cursor, El, Phase, PopupItem, PopupMenu, ScrollSpec, SurfaceFit, Tx, col, el, icon, row, text};
-use rune_kit::ScrollBar;
+use rune_kit::{ScrollBar, TextInput};
 
 use crate::app::{App, bytes, ladder};
-use crate::edit::mesh::{MaterialInfo, ModelDoc, Slot, TextureFilter};
+use crate::edit::mesh::{MaterialInfo, ModelDoc, Origin, Slot, TextureFilter};
 use crate::edit::{Decoded, Effort, ImageEdit, MaterialEdit, ModelEdit};
-use crate::editor::{AudioTab, Marker};
+use crate::editor::{AudioTab, Marker, ModelTab};
 use crate::library::{Asset, Kind};
-use crate::ui::{LABEL, PLAY, REFRESH, SMALL, T, WELL_RADIUS, color, dim, label, layer, outlined, plain, scroll_style, segments, segments_inset, toggle};
+use crate::ui::{LABEL, PLAY, REFRESH, SMALL, T, WELL_RADIUS, color, dim, kit, label, layer, outlined, plain, scroll_style, segments, segments_inset, toggle};
 
 const NAME_W: f32 = 74.0;
 const VALUE_W: f32 = 42.0;
@@ -21,8 +21,8 @@ const SLIDER_H: f32 = 24.0;
 /// The drawer's distance from the preview above it.
 const SLOT_GAP: f32 = 12.0;
 const CARD_PAD: f32 = 10.0;
-/// Three rows of 30-point controls.
-const IMAGE_PANEL_H: f32 = 128.0;
+/// Four rows of 30-point controls.
+const IMAGE_PANEL_H: f32 = 166.0;
 /// The tab bar over the tallest tab, Loop.
 const AUDIO_PANEL_H: f32 = 240.0;
 const MATERIAL_ROW_GAP: f32 = 4.0;
@@ -114,10 +114,9 @@ fn loop_tab(s: &App) -> El {
         .on_drag(|s: &mut App, drag, _| s.drag_seam(drag))
         .on_wheel(|s: &mut App, wheel, _| { s.zoom_seam(wheel.dy); true })
         .child(el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).center().inert().child(el().w(1.0).h_full().fill(T.accent.alpha(0.55))));
-    let fades = vec![plain("Off", 0u32), plain("10", 10), plain("50", 50), plain("200", 200), plain("1000", 1000)];
     let tools = col().w_full().gap(8.0)
         .child(strip)
-        .child(labelled("Fade (ms)", segments_inset("crossfade", fades, edit.crossfade_ms, |s, v, _| {
+        .child(labelled("Fade (ms)", segments_inset("crossfade", fade_lengths(), edit.crossfade_ms, |s, v, _| {
             let mut edit = s.audio_edit();
             edit.crossfade_ms = v;
             s.set_audio_edit(edit);
@@ -130,6 +129,47 @@ fn loop_tab(s: &App) -> El {
             .child(label("Repeat this section", SMALL, T.muted))
             .child(toggle("Loop", edit.looped, |s, _| { let on = !s.audio_edit().looped; s.set_looped(on); })))
         .child(dim(tools, edit.looped))
+}
+
+/// Choices for a fade's length, in milliseconds.
+fn fade_lengths() -> Vec<crate::ui::Segment<u32>> {
+    vec![plain("Off", 0u32), plain("10", 10), plain("50", 50), plain("200", 200), plain("1000", 1000)]
+}
+
+fn level_tab(s: &App) -> El {
+    const LOWEST: f32 = -24.0;
+    const RANGE: f32 = 36.0;
+    let edit = s.audio_edit();
+    let peak = match s.edit.peak_db {
+        Some(db) if db > 0.05 => format!("Clips by {db:.1} dB"),
+        Some(db) => format!("Peak {db:.1} dB"),
+        None => "Peak unchanged".to_owned(),
+    };
+    let gain = edit.gain_db;
+    col().w_full().gap(6.0)
+        .child(slider("gain", "Gain", (gain - LOWEST) / RANGE, format!("{gain:+.1}"), |s, v, done| {
+            let db = LOWEST + v * RANGE;
+            // Zero is where most people want to end up, so it's easy to land on.
+            s.set_gain(if db.abs() < 0.4 { 0.0 } else { db }, done);
+        }))
+        .child(row().w_full().items_center().justify_between()
+            .child(label(peak, SMALL, T.muted))
+            .child(toggle("Normalize", edit.normalize, |s, _| {
+                let mut edit = s.audio_edit();
+                edit.normalize = !edit.normalize;
+                s.set_audio_edit(edit);
+            }).help("Brings the loudest moment to -1 dB")))
+        .child(dim(col().w_full().gap(6.0)
+            .child(labelled("Fade in ms", segments_inset("fade-in", fade_lengths(), edit.fade_in_ms, |s, v, _| {
+                let mut edit = s.audio_edit();
+                edit.fade_in_ms = v;
+                s.set_audio_edit(edit);
+            }, 2.0).w_full()))
+            .child(labelled("Fade out ms", segments_inset("fade-out", fade_lengths(), edit.fade_out_ms, |s, v, _| {
+                let mut edit = s.audio_edit();
+                edit.fade_out_ms = v;
+                s.set_audio_edit(edit);
+            }, 2.0).w_full())), !edit.looped))
 }
 
 fn compress_tab(s: &App) -> El {
@@ -162,12 +202,13 @@ fn audio_controls(s: &App) -> El {
     let section = s.audio_section();
     let (start, end, frames) = section.unwrap_or((0, 1, 1));
     let (rate, _) = s.source_format().unwrap_or((1, 1));
-    let tabs = vec![plain("Trim", AudioTab::Trim), plain("Loop", AudioTab::Loop), plain("Compress", AudioTab::Compress)];
+    let tabs = vec![plain("Trim", AudioTab::Trim), plain("Loop", AudioTab::Loop), plain("Level", AudioTab::Level), plain("Compress", AudioTab::Compress)];
     let on = s.edit.audio_tab;
     // Every tab is always there in one cell, so changing tab can't change the panel's height.
     let stack = el().key("audio-tabs").w_full().equal_columns(1)
         .child(layer(trim_tab(start, end, frames, rate), on == AudioTab::Trim))
         .child(layer(loop_tab(s), on == AudioTab::Loop))
+        .child(layer(level_tab(s), on == AudioTab::Level))
         .child(layer(compress_tab(s), on == AudioTab::Compress));
     dim(col().w_full().gap(10.0)
         .child(segments("audio-tab", tabs, on, |s, v, _| s.edit.audio_tab = v).w_full())
@@ -193,6 +234,12 @@ fn image_controls(s: &App) -> El {
                 let current = s.image_edit();
                 s.set_image_edit(ImageEdit { dither: !current.dither, ..current });
             })), edit.colors.is_some()))
+        .child(row().w_full().items_center().justify_between()
+            .child(label("Normal map, DirectX \u{2194} OpenGL", SMALL, T.muted))
+            .child(toggle("Flip green", edit.flip_green, |s, _| {
+                let current = s.image_edit();
+                s.set_image_edit(ImageEdit { flip_green: !current.flip_green, ..current });
+            })))
 }
 
 /// Quick looks a material can be given: a name, roughness and metallic.
@@ -243,18 +290,21 @@ fn inherited_filter_name(s: &App) -> &'static str {
 }
 
 /// Asks which filter one texture should use.
-fn pick_texture_filter(s: &App, image: usize, anchor: String, tx: &mut Tx) {
-    let own = s.model_edit().textures.get(&image).copied();
+fn pick_texture_filter(s: &App, image: usize, slot: Slot, anchor: String, tx: &mut Tx) {
+    let edit = s.model_edit();
+    let own = edit.textures.get(&image).copied();
     let item = |id: &str, title: &str, on: bool| PopupItem::new(id, title).checked(on);
-    let menu = PopupMenu::new()
+    let mut menu = PopupMenu::new()
         .item(item("inherit", inherited_filter_name(s), own.is_none()))
         .item(item("smooth", "Smooth", own == Some(TextureFilter::Smooth)))
         .item(item("pixels", "Pixels", own == Some(TextureFilter::Pixels)));
+    if slot == Slot::Normal { menu = menu.item(item("flip", "Flip green (DirectX \u{2194} OpenGL)", edit.flip_normal.contains(&image))); }
     tx.popup_menu(menu, anchor, move |s: &mut App, picked, _| {
         match picked.map(|p| p.to_string()).as_deref() {
             Some("inherit") => s.set_texture_filter(image, None),
             Some("smooth") => s.set_texture_filter(image, Some(TextureFilter::Smooth)),
             Some("pixels") => s.set_texture_filter(image, Some(TextureFilter::Pixels)),
+            Some("flip") => s.toggle_normal_flip(image),
             _ => {}
         }
     });
@@ -265,19 +315,22 @@ fn map_strip(s: &App, doc: &ModelDoc, material: usize, info: &MaterialInfo) -> E
     let edit = s.model_edit();
     let mut strip = row().w_full().gap(6.0).mt(2.0);
     for (slot, image) in &info.maps {
-        let image = *image;
+        let (slot, image) = (*slot, *image);
         let size = doc.image_size(image).map_or_else(|| "can't be resized".to_owned(), |(w, h)| format!("{w}×{h}"));
         let filter = doc.filter_of(image, &edit).map_or("unspecified", TextureFilter::title);
         let key = format!("map-{material}-{}", slot.short());
         let anchor = key.clone();
         let mut picture = el().key(key).role("button").focusable(true).label(format!("{} filtering", slot.title())).size(MAP_THUMB, MAP_THUMB).radius(5.0).fill(T.bg).border(1.0, T.line).clip_rounded(5.0)
             .press_scale(0.95).cursor(Cursor::Pointer)
-            .on_press_tx(move |s: &mut App, tx| pick_texture_filter(s, image, anchor.clone(), tx));
+            .on_press_tx(move |s: &mut App, tx| pick_texture_filter(s, image, slot, anchor.clone(), tx));
         if let Some(pixels) = s.edit.map_thumbs.get(image) { picture = picture.pixels_fit(pixels, SurfaceFit::Fill); }
         // Only a texture set apart from the rest needs marking.
         if let Some(own) = edit.textures.get(&image) {
             picture = picture.child(el().pin(None, None, Some(2.0), Some(2.0)).px(3.0).radius(3.0).fill(T.accent).inert()
                 .child(label(if *own == TextureFilter::Pixels { "Px" } else { "Sm" }, SMALL, T.on_accent)));
+        }
+        if edit.flip_normal.contains(&image) {
+            picture = picture.child(el().pin(Some(2.0), None, None, Some(2.0)).px(3.0).radius(3.0).fill(T.accent).inert().child(label("-Y", SMALL, T.on_accent)));
         }
         strip = strip.child(col().w(MAP_THUMB + 4.0).gap(2.0).items_center().help(format!("{} {size}, {filter} filtering. Click to change.", slot.title()))
             .child(picture)
@@ -334,9 +387,24 @@ fn material_body(s: &App, doc: &ModelDoc, index: usize, info: &MaterialInfo, cha
     body
 }
 
-fn model_controls(s: &App, doc: &ModelDoc) -> El {
+/// What applies to the model as a whole: its place, its size and all its textures at once.
+fn whole_model_controls(s: &App, doc: &ModelDoc) -> El {
     let edit = s.model_edit();
-    let mut list = col().w_full().gap(MATERIAL_ROW_GAP).transition(rune::Transition::opacity());
+    let origins = vec![plain("As in file", None), plain("Centre", Some(Origin::Centre)), plain("Bottom", Some(Origin::Base))];
+    let field = row().w(68.0).h(30.0).px(8.0).radius(7.0).items_center().border(1.0, T.line).cursor(Cursor::Text)
+        .child(el().grow(1.0).min_w(0.0).child(TextInput::new(&s.edit.scale_text).label("Scale").plain().width(None)
+            .on_edit(|s: &mut App| &mut s.edit.scale_text)
+            .on_change(|s: &mut App, _| s.scale_typed())
+            .build(kit()).key("scale-input")));
+    let presets = vec![plain("\u{00f7}100", 0.01f32), plain("\u{00f7}10", 0.1), plain("1", 1.0), plain("\u{00d7}10", 10.0), plain("\u{00d7}100", 100.0)];
+    let scale = edit.scale.unwrap_or(1.0);
+    let [width, height, depth] = doc.scaled_size(edit.scale);
+    let mut list = col().w_full().gap(MATERIAL_ROW_GAP + 4.0)
+        .child(labelled("Origin", segments_inset("model-origin", origins, edit.origin, |s, v, _| s.set_origin(v), 2.0).w_full()))
+        .child(row().w_full().gap(8.0).items_center().child(field_name("Scale")).child(field)
+            .child(el().grow(1.0).min_w(0.0).child(segments_inset("scale-preset", presets, scale, |s, v, _| s.set_scale(v), 1.0).w_full())))
+        .child(row().w_full().gap(8.0).items_center().h(20.0).child(field_name("Size"))
+            .child(label(format!("{} \u{00d7} {} \u{00d7} {}", short_number(width), short_number(height), short_number(depth)), LABEL, T.text)));
     let longest = (0..doc.materials.len()).filter_map(|i| doc.longest_texture(i)).max();
     if let Some(longest) = longest {
         let sizes = ladder(longest);
@@ -347,13 +415,40 @@ fn model_controls(s: &App, doc: &ModelDoc) -> El {
             let agree = all.windows(2).all(|p| p[0] == p[1]);
             let current = if agree { all.first().copied().flatten() } else { Some(0) };
             let count = doc.texture_count();
-            list = list.child(labelled(&format!("{count} texture{}", if count == 1 { "" } else { "s" }), segments_inset("all-textures", items, current, |s, v, _| s.set_all_texture_sizes(v), 1.0).w_full()).mb(MATERIAL_ROW_GAP));
+            list = list.child(labelled(&format!("{count} texture{}", if count == 1 { "" } else { "s" }), segments_inset("all-textures", items, current, |s, v, _| s.set_all_texture_sizes(v), 1.0).w_full()));
         }
     }
     if doc.texture_count() > 0 {
         let filters = vec![plain("As in file", None), plain("Smooth", Some(TextureFilter::Smooth)), plain("Pixels", Some(TextureFilter::Pixels))];
-        list = list.child(labelled("Filtering", segments_inset("model-filter", filters, edit.filter, |s, v, _| s.set_model_filter(v), 2.0).w_full()).mb(MATERIAL_ROW_GAP));
+        list = list.child(labelled("Filtering", segments_inset("model-filter", filters, edit.filter, |s, v, _| s.set_model_filter(v), 2.0).w_full()));
     }
+    list
+}
+
+/// A measurement to a sensible number of figures, whatever its size.
+fn short_number(value: f32) -> String {
+    match value.abs() {
+        v if v >= 100.0 => format!("{value:.0}"),
+        v if v >= 1.0 => format!("{value:.2}"),
+        _ => format!("{value:.3}"),
+    }
+}
+
+/// A model's tabs over a list of whatever the chosen tab holds.
+fn model_panel(s: &App, doc: &ModelDoc) -> El {
+    let tabs = vec![plain("Materials", ModelTab::Materials), plain("Whole model", ModelTab::WholeModel)];
+    let body = match s.edit.model_tab {
+        ModelTab::Materials => model_controls(s, doc),
+        ModelTab::WholeModel => whole_model_controls(s, doc),
+    };
+    col().w_full().h_full()
+        .child(el().w_full().px(CARD_PAD).pt(CARD_PAD).child(segments("model-tab", tabs, s.edit.model_tab, |s, v, _| s.set_model_tab(v)).w_full()))
+        .child(col().key("edit-controls").w_full().grow(1.0).min_h(0.0).padding(CARD_PAD).scroll(ScrollSpec { stick_bottom: false }).child(body).scroll_bar_styled(scroll_style()))
+}
+
+fn model_controls(s: &App, doc: &ModelDoc) -> El {
+    let edit = s.model_edit();
+    let mut list = col().w_full().gap(MATERIAL_ROW_GAP);
     for (index, info) in doc.materials.iter().enumerate() {
         let change = edit.materials.get(&index).copied().unwrap_or_default();
         let open = s.edit.expanded == Some(index);
@@ -383,19 +478,11 @@ fn panel_height(s: &App, kind: Kind) -> f32 {
 
 fn panel(s: &App, asset: &Asset, height: f32) -> El {
     let decoded = s.session_for(asset.key);
-    let inner = match asset.kind {
-        Kind::Audio => audio_controls(s),
-        Kind::Texture => dim(image_controls(s), decoded.is_some()),
-        Kind::Model => match decoded.as_deref() {
-            Some(Decoded::Model(doc)) => model_controls(s, doc),
-            _ => el().w_full().h_full().center().child(label(if s.edit.failure.is_some() { "" } else { "Reading the file\u{2026}" }, SMALL, T.muted)),
-        },
-    };
-    let content = col().key("edit-controls").w_full().h_full().padding(CARD_PAD);
-    let content = if asset.kind == Kind::Model {
-        content.scroll(ScrollSpec { stick_bottom: false }).child(inner).scroll_bar_styled(scroll_style())
-    } else {
-        content.child(inner)
+    let content = match (asset.kind, decoded.as_deref()) {
+        (Kind::Audio, _) => col().key("edit-controls").w_full().h_full().padding(CARD_PAD).child(audio_controls(s)),
+        (Kind::Texture, _) => col().key("edit-controls").w_full().h_full().padding(CARD_PAD).child(dim(image_controls(s), decoded.is_some())),
+        (Kind::Model, Some(Decoded::Model(doc))) => model_panel(s, doc),
+        (Kind::Model, _) => el().key("edit-controls").w_full().h_full().center().child(label(if s.edit.failure.is_some() { "" } else { "Reading the file\u{2026}" }, SMALL, T.muted)),
     };
     col().key("edit-panel").w_full().h(height).radius(WELL_RADIUS + 1.0).border(1.0, T.line).clip_rounded(WELL_RADIUS + 1.0).child(content)
 }

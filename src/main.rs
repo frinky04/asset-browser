@@ -42,7 +42,7 @@ fn main() {
         poll: Some(|s, _, tx| s.poll(tx)),
         on_key: Some(ui::on_key),
         min_size: Some((1200.0, 600.0)),
-        scenes: scenes!["textures", "models", "audio", "search", "search-help", "search-values", "small", "texture", "tile", "tile-seams", "big-texture", "model", "sound", "texture-sized", "settings", "settings-over-model", "edit-trim", "edit-loop", "edit-compress", "edit-texture", "edit-model", "light-edit-model", "light-start", "light-model", "light-sound", "light-big-texture", "light-settings"],
+        scenes: scenes!["textures", "models", "audio", "search", "search-help", "search-values", "small", "texture", "tile", "tile-seams", "big-texture", "model", "sound", "texture-sized", "settings", "settings-over-model", "edit-trim", "edit-loop", "edit-level", "edit-compress", "edit-texture", "edit-model", "edit-whole-model", "light-edit-model", "light-start", "light-model", "light-sound", "light-big-texture", "light-settings"],
         ..AppSpec::new("Asset Browser", (1520.0, 900.0), app::init, ui::view)
     };
     App::new(spec)

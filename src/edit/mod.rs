@@ -32,7 +32,7 @@ impl Edit {
     pub fn is_unchanged(&self) -> bool {
         match self {
             // Dithering means nothing without a palette, nor a crossfade without a loop.
-            Edit::Image(e) => e.colors.is_none() && e.effort == Effort::Balanced,
+            Edit::Image(e) => e.colors.is_none() && e.effort == Effort::Balanced && !e.flip_green,
             Edit::Audio(e) => *e == AudioEdit { crossfade_ms: e.crossfade_ms, ..AudioEdit::default() },
             Edit::Model(e) => e.is_unchanged(),
         }
@@ -92,13 +92,12 @@ pub fn render(decoded: &Decoded, name: &str, options: &Options) -> Result<Render
         (Decoded::Image(source), Edit::Image(edit)) => {
             let longest = source.width().max(source.height());
             let max = options.max_size.filter(|m| *m < longest);
-            let (bytes, shown) = match max {
-                Some(max) => {
-                    let scaled = crate::export::scale(&image::DynamicImage::ImageRgba8(source.clone()), max, options.nearest).into_rgba8();
-                    picture::encode(&scaled, *edit)?
-                }
-                None => picture::encode(source, *edit)?,
+            let mut sized = match max {
+                Some(max) => crate::export::scale(&image::DynamicImage::ImageRgba8(source.clone()), max, options.nearest).into_rgba8(),
+                None => source.clone(),
             };
+            if edit.flip_green { picture::invert_green(&mut sized); }
+            let (bytes, shown) = picture::encode(&sized, *edit)?;
             let (width, height) = shown.dimensions();
             Ok(Rendered { name: output_name(name, max, "png"), bytes, shown: Shown::Image(Arc::new(Image { width, height, rgba: shown.into_raw() })) })
         }
@@ -137,7 +136,18 @@ mod tests {
     }
 
     #[test]
+    fn flipping_green_inverts_only_green_in_the_output() {
+        let decoded = Decoded::Image(image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 60, 255, 255])));
+        let options = Options { edit: Some(Arc::new(Edit::Image(ImageEdit { flip_green: true, ..ImageEdit::default() }))), ..Options::default() };
+        let rendered = render(&decoded, "n.jpg", &options).unwrap();
+        assert_eq!(rendered.name, "n.png");
+        let out = image::load_from_memory(&rendered.bytes).unwrap().into_rgba8();
+        assert_eq!(out.get_pixel(0, 0).0, [200, 195, 255, 255]);
+    }
+
+    #[test]
     fn asking_for_nothing_counts_as_no_edit() {
+        assert!(!Edit::Image(ImageEdit { flip_green: true, ..ImageEdit::default() }).is_unchanged());
         assert!(Edit::Audio(AudioEdit { crossfade_ms: 50, ..AudioEdit::default() }).is_unchanged());
         assert!(Edit::Image(ImageEdit { dither: false, ..ImageEdit::default() }).is_unchanged());
         assert!(!Edit::Audio(AudioEdit { quality: 1, ..AudioEdit::default() }).is_unchanged());

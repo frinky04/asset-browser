@@ -3,7 +3,7 @@
 //! becomes a static document built from the mesh the preview already has. Both then go through
 //! the same edit and write steps.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Cursor;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -59,11 +59,25 @@ pub struct ModelEdit {
     pub filter: Option<TextureFilter>,
     /// Filters for particular images, by document image.
     pub textures: BTreeMap<usize, TextureFilter>,
+    /// Normal maps to convert between DirectX and OpenGL, by document image.
+    pub flip_normal: BTreeSet<usize>,
+    /// Where the model's origin moves to.
+    pub origin: Option<Origin>,
+    /// A uniform scale for the whole model.
+    pub scale: Option<f32>,
+}
+
+/// A place to put a model's origin, worked out from its bounds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    Centre,
+    Base,
 }
 
 impl ModelEdit {
     pub fn is_unchanged(&self) -> bool {
-        self.filter.is_none() && self.textures.is_empty() && self.materials.values().all(|m| *m == MaterialEdit::default())
+        self.filter.is_none() && self.textures.is_empty() && self.flip_normal.is_empty() && self.origin.is_none() && self.scale.is_none()
+            && self.materials.values().all(|m| *m == MaterialEdit::default())
     }
 
     /// An edit of just one material.
@@ -152,6 +166,8 @@ pub struct Surface {
     pub images: Vec<Arc<Image>>,
     /// The document material to pick out, leaving the rest dim.
     pub focus: Option<usize>,
+    /// Where to mark the model's origin, if at all.
+    pub origin: Option<[f32; 3]>,
 }
 
 struct DocImage {
@@ -211,7 +227,9 @@ pub struct ModelDoc {
     /// What the file asks for, per image, where it says.
     image_filters: Vec<Option<TextureFilter>>,
     /// Slow to make, and a material slider shouldn't redo them. Bounded by the sizes on offer.
-    rebuilt: Mutex<HashMap<(usize, u32, bool), Arc<Rebuilt>>>,
+    rebuilt: Mutex<HashMap<(usize, u32, bool, bool), Arc<Rebuilt>>>,
+    /// The lowest and highest corners of the model as the file places it.
+    bounds: ([f32; 3], [f32; 3]),
     /// Whether this is a whole glTF document, rather than a flattened mesh.
     pub keeps_scene: bool,
 }
@@ -219,7 +237,15 @@ pub struct ModelDoc {
 pub fn open(path: &Path, library: &Path) -> Result<ModelDoc, String> {
     let model = model::load(path, library)?;
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-    let doc = if matches!(ext.as_str(), "glb" | "gltf") { from_gltf(path, model)? } else { from_flat(model) };
+    let (mut low, mut high) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for vertex in &model.vertices {
+        for axis in 0..3 {
+            low[axis] = low[axis].min(vertex.pos[axis]);
+            high[axis] = high[axis].max(vertex.pos[axis]);
+        }
+    }
+    let mut doc = if matches!(ext.as_str(), "glb" | "gltf") { from_gltf(path, model)? } else { from_flat(model) };
+    doc.bounds = (low, high);
     // Decoded now, off the UI thread, because the preview's shading uses them straight away.
     for material in &doc.materials {
         for (_, image) in &material.maps { doc.images[*image].pixels(); }
@@ -317,7 +343,7 @@ fn from_gltf(path: &Path, model: Model) -> Result<ModelDoc, String> {
     let materials = read_materials(&root);
     let flat = (0..model.materials.len()).map(|i| (i < materials.len()).then_some(i)).collect();
     let image_filters = read_filters(&root, images.len());
-    Ok(ModelDoc { root, buffer, images, materials, flat, image_filters, rebuilt: Mutex::default(), keeps_scene: true })
+    Ok(ModelDoc { root, buffer, images, materials, flat, image_filters, rebuilt: Mutex::default(), keeps_scene: true, bounds: ([0.0; 3], [0.0; 3]) })
 }
 
 /// What each image's texture asks for, going by its magnification filter.
@@ -441,7 +467,7 @@ fn from_flat(mut model: Model) -> ModelDoc {
     root["meshes"] = json!([{ "primitives": primitives }]);
     let materials = read_materials(&root);
     let image_filters = vec![None; images.len()];
-    ModelDoc { root, buffer, images, materials, flat, image_filters, rebuilt: Mutex::default(), keeps_scene: false }
+    ModelDoc { root, buffer, images, materials, flat, image_filters, rebuilt: Mutex::default(), keeps_scene: false, bounds: ([0.0; 3], [0.0; 3]) }
 }
 
 /// Two 4-byte chunks' worth of GLB around `json` and `bin`.
@@ -513,7 +539,39 @@ impl ModelDoc {
             Some(index) => self.material_surface(*index, edit),
             None => SurfaceMaterial { color: default_material.color, roughness: 1.0, metallic: 0.0, emissive: [0.0; 3], image: None, surface_image: None, normal_image: None, emissive_image: None, normal_scale: 1.0, doc: None, filters: [None; 4] },
         }).collect();
-        Surface { materials, images, focus: None }
+        Surface { materials, images, focus: None, origin: None }
+    }
+
+    /// Where `origin` puts the model's origin, in the file's coordinates.
+    pub fn pivot(&self, origin: Option<Origin>) -> [f32; 3] {
+        let (low, high) = self.bounds;
+        let middle = |axis: usize| (low[axis] + high[axis]) * 0.5;
+        match origin {
+            None => [0.0; 3],
+            Some(Origin::Centre) => [middle(0), middle(1), middle(2)],
+            Some(Origin::Base) => [middle(0), low[1], middle(2)],
+        }
+    }
+
+    /// The model's width, height and depth once scaled.
+    pub fn scaled_size(&self, scale: Option<f32>) -> [f32; 3] {
+        let (low, high) = self.bounds;
+        let scale = scale.unwrap_or(1.0);
+        [(high[0] - low[0]) * scale, (high[1] - low[1]) * scale, (high[2] - low[2]) * scale]
+    }
+
+    /// Puts a new root node over every scene, moving and scaling everything under it, so nodes,
+    /// skeletons and animation keep working.
+    fn apply_transform(&self, root: &mut Value, edit: &ModelEdit) {
+        if edit.origin.is_none() && edit.scale.is_none() { return }
+        let scale = edit.scale.unwrap_or(1.0);
+        let pivot = self.pivot(edit.origin);
+        let moved = [-pivot[0] * scale, -pivot[1] * scale, -pivot[2] * scale];
+        for index in 0..root.get("scenes").and_then(Value::as_array).map_or(0, Vec::len) {
+            let Some(children) = root["scenes"][index].get("nodes").cloned().filter(|n| n.as_array().is_some_and(|a| !a.is_empty())) else { continue };
+            let parent = push_entry(root, "nodes", json!({ "name": "Root", "translation": moved, "scale": [scale, scale, scale], "children": children }));
+            root["scenes"][index]["nodes"] = json!([parent]);
+        }
     }
 
     /// What `image` is sampled with under `edit`: its own setting, then the whole model's, then
@@ -583,8 +641,8 @@ impl ModelDoc {
     }
 
     /// `image` at `max` (0 for its own size), encoded. Results are kept for the session.
-    fn rebuild(&self, image: usize, max: u32, nearest: bool) -> Result<Arc<Rebuilt>, String> {
-        let key = (image, max, nearest);
+    fn rebuild(&self, image: usize, max: u32, nearest: bool, flip_green: bool) -> Result<Arc<Rebuilt>, String> {
+        let key = (image, max, nearest, flip_green);
         if let Some(done) = self.rebuilt.lock().map_err(|e| e.to_string())?.get(&key) { return Ok(done.clone()) }
         let source = self.images[image].pixels().ok_or("a texture couldn't be decoded")?;
         let pixels = if max == 0 {
@@ -593,6 +651,13 @@ impl ModelDoc {
             let buffer = image::RgbaImage::from_raw(source.width, source.height, source.rgba.clone()).ok_or("a texture has the wrong size")?;
             let scaled = crate::export::scale(&image::DynamicImage::ImageRgba8(buffer), max, nearest).into_rgba8();
             Arc::new(Image { width: scaled.width(), height: scaled.height(), rgba: scaled.into_raw() })
+        };
+        let pixels = if flip_green {
+            let mut rgba = pixels.rgba.clone();
+            picture::invert_green(&mut rgba);
+            Arc::new(Image { width: pixels.width, height: pixels.height, rgba })
+        } else {
+            pixels
         };
         let buffer = image::RgbaImage::from_raw(pixels.width, pixels.height, pixels.rgba.clone()).ok_or("a texture has the wrong size")?;
         let (bytes, mime) = if self.images[image].is_jpeg() {
@@ -627,6 +692,7 @@ impl ModelDoc {
         let mut root = self.root.clone();
         self.apply_values(&mut root, edit);
         Self::apply_filters(&mut root, edit);
+        self.apply_transform(&mut root, edit);
         let mut bin: Vec<u8> = Vec::with_capacity(self.buffer.len());
 
         // Geometry first. A view keeps its alignment, because accessors inside it rely on that.
@@ -645,9 +711,11 @@ impl ModelDoc {
         let mut shown = Vec::with_capacity(self.images.len());
         for (index, image) in self.images.iter().enumerate() {
             let limit = self.image_limit(index, edit);
+            let flip = edit.flip_normal.contains(&index) && image.resizable();
             let rebuilt = match (limit, &image.encoded) {
-                (Some(max), _) => Some(self.rebuild(index, max, nearest)?),
-                (None, None) if image.size.is_some() => Some(self.rebuild(index, 0, nearest)?),
+                (Some(max), _) => Some(self.rebuild(index, max, nearest, flip)?),
+                (None, None) if image.size.is_some() => Some(self.rebuild(index, 0, nearest, flip)?),
+                (None, _) if flip => Some(self.rebuild(index, 0, nearest, true)?),
                 _ => None,
             };
             let (bytes, mime): (&[u8], &str) = match (&rebuilt, &image.encoded) {
@@ -855,6 +923,52 @@ mod tests {
         assert_eq!(doc.filter_of(0, &own), Some(TextureFilter::Smooth));
         assert!(!own.is_unchanged());
         assert_eq!(doc.material_surface(0, &own).filters[0], Some(TextureFilter::Smooth));
+    }
+
+    fn exported_bounds(doc: &ModelDoc, dir: &Dir, edit: &ModelEdit) -> ([f32; 3], [f32; 3]) {
+        let (bytes, _) = doc.render(edit, false).unwrap();
+        let out = dir.0.join("moved.glb");
+        std::fs::write(&out, &bytes).unwrap();
+        open(&out, &dir.0).unwrap().bounds
+    }
+
+    #[test]
+    fn origin_and_scale_move_the_whole_model_under_a_new_root() {
+        let dir = Dir::new("origin");
+        let doc = textured_obj(&dir);
+        assert_eq!(doc.bounds, ([0.0, 0.0, 0.0], [1.0, 1.0, 0.0]));
+
+        let centre = exported_bounds(&doc, &dir, &ModelEdit { origin: Some(Origin::Centre), ..ModelEdit::default() });
+        assert_eq!(centre, ([-0.5, -0.5, 0.0], [0.5, 0.5, 0.0]));
+        let base = exported_bounds(&doc, &dir, &ModelEdit { origin: Some(Origin::Base), ..ModelEdit::default() });
+        assert_eq!(base, ([-0.5, 0.0, 0.0], [0.5, 1.0, 0.0]));
+        // The origin stays put at the model's base however large it's made.
+        let bigger = exported_bounds(&doc, &dir, &ModelEdit { origin: Some(Origin::Base), scale: Some(100.0), ..ModelEdit::default() });
+        assert_eq!(bigger, ([-50.0, 0.0, 0.0], [50.0, 100.0, 0.0]));
+        assert_eq!(doc.scaled_size(Some(100.0)), [100.0, 100.0, 0.0]);
+    }
+
+    #[test]
+    fn the_new_root_keeps_the_old_nodes_beneath_it() {
+        let dir = Dir::new("rootnode");
+        let doc = textured_obj(&dir);
+        let json = written(&doc, &ModelEdit { scale: Some(2.0), ..ModelEdit::default() });
+        let top = json["scenes"][0]["nodes"][0].as_u64().unwrap() as usize;
+        assert_eq!(json["nodes"][top]["children"], json!([0]));
+        assert_eq!(json["nodes"][top]["scale"], json!([2.0, 2.0, 2.0]));
+        assert!(!ModelEdit { scale: Some(2.0), ..ModelEdit::default() }.is_unchanged());
+    }
+
+    #[test]
+    fn flipping_a_normal_map_rewrites_only_its_green() {
+        let dir = Dir::new("flipnormal");
+        let doc = textured_obj(&dir);
+        let edit = ModelEdit { flip_normal: [0].into(), ..ModelEdit::default() };
+        let (bytes, shown) = doc.render(&edit, false).unwrap();
+        assert_eq!(&shown[0].rgba[..4], &[200, 215, 40, 255], "was 200, 40, 40");
+        let out = dir.0.join("flip.glb");
+        std::fs::write(&out, &bytes).unwrap();
+        assert_eq!(&model::load(&out, &dir.0).unwrap().images[0].rgba[..4], &[200, 215, 40, 255]);
     }
 
     #[test]

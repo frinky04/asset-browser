@@ -16,6 +16,45 @@ use vorbis_rs::{VorbisBitrateManagementStrategy, VorbisEncoderBuilder};
 /// Decoded audio stays in memory while it's edited, so very long recordings are turned away.
 const MAX_MINUTES: u64 = 20;
 pub const DEFAULT_QUALITY: u8 = 5;
+/// A little under full scale, so a lossy encoder has room to overshoot without clipping.
+pub const NORMALIZE_PEAK_DB: f32 = -1.0;
+
+fn decibels(db: f32) -> f32 {
+    10f32.powf(db / 20.0)
+}
+
+/// The loudest sample, in decibels of full scale.
+pub fn peak_db(pcm: &Pcm) -> f32 {
+    20.0 * pcm.samples.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1e-5).log10()
+}
+
+fn apply_level(samples: &mut [f32], edit: &AudioEdit) {
+    let mut gain = decibels(edit.gain_db);
+    if edit.normalize {
+        let peak = samples.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        if peak > 1e-5 { gain *= decibels(NORMALIZE_PEAK_DB) / peak; }
+    }
+    if (gain - 1.0).abs() > 1e-6 {
+        for sample in samples.iter_mut() { *sample *= gain; }
+    }
+}
+
+fn apply_fades(pcm: &mut Pcm, edit: &AudioEdit) {
+    if edit.looped { return }
+    let channels = usize::from(pcm.channels.max(1));
+    let frames = pcm.frames() as usize;
+    let length = |ms: u32| (ms as usize * pcm.rate as usize / 1000).min(frames);
+    let (fade_in, fade_out) = (length(edit.fade_in_ms), length(edit.fade_out_ms));
+    for i in 0..fade_in {
+        let (gain, _) = fade((i as f32 + 0.5) / fade_in as f32);
+        for sample in &mut pcm.samples[i * channels..(i + 1) * channels] { *sample *= gain; }
+    }
+    for i in 0..fade_out {
+        let (gain, _) = fade((i as f32 + 0.5) / fade_out as f32);
+        let frame = frames - 1 - i;
+        for sample in &mut pcm.samples[frame * channels..(frame + 1) * channels] { *sample *= gain; }
+    }
+}
 
 /// Interleaved samples.
 #[derive(Clone, Debug, PartialEq)]
@@ -54,11 +93,18 @@ pub struct AudioEdit {
     /// A lower sample rate to leave at.
     pub rate: Option<u32>,
     pub mono: bool,
+    /// Fades at the section's ends. A loop has no ends, so it ignores these.
+    pub fade_in_ms: u32,
+    pub fade_out_ms: u32,
+    /// Raises or lowers the level, after any normalizing.
+    pub gain_db: f32,
+    /// Brings the section's peak to `NORMALIZE_PEAK_DB`.
+    pub normalize: bool,
 }
 
 impl Default for AudioEdit {
     fn default() -> Self {
-        AudioEdit { section: None, looped: false, crossfade_ms: 0, quality: DEFAULT_QUALITY, rate: None, mono: false }
+        AudioEdit { section: None, looped: false, crossfade_ms: 0, quality: DEFAULT_QUALITY, rate: None, mono: false, fade_in_ms: 0, fade_out_ms: 0, gain_db: 0.0, normalize: false }
     }
 }
 
@@ -143,7 +189,10 @@ pub fn cut(source: &Pcm, edit: &AudioEdit) -> Pcm {
             out.truncate((length - fade_frames) * channels);
         }
     }
-    Pcm { samples: out, channels: source.channels, rate: source.rate }
+    apply_level(&mut out, edit);
+    let mut result = Pcm { samples: out, channels: source.channels, rate: source.rate };
+    apply_fades(&mut result, edit);
+    result
 }
 
 /// Applies the output's channel count and sample rate.
@@ -341,6 +390,47 @@ mod tests {
         assert_eq!(out.frames(), 980);
         assert!((out.samples[0] - 980.0).abs() < 10.0, "{}", out.samples[0]);
         assert_eq!(*out.samples.last().unwrap(), 979.0);
+    }
+
+    fn flat(frames: usize, level: f32) -> Pcm {
+        Pcm { samples: vec![level; frames], channels: 1, rate: 1000 }
+    }
+
+    #[test]
+    fn fades_start_and_end_at_silence_and_leave_the_middle_alone() {
+        let out = cut(&flat(1000, 1.0), &AudioEdit { fade_in_ms: 100, fade_out_ms: 200, ..AudioEdit::default() });
+        assert!(out.samples[0] < 0.02 && *out.samples.last().unwrap() < 0.02, "{} {}", out.samples[0], out.samples[999]);
+        assert_eq!(out.samples[500], 1.0);
+        assert!(out.samples[50] > 0.5 && out.samples[50] < 0.9, "{}", out.samples[50]);
+    }
+
+    #[test]
+    fn a_fade_longer_than_the_section_is_cut_to_fit() {
+        let out = cut(&flat(100, 1.0), &AudioEdit { fade_in_ms: 5000, ..AudioEdit::default() });
+        assert_eq!(out.frames(), 100);
+        assert!(out.samples[99] > 0.99);
+    }
+
+    #[test]
+    fn a_loop_ignores_fades_so_its_join_stays_clean() {
+        let out = cut(&flat(1000, 1.0), &AudioEdit { looped: true, fade_in_ms: 100, fade_out_ms: 100, ..AudioEdit::default() });
+        assert_eq!((out.samples[0], out.samples[999]), (1.0, 1.0));
+    }
+
+    #[test]
+    fn gain_is_in_decibels_and_normalizing_sets_the_peak() {
+        let louder = cut(&flat(10, 0.25), &AudioEdit { gain_db: 6.0206, ..AudioEdit::default() });
+        assert!((louder.samples[0] - 0.5).abs() < 1e-3, "{}", louder.samples[0]);
+        let even = cut(&flat(10, 0.1), &AudioEdit { normalize: true, ..AudioEdit::default() });
+        assert!((peak_db(&even) - NORMALIZE_PEAK_DB).abs() < 0.01, "{}", peak_db(&even));
+        let quieter = cut(&flat(10, 0.1), &AudioEdit { normalize: true, gain_db: -6.0, ..AudioEdit::default() });
+        assert!((peak_db(&quieter) - (NORMALIZE_PEAK_DB - 6.0)).abs() < 0.01, "gain trims after normalizing");
+    }
+
+    #[test]
+    fn normalizing_silence_leaves_it_silent() {
+        let out = cut(&flat(10, 0.0), &AudioEdit { normalize: true, ..AudioEdit::default() });
+        assert!(out.samples.iter().all(|v| *v == 0.0));
     }
 
     #[test]

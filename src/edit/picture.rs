@@ -19,12 +19,19 @@ pub struct ImageEdit {
     pub colors: Option<u16>,
     pub dither: bool,
     pub effort: Effort,
+    /// Inverts green, converting a normal map between the DirectX and OpenGL conventions.
+    pub flip_green: bool,
 }
 
 impl Default for ImageEdit {
     fn default() -> Self {
-        ImageEdit { colors: None, dither: true, effort: Effort::Balanced }
+        ImageEdit { colors: None, dither: true, effort: Effort::Balanced, flip_green: false }
     }
+}
+
+/// Inverts the green channel of straight RGBA bytes.
+pub fn invert_green(rgba: &mut [u8]) {
+    for pixel in rgba.chunks_exact_mut(4) { pixel[1] = 255 - pixel[1]; }
 }
 
 /// The PNG, and the pixels it decodes to.
@@ -161,7 +168,7 @@ mod tests {
         let (full, shown) = encode(&source, ImageEdit::default()).unwrap();
         assert_eq!(decoded(&full), source);
         assert_eq!(shown, source);
-        let (small, shown) = encode(&source, ImageEdit { colors: Some(16), dither: false, effort: Effort::Best }).unwrap();
+        let (small, shown) = encode(&source, ImageEdit { colors: Some(16), dither: false, effort: Effort::Best, ..ImageEdit::default() }).unwrap();
         assert!(small.len() < full.len() / 2, "{} against {}", small.len(), full.len());
         assert_eq!(decoded(&small), shown, "the preview is the decoded file");
     }
@@ -187,7 +194,7 @@ mod tests {
     fn the_palette_never_exceeds_the_limit() {
         let source = noise(256, 256);
         for limit in [2u16, 16, 256] {
-            let (bytes, shown) = encode(&source, ImageEdit { colors: Some(limit), dither: true, effort: Effort::Fast }).unwrap();
+            let (bytes, shown) = encode(&source, ImageEdit { colors: Some(limit), dither: true, effort: Effort::Fast, ..ImageEdit::default() }).unwrap();
             let distinct: std::collections::HashSet<[u8; 4]> = shown.pixels().map(|p| p.0).collect();
             assert!(distinct.len() <= usize::from(limit), "{limit}: {}", distinct.len());
             assert_eq!(decoded(&bytes), shown);

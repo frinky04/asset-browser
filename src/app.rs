@@ -11,7 +11,7 @@ use rune::prefs::Prefs;
 use rune::{Latest, Live, LiveText, Pixels, ScrollPos, Spring, TextEdit, Tx, Waker, WheelEvent};
 
 use crate::audio::Audio;
-use crate::editor::{AudioTab, Editor};
+use crate::editor::{AudioTab, Editor, ModelTab};
 use crate::export::{self, Options};
 use crate::library::{self, Filter, Kind, Library, Results, Sort};
 use crate::model::{self, Image, Model};
@@ -514,10 +514,16 @@ impl App {
                 self.set_kind(Some(Kind::Audio), tx);
                 if let Some(id) = first(self, Kind::Audio, "") { self.select(id, tx); }
             }
-            "edit-trim" | "edit-loop" | "edit-compress" => {
+            "edit-whole-model" => {
+                self.run_scene("model", tx);
+                self.edit.open = true;
+                self.edit.model_tab = ModelTab::WholeModel;
+                self.seed_scene_edit(crate::edit::Edit::Model(crate::edit::ModelEdit { origin: Some(crate::edit::mesh::Origin::Base), scale: Some(0.01), ..crate::edit::ModelEdit::default() }));
+            }
+            "edit-trim" | "edit-loop" | "edit-level" | "edit-compress" => {
                 self.run_scene("sound", tx);
                 self.edit.open = true;
-                self.edit.audio_tab = match name { "edit-loop" => AudioTab::Loop, "edit-compress" => AudioTab::Compress, _ => AudioTab::Trim };
+                self.edit.audio_tab = match name { "edit-loop" => AudioTab::Loop, "edit-level" => AudioTab::Level, "edit-compress" => AudioTab::Compress, _ => AudioTab::Trim };
                 let edit = crate::edit::AudioEdit { section: Some((300_000, 1_500_000)), looped: name == "edit-loop", crossfade_ms: 10, quality: 2, ..crate::edit::AudioEdit::default() };
                 self.seed_scene_edit(crate::edit::Edit::Audio(edit));
             }

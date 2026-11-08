@@ -526,7 +526,7 @@ impl Target {
 
 enum GpuScene {
     Texture { size: (u32, u32), groups: [[wgpu::BindGroup; 2]; 2] },
-    Model { vertices: wgpu::Buffer, indices: wgpu::Buffer, parts: Vec<GpuPart>, images: ModelImages, center: Vec3, radius: f32 },
+    Model { vertices: wgpu::Buffer, indices: wgpu::Buffer, parts: Vec<GpuPart>, images: ModelImages, marker: OriginMarker, center: Vec3, radius: f32 },
 }
 
 struct GpuPart {
@@ -551,6 +551,36 @@ impl ModelImages {
         let (view, _) = self.views.entry(std::ptr::from_ref(image) as usize).or_insert_with(|| (upload_image(device, queue, image), keep.cloned()));
         view.clone()
     }
+}
+
+/// Three arrows at a model's origin, drawn over it so an origin inside the mesh still shows.
+struct OriginMarker {
+    vertices: wgpu::Buffer,
+    groups: [wgpu::BindGroup; 3],
+    visible: bool,
+}
+
+/// Each axis is a four-sided spike of this many corners.
+const MARKER_AXIS_VERTICES: usize = 12;
+const MARKER_TINTS: [[f32; 4]; 3] = [[0.92, 0.26, 0.26, 1.0], [0.36, 0.78, 0.30, 1.0], [0.28, 0.50, 0.98, 1.0]];
+
+fn marker_vertices(at: Vec3, radius: f32) -> Vec<model::Vertex> {
+    let (length, width) = (radius * 0.5, radius * 0.025);
+    let normal = LIGHT.normalize().to_array();
+    let vertex = |pos: Vec3| model::Vertex { pos: pos.to_array(), normal, uv: [0.0; 2] };
+    let mut out = Vec::with_capacity(MARKER_AXIS_VERTICES * 3);
+    for (axis, a, b) in [(Vec3::X, Vec3::Y, Vec3::Z), (Vec3::Y, Vec3::Z, Vec3::X), (Vec3::Z, Vec3::X, Vec3::Y)] {
+        let tip = at + axis * length;
+        let corners = [at + a * width, at + b * width, at - a * width, at - b * width];
+        for side in 0..4 { out.extend([vertex(tip), vertex(corners[side]), vertex(corners[(side + 1) % 4])]); }
+    }
+    out
+}
+
+fn update_marker(queue: &wgpu::Queue, marker: &mut OriginMarker, surface: Option<&Surface>, radius: f32) {
+    let origin = surface.and_then(|s| s.origin);
+    marker.visible = origin.is_some();
+    if let Some(at) = origin { queue.write_buffer(&marker.vertices, 0, bytemuck::cast_slice(&marker_vertices(Vec3::from(at), radius))); }
 }
 
 /// The sampler for a texture filter. A file that doesn't say draws as models do while browsing.
@@ -657,7 +687,33 @@ fn prepare_scene(device: &wgpu::Device, queue: &wgpu::Queue, pipes: &Pipes, scen
             }).collect();
             bind_parts(device, queue, pipes, &mut parts, &mut images, m, surface);
             let (center, radius) = m.bounds();
-            Some(GpuScene::Model { vertices, indices, parts, images, center, radius })
+            let marker_vertex_size = (MARKER_AXIS_VERTICES * 3 * std::mem::size_of::<model::Vertex>()) as u64;
+            let groups = MARKER_TINTS.map(|tint| {
+                let uniform = PartUniform { tint, pbr: [1.0, 0.0, 0.0, 1.0], emissive: [0.0; 4] };
+                let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::bytes_of(&uniform), usage: wgpu::BufferUsages::UNIFORM });
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &pipes.part_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&white) },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&pipes.repeat_nearest) },
+                        wgpu::BindGroupEntry { binding: 2, resource: buffer.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&white) },
+                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&flat) },
+                        wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&white) },
+                        wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&pipes.repeat_nearest) },
+                        wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&pipes.repeat_nearest) },
+                        wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&pipes.repeat_nearest) },
+                    ],
+                })
+            });
+            let mut marker = OriginMarker {
+                vertices: device.create_buffer(&wgpu::BufferDescriptor { label: Some("origin marker"), size: marker_vertex_size, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
+                groups,
+                visible: false,
+            };
+            update_marker(queue, &mut marker, surface, radius);
+            Some(GpuScene::Model { vertices, indices, parts, images, marker, center, radius })
         }
     }
 }
@@ -696,8 +752,9 @@ impl Compositor<App> for StageCompositor {
             self.seen_surface = state.surface_revision;
         } else if state.surface_revision != self.seen_surface {
             self.seen_surface = state.surface_revision;
-            if let (Some(GpuScene::Model { parts, images, .. }), Scene::Model(model)) = (&mut self.scene, &state.scene) {
+            if let (Some(GpuScene::Model { parts, images, marker, radius, .. }), Scene::Model(model)) = (&mut self.scene, &state.scene) {
                 bind_parts(f.device, f.queue, pipes, parts, images, model, state.surface.as_ref());
+                update_marker(f.queue, marker, state.surface.as_ref(), *radius);
             }
         }
         // Ease the camera; a headless run lands at once, so a snapshot is exact.
@@ -784,7 +841,7 @@ fn draw_scene(queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, pipes: &P
             pass.set_bind_group(0, &groups[usize::from(view.tile)][usize::from(view.smooth)], &[]);
             pass.draw(0..3, 0..1);
         }
-        GpuScene::Model { vertices, indices, parts, center, radius, .. } => {
+        GpuScene::Model { vertices, indices, parts, marker, center, radius, .. } => {
             let turn = Mat4::from_rotation_x(view.pitch) * Mat4::from_rotation_y(view.yaw);
             let place = Mat4::from_translation(Vec3::new(view.pan[0] * radius, view.pan[1] * radius, -view.distance * radius));
             let aspect = target.size.0 as f32 / target.size.1.max(1) as f32;
@@ -819,6 +876,15 @@ fn draw_scene(queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, pipes: &P
             for part in parts {
                 pass.set_bind_group(1, &part.group, &[]);
                 pass.draw_indexed(part.start..part.start + part.count, 0, 0..1);
+            }
+            if marker.visible {
+                // Squeezed to the front of the depth range, so nothing can hide it.
+                pass.set_viewport(0.0, 0.0, target.size.0 as f32, target.size.1 as f32, 0.0, 0.0005);
+                pass.set_vertex_buffer(0, marker.vertices.slice(..));
+                for (axis, group) in marker.groups.iter().enumerate() {
+                    pass.set_bind_group(1, group, &[]);
+                    pass.draw((axis * MARKER_AXIS_VERTICES) as u32..((axis + 1) * MARKER_AXIS_VERTICES) as u32, 0..1);
+                }
             }
         }
     }

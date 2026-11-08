@@ -6,10 +6,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rune::{Latest, Pixels, Spring, Tx, Waker};
+use rune::{Latest, Pixels, Spring, TextEdit, Tx, Waker};
 
 use crate::app::{App, Preview};
-use crate::edit::mesh::{SurfaceMaterial, TextureFilter};
+use crate::edit::mesh::{Origin, SurfaceMaterial, TextureFilter};
 use crate::edit::{self, AudioEdit, Decoded, Edit, ImageEdit, MaterialEdit, ModelDoc, ModelEdit, Pcm, Rendered, Shown, ball, sound};
 use crate::export::{self, Options};
 use crate::library::{Asset, Kind};
@@ -34,7 +34,14 @@ const SEAM_LEAD_SECONDS: f32 = 2.0;
 pub enum AudioTab {
     Trim,
     Loop,
+    Level,
     Compress,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelTab {
+    Materials,
+    WholeModel,
 }
 
 /// Which end of the audio section a control moves.
@@ -84,13 +91,18 @@ pub struct Editor {
     session: Option<Session>,
     opening: Latest<(u64, Result<Arc<Decoded>, String>)>,
     rendering: Latest<(u64, Result<Finished, String>)>,
-    cutting: Latest<(u64, Arc<Pcm>)>,
+    cutting: Latest<(u64, Arc<Pcm>, f32)>,
     tuning: Latest<(u64, u64)>,
     pub failure: Option<String>,
     pub output: Option<Output>,
     /// The preview is showing the unedited asset.
     pub comparing: bool,
     pub audio_tab: AudioTab,
+    pub model_tab: ModelTab,
+    /// The scale field's text, which may be half typed.
+    pub scale_text: TextEdit,
+    /// The edited section's loudest moment, in decibels of full scale.
+    pub peak_db: Option<f32>,
     /// The material whose controls are unfolded.
     pub expanded: Option<usize>,
     pub seam: Pixels,
@@ -148,6 +160,9 @@ impl Default for Editor {
             output: None,
             comparing: false,
             audio_tab: AudioTab::Trim,
+            model_tab: ModelTab::Materials,
+            scale_text: TextEdit::new("1"),
+            peak_db: None,
             expanded: None,
             seam: Pixels::new(),
             seam_ms: SEAM_MS_DEFAULT,
@@ -336,6 +351,7 @@ impl App {
         let Some(asset) = self.selected_asset() else { return };
         if self.edit.recipes.remove(&asset.key).is_some() { self.generation += 1; }
         self.edit.comparing = false;
+        self.sync_scale_text();
         self.edit_changed();
     }
 
@@ -352,6 +368,7 @@ impl App {
         self.edit.comparing = false;
         self.edit.expanded = None;
         self.edit.folding = None;
+        self.edit.peak_db = None;
         self.edit.model_images = None;
         self.edit.focus = None;
         self.edit.balls.clear();
@@ -409,6 +426,7 @@ impl App {
         self.update_surface();
         if options.edit.is_none() {
             self.edit.output = None;
+            self.edit.peak_db = None;
             self.edit.rendered_image = None;
             self.edit.model_images = None;
             self.update_surface();
@@ -421,7 +439,11 @@ impl App {
         }
         if let (Decoded::Audio(source), Some(Edit::Audio(edit))) = (decoded.as_ref(), options.edit.as_deref()) {
             let (source, edit) = (source.clone(), *edit);
-            self.edit.cutting.request((asset.key, source, edit), |(key, source, edit)| (key, Arc::new(sound::cut(&source, &edit))));
+            self.edit.cutting.request((asset.key, source, edit), |(key, source, edit)| {
+                let clean = sound::cut(&source, &edit);
+                let peak = sound::peak_db(&clean);
+                (key, Arc::new(clean), peak)
+            });
         }
         self.edit.rendering.request((asset, options, decoded), |(asset, options, decoded)| {
             let finished = edit::render(&decoded, asset.name(), &options).map(|Rendered { name, bytes, shown }| {
@@ -454,6 +476,7 @@ impl App {
                             self.edit.ball_seen = vec![None; doc.materials.len()];
                             self.edit.map_thumbs = (0..doc.image_count()).map(|_| Pixels::new()).collect();
                             self.edit.thumb_seen = vec![0; doc.image_count()];
+                            self.sync_scale_text();
                         }
                         self.edit.session = Some(Session { key, decoded });
                         self.edit_changed();
@@ -462,10 +485,11 @@ impl App {
                 }
             }
         }
-        if let Some((key, clean)) = self.edit.cutting.take() {
+        if let Some((key, clean, peak)) = self.edit.cutting.take() {
             changed = true;
             if self.selected_key() == Some(key) {
                 self.edit.clean = Some(clean);
+                self.edit.peak_db = Some(peak);
                 self.refresh_audition();
             }
         }
@@ -556,6 +580,7 @@ impl App {
         self.request_balls(doc, &edit, &images);
         let mut surface = doc.surface(&edit, images);
         surface.focus = self.edit.focus;
+        surface.origin = (self.edit.model_tab == ModelTab::WholeModel).then(|| doc.pivot(edit.origin));
         self.stage.surface = Some(surface);
         self.stage.surface_revision += 1;
     }
@@ -637,6 +662,57 @@ impl App {
         };
         self.store_recipe(Edit::Model(edit));
         self.edit_changed();
+    }
+
+    pub fn set_model_tab(&mut self, tab: ModelTab) {
+        self.edit.model_tab = tab;
+        self.update_surface();
+    }
+
+    pub fn set_origin(&mut self, origin: Option<Origin>) {
+        let mut edit = self.model_edit();
+        edit.origin = origin;
+        self.store_recipe(Edit::Model(edit));
+        self.edit_changed();
+    }
+
+    fn store_scale(&mut self, scale: f32) {
+        let mut edit = self.model_edit();
+        edit.scale = ((scale - 1.0).abs() > 1e-6).then_some(scale.clamp(1e-4, 1e4));
+        self.store_recipe(Edit::Model(edit));
+        self.edit_changed();
+    }
+
+    /// Takes a scale from a preset, and shows it in the field.
+    pub fn set_scale(&mut self, scale: f32) {
+        self.store_scale(scale);
+        self.sync_scale_text();
+    }
+
+    /// Reads the scale field. Half-typed text simply doesn't count yet.
+    pub fn scale_typed(&mut self) {
+        if let Ok(value) = self.edit.scale_text.text.trim().parse::<f32>() && value.is_finite() && value > 0.0 { self.store_scale(value); }
+    }
+
+    fn sync_scale_text(&mut self) {
+        let shown = self.model_edit().scale.unwrap_or(1.0).to_string();
+        self.edit.scale_text.replace_text(shown);
+    }
+
+    /// Converts one normal map between DirectX and OpenGL, or back.
+    pub fn toggle_normal_flip(&mut self, image: usize) {
+        let mut edit = self.model_edit();
+        if !edit.flip_normal.remove(&image) { edit.flip_normal.insert(image); }
+        self.store_recipe(Edit::Model(edit));
+        self.edit_changed();
+    }
+
+    /// Sets the level. `commit` is false while the slider is still moving.
+    pub fn set_gain(&mut self, gain_db: f32, commit: bool) {
+        let mut edit = self.audio_edit();
+        edit.gain_db = gain_db;
+        self.store_recipe(Edit::Audio(edit));
+        if commit { self.edit_changed(); }
     }
 
     /// Applies a look to a material in one step.
