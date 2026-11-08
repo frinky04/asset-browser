@@ -677,7 +677,7 @@ fn grid(s: &App) -> El {
         };
         pane = pane.center().child(label(message, BODY, T.muted));
     } else if empty {
-        pane = pane.center().child(label("This folder has no textures, models or audio. Choose another with Change library folder.", BODY, T.muted));
+        pane = pane.center().child(label("No textures, models or audio here. Choose a library folder in Settings.", BODY, T.muted));
     } else {
         pane = pane.child(body);
     }

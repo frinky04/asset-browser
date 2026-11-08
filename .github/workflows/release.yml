@@ -1,0 +1,31 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check tag matches Cargo.toml
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' -List).Matches[0].Groups[1].Value
+          if ("v$version" -ne $env:GITHUB_REF_NAME) { throw "Tag $env:GITHUB_REF_NAME does not match Cargo.toml version $version" }
+          "VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Install toolchain
+        run: rustup toolchain install
+
+      - name: Build
+        run: ./dist.ps1
+
+      - name: Publish
+        run: gh release create $env:GITHUB_REF_NAME "dist/asset-browser-$env:VERSION-windows-x64.zip" --verify-tag --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

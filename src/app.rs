@@ -22,7 +22,6 @@ use crate::stage::{Look, Scene, StageState, View, actual_size_zoom};
 use crate::thumbs::{Thumbs, WAVE_COLOR};
 use crate::{ui, wave};
 
-const DEFAULT_ROOT: &str = r"C:\Users\cuddl\Documents\Dev\Games\Assets";
 /// How many peaks a preview's waveform is read into.
 pub const WAVE_W: u32 = 960;
 
@@ -338,7 +337,7 @@ fn root_setting() -> PathBuf {
 
 fn configured_root() -> PathBuf {
     if let Some(root) = std::env::var_os("ASSET_BROWSER_ROOT") { return root.into(); }
-    std::fs::read_to_string(root_setting()).ok().map(|t| PathBuf::from(t.trim())).filter(|p| p.is_dir()).unwrap_or_else(|| DEFAULT_ROOT.into())
+    std::fs::read_to_string(root_setting()).ok().map(|t| PathBuf::from(t.trim())).filter(|p| p.is_dir()).unwrap_or_default()
 }
 
 pub fn init() -> App {

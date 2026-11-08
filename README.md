@@ -2,78 +2,29 @@
 
 # Asset Browser
 
-A fast browser for a folder of game assets on Windows, built with [Rune](https://github.com/anomalyco/rune).
+Browse, preview, edit and drag out game assets on Windows. Library files are never changed.
 
-- Thumbnails for textures (png, jpg, bmp, tga, webp), models (glb, gltf, obj, dae, fbx) and audio (wav, ogg, mp3, flac).
-- Search names and folders, filter by pack, type and format. See [Searching](#searching).
-- Orbit, pan and zoom models. Pan, zoom and tile textures. Scrub audio.
-- Drag anything out to a folder or another program. Drags hand over a staged copy, so the library file is never touched.
-- Pick a smaller size for a texture to preview it and drag it out at that size, or set a size for all grid drags.
-- Press **Edit** to change what gets dragged out. See [Editing](#editing).
+- Textures: png, jpg, bmp, tga, webp
+- Models: glb, gltf, obj, dae, fbx
+- Audio: wav, ogg, mp3, flac
+
+Search by description is optional: a 625 MB download that runs locally.
+
+![Texture preview](assets/screenshots/textures.png)
+![Audio editor](assets/screenshots/audio.png)
+![Model search and material editor](assets/screenshots/search.png)
+![Model transform, light theme](assets/screenshots/models.png)
+
+## Install
+
+Download the zip from [Releases](../../releases) and run `asset-browser.exe`. Set your asset folder in Settings.
+
+## Build
 
 ```sh
 cargo run --release
 ```
 
-The library defaults to the dogfood folder. Use **Change library folder** in the app, or set `ASSET_BROWSER_ROOT`.
+## License
 
-Thumbnails, the index and staged exports live in `%LOCALAPPDATA%\AssetBrowserV2`.
-
-## Searching
-
-Words all have to match, in any order, and `wood door` finds `woodDoor` and `wood_door`. Related words count too, after the literal matches, so `gun` finds pistols. A typo that finds nothing is corrected.
-
-| Write | To get |
-| --- | --- |
-| `"old door"` | Exactly those whole words, nothing related |
-| `-rust` | Leave it out. Works on fields too: `-is:data` |
-| `door\|gate` | Either. Works in fields too: `is:model\|audio` |
-| `is:model` `is:audio` `is:texture` | One type |
-| `is:normal` `is:roughness` `is:metallic` `is:ao` `is:height` `is:emissive` `is:specular` `is:opacity` `is:color` | A texture map, by its name. `is:data` is any but colour |
-| `is:square` `is:pot` `is:wide` `is:tall` `is:broken` | Texture shape, or files that can't be previewed |
-| `pack:mega` `folder:props` `name:door` | Only look there |
-| `ext:fbx` or `.fbx` | One format, including copies normally hidden behind a better format |
-| `size:>1mb` `size:1mb..10mb` | File size |
-| `res:>=2k` `w:512` `h:<256` | Texture pixels. `res` is the longest side |
-| `tris:<500` | Model triangles |
-| `dur:<2s` | Audio length |
-| `age:<30d` | Last changed (`h`, `d`, `w`, `mo`, `y`) |
-
-Pixels, triangles and length come from thumbnailing, so those filters fill in as it works through the library.
-
-### Search by description
-
-**Settings > Smart search** can also find textures and models by what they look like, so `something to sit on` finds chairs that aren't named that. It's off until you press **Download** (about 625 MB, once, from Hugging Face and npm). It then runs [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) on this PC, and nothing about your library leaves it.
-
-These results come after files whose names matched, and `pack:`, `is:` and `-word` still apply to them. Quoted searches stay literal. Sounds are found by name only.
-
-Start a search with `~` to ignore names and rank only by how things look, as in `~old hospital tiles pack:mega`. **Find similar** in the inspector shows what looks most like the selected texture or model, written into the search box as `similar:"path"`.
-
-Each file is looked at once. **Gentle** does that with up to four CPU threads. **Faster** uses the graphics card in short bursts, resting twice as long as it works. **Maximum** runs the graphics card with no rests, or every CPU thread if the card can't run it. All of them stop on battery, and the status bar says when it's happening. **Remove** deletes the model and the index.
-
-The list under the search box completes these: arrows pick a row, Tab or Enter takes it.
-
-## Editing
-
-**Edit** in the inspector opens controls for the selected asset. Edits never touch the library file: the preview and the drag both use a rendered copy, and each asset remembers its edits until the app closes. A badge on the tile shows which assets have some, and grid drags use them too. **Original** flips the preview back to compare.
-
-| Asset | Controls | Leaves as |
-| --- | --- | --- |
-| Audio | Drag across the waveform to pick a section, then fine-tune with its markers. Under Loop, slide the join in the seam view, crossfade it, or let **Find best join** line it up. Under Level, set gain, normalize and fade the ends. Under Compress, set quality, sample rate and channels | Ogg Vorbis |
-| Textures | Palette size, dithering and encoder effort, on top of the size ladder. Flip green to convert a normal map between DirectX and OpenGL | PNG |
-| Models | Every material's roughness, metallic, emissive, normal strength, tint and texture size, or a quick look: Matte, Satin, Gloss, Metal. Under Whole model, move the origin, scale it, and set every texture's size and filtering. Click a map's thumbnail to set its own filter, or to flip a normal map's green | GLB |
-
-Editing a GLB or glTF keeps its nodes, skins and animation. Other model formats leave as one static mesh. Each material shows on a little rendered ball with its maps beside it; hover one to pick it out on the model.
-
-## Keys
-
-Arrows move the selection. Space plays audio from where you last clicked, or the start of the section, and stops back at that point; it always does this while the pointer is over the sound. Shift+Space pauses, Home goes back to the start. Scroll over a waveform to zoom it, and drag with the middle button or Shift-scroll to pan. `/` focuses search and Escape clears it.
-
-## Checking it headlessly
-
-```sh
-cargo test
-target/release/asset-browser --snap out.png --scene model --size 1520x900
-```
-
-Scenes: `textures`, `models`, `audio`, `search`, `small`, `texture`, `tile`, `tile-seams`, `big-texture`, `model`, `sound`, `edit-trim`, `edit-zoom`, `edit-loop`, `edit-level`, `edit-compress`, `edit-texture`, `edit-model`, `edit-whole-model`. Set `AB_FRAME_MS=16` with a `--script` to scroll against the real thumbnail workers at 60 fps.
+MIT

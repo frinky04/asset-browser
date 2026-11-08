@@ -67,3 +67,11 @@ debug = false
 [profile.release]
 codegen-units = 16
 incremental = true
+
+# What dist.ps1 ships: slower to build than release, smaller and faster to run.
+[profile.dist]
+inherits = "release"
+codegen-units = 1
+incremental = false
+lto = "fat"
+strip = true
