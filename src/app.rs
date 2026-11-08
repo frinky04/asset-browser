@@ -528,7 +528,8 @@ impl App {
                 self.run_scene("sound", tx);
                 self.edit.open = true;
                 self.edit.audio_tab = match name { "edit-loop" => AudioTab::Loop, "edit-level" => AudioTab::Level, "edit-compress" => AudioTab::Compress, _ => AudioTab::Trim };
-                let edit = crate::edit::AudioEdit { section: Some((300_000, 1_500_000)), looped: name == "edit-loop", crossfade_ms: 10, quality: 2, ..crate::edit::AudioEdit::default() };
+                let fades = if name == "edit-level" { (1_800, 3_000, -0.6) } else { (0, 0, 0.0) };
+                let edit = crate::edit::AudioEdit { section: Some((300_000, 1_500_000)), looped: name == "edit-loop", crossfade_ms: 10, quality: 2, fade_in_ms: fades.0, fade_out_ms: fades.1, fade_out_shape: fades.2, ..crate::edit::AudioEdit::default() };
                 self.seed_scene_edit(crate::edit::Edit::Audio(edit));
             }
             "edit-texture" => {
@@ -612,7 +613,8 @@ impl App {
             changed = true;
         }
         if matches!(self.preview, Preview::Audio { .. }) && self.track_playback(tx) { changed = true; }
-        let playing = self.audio.is_playing();
+        // A paused sound is still under way, so the button keeps offering Stop.
+        let playing = !self.audio.is_finished();
         if playing != self.showing_playing {
             self.showing_playing = playing;
             changed = true;
@@ -654,11 +656,10 @@ impl App {
     /// Moves the playhead along; true if a zoomed timeline had to page to keep up with it.
     fn track_playback(&mut self, tx: &mut Tx) -> bool {
         let Preview::Audio { seconds, .. } = self.preview else { return false };
-        let position = self.playback_time().min(seconds);
+        let position = self.shown_position(seconds);
         let paged = self.follow_playhead(position);
         if paged { tx.instant(); }
-        self.playhead.set([self.timeline_x(position, seconds), 0.0]);
-        self.clock.set(format!("{} / {}", clock(position), clock(seconds)));
+        self.sync_playhead();
         let opening = self.audio_watch_until.is_some_and(|t| Instant::now() < t);
         if self.audio.is_playing() || opening { tx.wake_after(Duration::from_millis(33)); }
         paged
@@ -928,7 +929,7 @@ impl App {
         self.request_preview(path.clone(), asset.kind);
         if asset.kind == Kind::Audio && self.autoplay && !headless() {
             // An edited sound plays its edit, which isn't ready yet.
-            if !self.defer_autoplay() { self.audio.play(path); }
+            if !self.defer_autoplay() { self.audio.play(path, 0.0); }
             self.watch_audio(tx);
         }
         tx.wake_after(Duration::from_millis(1));
@@ -1063,15 +1064,68 @@ impl App {
     }
 
     pub fn toggle_playback(&mut self, tx: &mut Tx) {
-        let Some(asset) = self.selected.and_then(|i| self.lib.assets.get(i as usize)) else { return };
-        if asset.kind != Kind::Audio { return }
+        if !self.audio_selected() { return }
         if self.audio.is_finished() {
-            let path = self.lib.path(asset);
-            if !self.play_audition(0.0) { self.audio.play(path); }
+            self.play_from_cue(tx);
+        } else {
+            self.audio.stop();
+            self.reveal_time(self.cue_point());
+            self.sync_playhead();
+        }
+    }
+
+    /// Holds playback where it is, or carries on from there.
+    pub fn pause_playback(&mut self, tx: &mut Tx) {
+        if !self.audio_selected() { return }
+        if self.audio.is_finished() {
+            self.play_from_cue(tx);
         } else {
             self.audio.toggle();
+            self.watch_audio(tx);
         }
+    }
+
+    /// Back to the start of the section or sound, forgetting any clicked point.
+    pub fn rewind_playback(&mut self, tx: &mut Tx) {
+        if !self.audio_selected() { return }
+        self.edit.cue = None;
+        let at = self.cue_point();
+        if !self.audio.is_finished() { self.seek_live(at); }
+        self.reveal_time(at);
+        self.sync_playhead();
+        tx.wake_after(Duration::from_millis(33));
+    }
+
+    pub(crate) fn audio_selected(&self) -> bool {
+        self.selected_asset().is_some_and(|a| a.kind == Kind::Audio)
+    }
+
+    fn play_from_cue(&mut self, tx: &mut Tx) {
+        let Some(asset) = self.selected_asset() else { return };
+        let at = self.cue_point();
+        if !self.play_audition_from(at) {
+            self.edit.timeline = None;
+            self.audio.play(self.lib.path(&asset), at);
+        }
+        self.reveal_time(at);
         self.watch_audio(tx);
+    }
+
+    /// Moves a sound that's already going to `at` seconds.
+    fn seek_live(&mut self, at: f32) {
+        if !self.seek_audition(at) { self.audio.seek(at); }
+    }
+
+    /// Puts the playhead and clock where playback is, or at the cue when nothing's playing.
+    pub(crate) fn sync_playhead(&mut self) {
+        let Preview::Audio { seconds, .. } = self.preview else { return };
+        let position = self.shown_position(seconds);
+        self.playhead.set([self.timeline_x(position, seconds), 0.0]);
+        self.clock.set(format!("{} / {}", clock(position), clock(seconds)));
+    }
+
+    fn shown_position(&self, seconds: f32) -> f32 {
+        if self.audio.is_finished() { self.cue_point().min(seconds) } else { self.playback_time().min(seconds) }
     }
 
     fn watch_audio(&mut self, tx: &mut Tx) {
@@ -1081,14 +1135,11 @@ impl App {
 
     pub fn seek_fraction(&mut self, fraction: f32, tx: &mut Tx) {
         let Preview::Audio { seconds, .. } = self.preview else { return };
-        let Some(asset) = self.selected.and_then(|i| self.lib.assets.get(i as usize)) else { return };
         let at = fraction.clamp(0.0, 1.0) * seconds;
-        let path = self.lib.path(asset);
-        if !self.seek_audition(at) {
-            if self.audio.is_finished() { self.audio.play(path); }
-            self.audio.seek(at);
-        }
-        self.playhead.set([self.timeline_x(at, seconds), 0.0]);
+        // A click marks where playback starts. Only sound already going moves there at once.
+        self.edit.cue = Some(at);
+        if !self.audio.is_finished() { self.seek_live(at); }
+        self.sync_playhead();
         tx.wake_after(Duration::from_millis(33));
     }
 

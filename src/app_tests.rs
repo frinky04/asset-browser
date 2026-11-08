@@ -1076,10 +1076,138 @@ fn zooming_works_without_opening_the_editor() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+fn key_press(rt: &mut Runtime<App>, key: Key, shift: bool) {
+    rt.key(KeyEvent { key, mods: rune::Mods { shift, ..Default::default() } });
+    settle(rt);
+}
+
+fn space(rt: &mut Runtime<App>) {
+    key_press(rt, Key::Text(" ".into()), false);
+}
+
+/// The tone in the editor, not autoplaying, with keys wired up and the pointer on the sound.
+fn transport_on_tone(root: &Path) -> Runtime<App> {
+    let mut rt = app_on(root);
+    rt.state.autoplay = false;
+    rt.on_key = Some(ui::on_key);
+    open_editor(&mut rt, "tone.wav");
+    for _ in 0..40 { rt.frame(1.0 / 60.0); }
+    let (x, y) = rt.find("waveform").unwrap();
+    rt.pointer_move(x, y);
+    settle(&mut rt);
+    rt
+}
+
+fn click_waveform_at(rt: &mut Runtime<App>, share: f32) {
+    let box_ = rect(rt, "waveform");
+    let (x, y) = (box_[0] + box_[2] * share, box_[1] + box_[3] * 0.5);
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    settle(rt);
+}
+
+#[test]
+fn space_plays_from_the_cue_and_stops_back_at_it() {
+    let root = edit_fixture();
+    let mut rt = transport_on_tone(&root);
+    assert!(rt.state.audio.is_finished());
+
+    // A click only places the cue. The sound stays quiet.
+    click_waveform_at(&mut rt, 0.5);
+    assert!(rt.state.audio.is_finished(), "clicking doesn't start playback");
+    assert!((rt.state.cue_point() - 1.0).abs() < 0.05, "{}", rt.state.cue_point());
+
+    space(&mut rt);
+    assert!(rt.state.audio.is_playing());
+    space(&mut rt);
+    assert!(rt.state.audio.is_finished(), "Space again stops");
+    assert!((rt.state.cue_point() - 1.0).abs() < 0.05, "and it's still where it started");
+
+    // A finished sound comes back to the cue too.
+    space(&mut rt);
+    rt.state.audio.finish_silently();
+    rt.update(|s, tx| { s.poll(tx); });
+    settle(&mut rt);
+    assert!(rt.state.audio.is_finished());
+    assert!((rt.state.cue_point() - 1.0).abs() < 0.05);
+
+    // Clicking while it plays moves both the sound and the cue, and keeps playing.
+    space(&mut rt);
+    click_waveform_at(&mut rt, 0.25);
+    assert!(rt.state.audio.is_playing());
+    assert!((rt.state.cue_point() - 0.5).abs() < 0.05);
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn shift_space_pauses_and_home_goes_back_to_the_start() {
+    let root = edit_fixture();
+    let mut rt = transport_on_tone(&root);
+    click_waveform_at(&mut rt, 0.5);
+    space(&mut rt);
+
+    key_press(&mut rt, Key::Text(" ".into()), true);
+    assert!(!rt.state.audio.is_playing() && !rt.state.audio.is_finished(), "paused, still under way");
+    key_press(&mut rt, Key::Text(" ".into()), true);
+    assert!(rt.state.audio.is_playing(), "and it carries on");
+
+    // Home forgets the clicked point, without interrupting.
+    key_press(&mut rt, Key::Home, false);
+    assert!(rt.state.audio.is_playing());
+    assert_eq!(rt.state.cue_point(), 0.0);
+
+    // The button does the same as the key.
+    click_waveform_at(&mut rt, 0.5);
+    assert!(rt.state.cue_point() > 0.5);
+    click(&mut rt, "rewind");
+    assert_eq!(rt.state.cue_point(), 0.0);
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_cue_follows_the_section() {
+    let root = edit_fixture();
+    let mut rt = transport_on_tone(&root);
+
+    // A new selection is where playback starts.
+    click_waveform_at(&mut rt, 0.1);
+    drag_across(&mut rt, "waveform", 0.5, 0.75);
+    wait_for_edit(&mut rt);
+    let (start, _, _) = rt.state.audio_section().unwrap();
+    assert!((rt.state.cue_point() - start as f32 / 44_100.0).abs() < 0.001, "{}", rt.state.cue_point());
+
+    // Inside it a click counts, and outside it falls back to the section's start.
+    click_waveform_at(&mut rt, 0.6);
+    assert!(rt.state.cue_point() > start as f32 / 44_100.0 + 0.05);
+    click_waveform_at(&mut rt, 0.9);
+    assert!((rt.state.cue_point() - start as f32 / 44_100.0).abs() < 0.001);
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn stopping_brings_a_zoomed_timeline_back_to_the_cue() {
+    let root = edit_fixture();
+    let mut rt = transport_on_tone(&root);
+    zoom_in(&mut rt, 8);
+    let (x, _) = rt.state.edit.view.unwrap();
+    assert!(x > 10_000, "the view left the start behind: {x}");
+    space(&mut rt);
+    wait_for_edit(&mut rt);
+    let (start, _) = rt.state.edit.view.unwrap();
+    assert!(start < 1_000, "starting at the beginning brings it into view: {start}");
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn space_plays_the_sound_while_the_pointer_is_over_it() {
     let root = edit_fixture();
     let mut rt = app_on(&root);
+    rt.state.autoplay = false;
     open_editor(&mut rt, "tone.wav");
     for _ in 0..40 { rt.frame(1.0 / 60.0); }
     assert!(rt.state.edit.open, "the click left focus on the Edit button");
@@ -1115,6 +1243,88 @@ fn space_plays_the_sound_while_the_pointer_is_over_it() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Drags element `key` by a number of points, pressing at its centre.
+fn drag_by(rt: &mut Runtime<App>, key: &str, dx: f32, dy: f32) {
+    let (x, y) = rt.find(key).unwrap_or_else(|| panic!("no element {key}"));
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    settle(rt);
+    rt.pointer_move(x + dx, y + dy);
+    settle(rt);
+    rt.pointer_up(x + dx, y + dy);
+    settle(rt);
+}
+
+#[test]
+fn fades_are_set_by_dragging_handles_on_the_waveform() {
+    let root = edit_fixture();
+    let mut rt = app_on(&root);
+    rt.state.autoplay = false;
+    open_editor(&mut rt, "tone.wav");
+    for _ in 0..40 { rt.frame(1.0 / 60.0); }
+    let width = rect(&rt, "waveform")[2];
+    let two_seconds_per_width = 2000.0 / width;
+
+    // Both handles are waiting at the top corners, before any fade exists.
+    assert!(rt.find("fade-in-grip").is_some() && rt.find("fade-out-grip").is_some());
+    assert!(rt.find("fade-in-shape").is_none() && rt.find("fade-curves").is_none(), "no curve until there's a fade");
+
+    // Dragging in sets the length, with no effect on the section.
+    let section = rt.state.audio_section();
+    drag_by(&mut rt, "fade-in-grip", 60.0, 0.0);
+    wait_for_edit(&mut rt);
+    let expected = 60.0 * two_seconds_per_width;
+    assert!((rt.state.audio_edit().fade_in_ms as f32 - expected).abs() < 3.0 * two_seconds_per_width, "{} of {expected}", rt.state.audio_edit().fade_in_ms);
+    assert_eq!(rt.state.audio_section(), section);
+    assert!(rt.find("fade-curves").is_some());
+
+    // The out handle goes the other way.
+    drag_by(&mut rt, "fade-out-grip", -80.0, 0.0);
+    wait_for_edit(&mut rt);
+    assert!(rt.state.audio_edit().fade_out_ms > 0);
+
+    // The dot bends the curve: up comes up earlier, and a double click straightens it.
+    drag_by(&mut rt, "fade-in-shape", 0.0, -30.0);
+    wait_for_edit(&mut rt);
+    assert!(rt.state.audio_edit().fade_in_shape < -0.2, "{}", rt.state.audio_edit().fade_in_shape);
+    let (x, y) = rt.find("fade-in-shape").unwrap();
+    rt.pointer_move(x, y);
+    for _ in 0..2 {
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+    }
+    wait_for_edit(&mut rt);
+    assert_eq!(rt.state.audio_edit().fade_in_shape, 0.0);
+
+    // A fade can't run past the other one, however far it's dragged.
+    let out = rt.state.audio_edit().fade_out_ms;
+    drag_by(&mut rt, "fade-in-grip", width * 2.0, 0.0);
+    wait_for_edit(&mut rt);
+    assert!(rt.state.audio_edit().fade_in_ms + out <= 2000, "{} + {out}", rt.state.audio_edit().fade_in_ms);
+
+    // Level shows it, and clears it.
+    click(&mut rt, "audio-tab/Level");
+    click(&mut rt, "clear-Fade out");
+    wait_for_edit(&mut rt);
+    assert_eq!(rt.state.audio_edit().fade_out_ms, 0);
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_loop_has_no_fade_handles() {
+    let root = edit_fixture();
+    let mut rt = app_on(&root);
+    rt.state.autoplay = false;
+    open_editor(&mut rt, "tone.wav");
+    for _ in 0..40 { rt.frame(1.0 / 60.0); }
+    rt.update(|s, _| s.set_looped(true));
+    wait_for_edit(&mut rt);
+    assert!(rt.find("fade-in-grip").is_none());
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn level_fades_and_normalize_reach_the_exported_sound() {
     let root = edit_fixture();
@@ -1126,10 +1336,24 @@ fn level_fades_and_normalize_reach_the_exported_sound() {
 
     click(&mut rt, "audio-tab/Level");
     assert_eq!(rect(&rt, "edit-panel"), panel, "the new tab fits the same panel");
+    let panel_right = panel[0] + panel[2];
+    for key in ["Normalize", "clear-Fade in", "clear-Fade out"] {
+        let control = rect(&rt, key);
+        assert!(control[0] + control[2] <= panel_right, "{key} runs past the panel: {control:?} in {panel:?}");
+    }
+    // At the narrowest the inspector goes, too.
+    rt.update(|s, _| s.resize_inspector(300.0));
+    for _ in 0..40 { rt.frame(1.0 / 60.0); }
+    let narrow = rect(&rt, "edit-panel");
+    let control = rect(&rt, "Normalize");
+    assert!(control[0] + control[2] <= narrow[0] + narrow[2], "{control:?} in {narrow:?}");
+    rt.update(|s, _| s.resize_inspector(372.0));
+    for _ in 0..40 { rt.frame(1.0 / 60.0); }
+
     click(&mut rt, "Normalize");
     wait_for_edit(&mut rt);
     assert!((rt.state.edit.peak_db.unwrap() - crate::edit::sound::NORMALIZE_PEAK_DB).abs() < 0.05, "{:?}", rt.state.edit.peak_db);
-    click(&mut rt, "fade-out/200");
+    rt.update(|s, _| s.set_audio_edit(crate::edit::AudioEdit { fade_out_ms: 200, ..s.audio_edit() }));
     wait_for_edit(&mut rt);
     assert_eq!(rt.state.audio_edit().fade_out_ms, 200);
 

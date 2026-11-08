@@ -4,7 +4,7 @@
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -15,10 +15,15 @@ use rodio::{Decoder, OutputStream, Sink, Source};
 use crate::edit::Pcm;
 
 enum Command {
-    Play(PathBuf),
+    /// A file on disk, starting `at` seconds in.
+    Play { path: PathBuf, at: f32 },
     /// Audio already in memory, starting `at` seconds in.
     Clip { pcm: Arc<Pcm>, looped: bool, at: f32 },
 }
+
+const STOPPED: u8 = 0;
+const PLAYING: u8 = 1;
+const PAUSED: u8 = 2;
 
 /// Tests and headless runs never open a sound device, so they can't make a noise.
 fn silent() -> bool {
@@ -72,6 +77,8 @@ pub struct Audio {
     sink: Arc<Mutex<Option<Sink>>>,
     /// The output level, as `f32` bits.
     volume: Arc<AtomicU32>,
+    /// What a run with no sound device tracks in place of a real sink.
+    pretend: Arc<AtomicU8>,
 }
 
 impl Audio {
@@ -90,10 +97,11 @@ impl Audio {
                 let Ok(next) = Sink::try_new(handle) else { continue };
                 next.set_volume(f32::from_bits(level.load(Ordering::Relaxed)));
                 match command {
-                    Command::Play(path) => {
+                    Command::Play { path, at } => {
                         let opened = File::open(&path).ok().and_then(|f| Decoder::new(BufReader::new(f)).ok());
                         let Some(source) = opened else { continue };
                         next.append(source);
+                        if at > 0.0 { let _ = next.try_seek(Duration::from_secs_f32(at)); }
                     }
                     Command::Clip { pcm, looped, at } => {
                         let start = Clip::sample_index(&pcm, at);
@@ -103,7 +111,12 @@ impl Audio {
                 if let Ok(mut slot) = shared.lock() { *slot = Some(next); }
             }
         });
-        Audio { commands, sink, volume }
+        Audio { commands, sink, volume, pretend: Arc::new(AtomicU8::new(STOPPED)) }
+    }
+
+    /// In a silent run, what playback would be doing.
+    fn pretending(&self) -> Option<u8> {
+        silent().then(|| self.pretend.load(Ordering::Relaxed))
     }
 
     pub fn set_volume(&self, volume: f32) {
@@ -111,19 +124,29 @@ impl Audio {
         self.with(|s| s.set_volume(volume));
     }
 
-    pub fn play(&self, path: PathBuf) {
+    /// Plays a file from `at` seconds, replacing whatever is playing.
+    pub fn play(&self, path: PathBuf, at: f32) {
         self.stop();
-        let _ = self.commands.send(Command::Play(path));
+        self.pretend.store(PLAYING, Ordering::Relaxed);
+        let _ = self.commands.send(Command::Play { path, at });
     }
 
     /// Plays `pcm` from `at` seconds, replacing whatever is playing.
     pub fn play_clip(&self, pcm: Arc<Pcm>, looped: bool, at: f32) {
         self.stop();
+        self.pretend.store(PLAYING, Ordering::Relaxed);
         let _ = self.commands.send(Command::Clip { pcm, looped, at });
     }
 
     pub fn stop(&self) {
+        self.pretend.store(STOPPED, Ordering::Relaxed);
         if let Ok(mut slot) = self.sink.lock() { *slot = None; }
+    }
+
+    /// Makes a silent run's sound reach its end.
+    #[cfg(test)]
+    pub fn finish_silently(&self) {
+        self.pretend.store(STOPPED, Ordering::Relaxed);
     }
 
     fn with<T>(&self, f: impl FnOnce(&Sink) -> T) -> Option<T> {
@@ -132,6 +155,11 @@ impl Audio {
 
     /// Pauses or resumes; true when it's now playing.
     pub fn toggle(&self) -> bool {
+        if let Some(state) = self.pretending() {
+            let next = if state == PLAYING { PAUSED } else { PLAYING };
+            self.pretend.store(next, Ordering::Relaxed);
+            return next == PLAYING;
+        }
         self.with(|s| {
             if s.is_paused() { s.play(); true } else { s.pause(); false }
         }).unwrap_or(false)
@@ -148,11 +176,13 @@ impl Audio {
     }
 
     pub fn is_playing(&self) -> bool {
+        if let Some(state) = self.pretending() { return state == PLAYING }
         self.with(|s| !s.is_paused() && !s.empty()).unwrap_or(false)
     }
 
     /// Whether a sound finished (or nothing has been asked to play).
     pub fn is_finished(&self) -> bool {
+        if let Some(state) = self.pretending() { return state == STOPPED }
         self.with(|s| s.empty()).unwrap_or(true)
     }
 }
@@ -166,6 +196,11 @@ mod tests {
         let audio = Audio::new();
         audio.play_clip(Arc::new(Pcm { samples: vec![0.0; 4_410], channels: 1, rate: 44_100 }), true, 0.0);
         std::thread::sleep(Duration::from_millis(50));
-        assert!(!audio.is_playing() && audio.is_finished(), "nothing was opened to play on");
+        assert!(audio.with(|_| ()).is_none(), "nothing was opened to play on");
+        assert!(audio.is_playing(), "but the transport behaves as if it were");
+        audio.toggle();
+        assert!(!audio.is_playing() && !audio.is_finished(), "paused");
+        audio.stop();
+        assert!(audio.is_finished());
     }
 }

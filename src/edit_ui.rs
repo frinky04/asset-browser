@@ -12,7 +12,7 @@ use crate::edit::mesh::{MaterialInfo, ModelDoc, Origin, Slot, TextureFilter};
 use crate::edit::{Decoded, Effort, ImageEdit, MaterialEdit, ModelEdit};
 use crate::editor::{AudioTab, Marker, ModelTab};
 use crate::library::{Asset, Kind};
-use crate::ui::{LABEL, PLAY, REFRESH, SMALL, T, WELL_RADIUS, color, dim, kit, label, layer, outlined, plain, scroll_style, segments, segments_inset, toggle};
+use crate::ui::{CLOSE, LABEL, PLAY, REFRESH, SMALL, T, WELL_RADIUS, color, dim, kit, label, layer, outlined, plain, scroll_style, segments, segments_inset, toggle};
 
 const NAME_W: f32 = 74.0;
 const VALUE_W: f32 = 42.0;
@@ -160,16 +160,17 @@ fn level_tab(s: &App) -> El {
                 s.set_audio_edit(edit);
             }).help("Brings the loudest moment to -1 dB")))
         .child(dim(col().w_full().gap(6.0)
-            .child(labelled("Fade in ms", segments_inset("fade-in", fade_lengths(), edit.fade_in_ms, |s, v, _| {
-                let mut edit = s.audio_edit();
-                edit.fade_in_ms = v;
-                s.set_audio_edit(edit);
-            }, 2.0).w_full()))
-            .child(labelled("Fade out ms", segments_inset("fade-out", fade_lengths(), edit.fade_out_ms, |s, v, _| {
-                let mut edit = s.audio_edit();
-                edit.fade_out_ms = v;
-                s.set_audio_edit(edit);
-            }, 2.0).w_full())), !edit.looped))
+            .child(fade_row("Fade in", edit.fade_in_ms, Marker::Start))
+            .child(fade_row("Fade out", edit.fade_out_ms, Marker::End)), !edit.looped))
+}
+
+/// A fade's length and a way to remove it. The handles on the waveform are what set it.
+fn fade_row(name: &str, ms: u32, end: Marker) -> El {
+    let (shown, tone) = if ms == 0 { ("Drag its handle above".to_owned(), T.faint) } else { (format!("{ms} ms"), T.text) };
+    row().w_full().h(30.0).gap(8.0).items_center()
+        .child(field_name(name))
+        .child(el().grow(1.0).min_w(0.0).child(text(shown).font(LABEL).color(tone).truncate().w_full()))
+        .child(dim(outlined("Clear", "Clear", false, &CLOSE, move |s, _| s.clear_fade(end)).key(format!("clear-{name}")), ms > 0))
 }
 
 fn compress_tab(s: &App) -> El {
@@ -557,6 +558,9 @@ pub fn markers(s: &App, wave: El) -> El {
     let mut wave = wave
         .child(el().key("shade-start").pin(Some(0.0), Some(0.0), None, Some(0.0)).w(left.clamp(0.0, width)).fill(shade).inert())
         .child(el().key("shade-end").pin(Some(right.clamp(0.0, width)), Some(0.0), Some(0.0), Some(0.0)).fill(shade).inert());
+    if s.has_fades() {
+        wave = wave.child(el().key("fade-curves").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).pixels(&s.edit.fade_wave).inert());
+    }
     if s.edit.view.is_some() {
         // Where the visible part sits in the whole sound. Dragging it pans.
         let share = |frame: u64| frame as f32 / frames as f32;
@@ -573,10 +577,49 @@ pub fn markers(s: &App, wave: El) -> El {
                     // A marker stays under the pointer, rather than springing after it.
                     tx.instant();
                 })
-                .child(el().w(2.0).h_full().fill(T.accent).child(el().size(10.0, 12.0).radius(3.0).fill(T.accent).absolute(-4.0, 0.0)))
+                // The tab sits at the bottom, leaving the top corners to the fade handles.
+                .child(el().w(2.0).h_full().fill(T.accent).child(el().pin(Some(-4.0), None, None, Some(8.0)).size(10.0, 12.0).radius(3.0).fill(T.accent)))
         };
         if on_view(left) { wave = wave.child(handle("mark-start", "Section start", left, Marker::Start)); }
         if on_view(right) { wave = wave.child(handle("mark-end", "Section end", right, Marker::End)); }
+        wave = fade_handles(s, wave, left, right, &px);
     }
+    wave
+}
+
+/// The grips that set each fade: a corner handle for its length, and a dot on its curve.
+fn fade_handles(s: &App, mut wave: El, left: f32, right: f32, px: &dyn Fn(u64) -> f32) -> El {
+    const GRIP: f32 = 16.0;
+    /// With no fade yet, the handle waits just inside the section, clear of its marker.
+    const AT_REST: f32 = 9.0;
+    let edit = s.audio_edit();
+    let (Some((rate, _)), Some((start, end, _))) = (s.source_format(), s.audio_section()) else { return wave };
+    if edit.looped { return wave }
+    let (width, height) = (s.stage_size[0], s.stage_size[1]);
+    let frames = |ms: u32| u64::from(ms) * u64::from(rate) / 1000;
+    let in_x = px(start + frames(edit.fade_in_ms));
+    let out_x = px(end.saturating_sub(frames(edit.fade_out_ms)));
+    let corner = |key: &str, name: &str, at: f32, marker: Marker| {
+        el().key(key.to_owned()).role("slider").label(name.to_owned()).help("Drag to set this fade".to_owned()).absolute(at - GRIP * 0.5, 0.0).size(GRIP, GRIP).center().cursor(Cursor::ResizeColumn)
+            .on_drag(move |s: &mut App, drag, tx| s.drag_fade_length(marker, drag, tx))
+            .child(el().size(11.0, 11.0).radius(3.0).fill(T.accent).border(1.5, T.well))
+    };
+    let shown = |at: f32| (-GRIP..=width + GRIP).contains(&at);
+    let in_handle = in_x.max(left + AT_REST);
+    let out_handle = out_x.min(right - AT_REST);
+    if shown(in_handle) { wave = wave.child(corner("fade-in-grip", "Fade in length", in_handle, Marker::Start)); }
+    if shown(out_handle) { wave = wave.child(corner("fade-out-grip", "Fade out length", out_handle, Marker::End)); }
+
+    // Only worth offering once the curve is long enough to see it bend.
+    let dot = |key: &str, name: &str, x: f32, shape: f32, marker: Marker| {
+        let y = height * 0.5 * (1.0 - crate::edit::sound::fade_gain(0.5, shape));
+        el().key(key.to_owned()).role("slider").label(name.to_owned()).help("Drag up or down to bend the curve. Double-click to straighten.".to_owned()).absolute(x - GRIP * 0.5, y - GRIP * 0.5).size(GRIP, GRIP).center().cursor(Cursor::ResizeRow)
+            .on_drag(move |s: &mut App, drag, tx| s.drag_fade_shape(marker, drag, tx))
+            .on_double_press(move |s: &mut App| s.straighten_fade(marker))
+            .child(el().size(9.0, 9.0).radius(4.5).fill(T.well).border(1.5, T.accent))
+    };
+    const ROOM_FOR_DOT: f32 = 34.0;
+    if in_x - left > ROOM_FOR_DOT { wave = wave.child(dot("fade-in-shape", "Fade in curve", (left + in_x) * 0.5, edit.fade_in_shape, Marker::Start)); }
+    if right - out_x > ROOM_FOR_DOT { wave = wave.child(dot("fade-out-shape", "Fade out curve", (right + out_x) * 0.5, edit.fade_out_shape, Marker::End)); }
     wave
 }

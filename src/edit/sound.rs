@@ -39,6 +39,68 @@ fn apply_level(samples: &mut [f32], edit: &AudioEdit) {
     }
 }
 
+/// How loud a fade is `at` of the way through (0 silent, 1 full), bent by `shape`. Zero is an
+/// equal-power curve; the ends stay at silence and full whatever the bend.
+pub fn fade_gain(at: f32, shape: f32) -> f32 {
+    (at.clamp(0.0, 1.0) * FRAC_PI_2).sin().powf(4f32.powf(shape))
+}
+
+/// The fades laid over a timeline showing frames `view`: what they cut away shaded, and the
+/// curve itself along the edge of what's left. Mirrored about the middle, like the waveform.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_fades(view: (u64, u64), section: (u64, u64), rate: u32, edit: &AudioEdit, width: u32, height: u32, shade: [u8; 3], line: [u8; 3]) -> Vec<u8> {
+    let (w, h) = (width as usize, height as usize);
+    let mut out = vec![0u8; w * h * 4];
+    if edit.looped { return out }
+    let length = section.1.saturating_sub(section.0);
+    let frames_of = |ms: u32| (u64::from(ms) * u64::from(rate) / 1000).min(length);
+    let (fade_in, fade_out) = (frames_of(edit.fade_in_ms), frames_of(edit.fade_out_ms));
+    let span = view.1.saturating_sub(view.0).max(1) as f64;
+    let mid = (height as f32 - 1.0) * 0.5;
+    let gain_at = |x: usize| {
+        let frame = view.0 as f64 + x as f64 / w as f64 * span;
+        let (start, end) = (section.0 as f64, section.1 as f64);
+        if frame < start || frame >= end { return None }
+        let mut gain = 1.0f32;
+        let mut fading = false;
+        if fade_in > 0 && frame < start + fade_in as f64 {
+            gain *= fade_gain(((frame - start) / fade_in as f64) as f32, edit.fade_in_shape);
+            fading = true;
+        }
+        if fade_out > 0 && frame >= end - fade_out as f64 {
+            gain *= fade_gain(((end - frame) / fade_out as f64) as f32, edit.fade_out_shape);
+            fading = true;
+        }
+        fading.then_some(gain)
+    };
+    let mut paint = |x: usize, y: usize, color: [u8; 3], alpha: u8| {
+        let at = (y * w + x) * 4;
+        out[at..at + 3].copy_from_slice(&color);
+        out[at + 3] = alpha;
+    };
+    let mut previous: Option<f32> = None;
+    for x in 0..w {
+        let Some(gain) = gain_at(x) else {
+            previous = None;
+            continue;
+        };
+        let top = mid * (1.0 - gain);
+        for y in 0..(top.floor() as usize).min(h) {
+            paint(x, y, shade, 150);
+            paint(x, h - 1 - y, shade, 150);
+        }
+        // Joined to the last column, so a steep part of the curve has no gaps.
+        let from = previous.unwrap_or(top);
+        let (low, high) = (from.min(top), from.max(top));
+        for y in (low - 1.0).floor().max(0.0) as usize..=((high + 1.0).ceil() as usize).min(h - 1) {
+            paint(x, y, line, 255);
+            paint(x, h - 1 - y, line, 255);
+        }
+        previous = Some(top);
+    }
+    out
+}
+
 fn apply_fades(pcm: &mut Pcm, edit: &AudioEdit) {
     if edit.looped { return }
     let channels = usize::from(pcm.channels.max(1));
@@ -46,11 +108,11 @@ fn apply_fades(pcm: &mut Pcm, edit: &AudioEdit) {
     let length = |ms: u32| (ms as usize * pcm.rate as usize / 1000).min(frames);
     let (fade_in, fade_out) = (length(edit.fade_in_ms), length(edit.fade_out_ms));
     for i in 0..fade_in {
-        let (gain, _) = fade((i as f32 + 0.5) / fade_in as f32);
+        let gain = fade_gain((i as f32 + 0.5) / fade_in as f32, edit.fade_in_shape);
         for sample in &mut pcm.samples[i * channels..(i + 1) * channels] { *sample *= gain; }
     }
     for i in 0..fade_out {
-        let (gain, _) = fade((i as f32 + 0.5) / fade_out as f32);
+        let gain = fade_gain((i as f32 + 0.5) / fade_out as f32, edit.fade_out_shape);
         let frame = frames - 1 - i;
         for sample in &mut pcm.samples[frame * channels..(frame + 1) * channels] { *sample *= gain; }
     }
@@ -96,6 +158,9 @@ pub struct AudioEdit {
     /// Fades at the section's ends. A loop has no ends, so it ignores these.
     pub fade_in_ms: u32,
     pub fade_out_ms: u32,
+    /// The bend of each fade, -1..=1: below zero it comes up early, above it comes up late.
+    pub fade_in_shape: f32,
+    pub fade_out_shape: f32,
     /// Raises or lowers the level, after any normalizing.
     pub gain_db: f32,
     /// Brings the section's peak to `NORMALIZE_PEAK_DB`.
@@ -104,7 +169,7 @@ pub struct AudioEdit {
 
 impl Default for AudioEdit {
     fn default() -> Self {
-        AudioEdit { section: None, looped: false, crossfade_ms: 0, quality: DEFAULT_QUALITY, rate: None, mono: false, fade_in_ms: 0, fade_out_ms: 0, gain_db: 0.0, normalize: false }
+        AudioEdit { section: None, looped: false, crossfade_ms: 0, quality: DEFAULT_QUALITY, rate: None, mono: false, fade_in_ms: 0, fade_out_ms: 0, fade_in_shape: 0.0, fade_out_shape: 0.0, gain_db: 0.0, normalize: false }
     }
 }
 
@@ -473,6 +538,36 @@ mod tests {
         assert!(out.samples[0] < 0.02 && *out.samples.last().unwrap() < 0.02, "{} {}", out.samples[0], out.samples[999]);
         assert_eq!(out.samples[500], 1.0);
         assert!(out.samples[50] > 0.5 && out.samples[50] < 0.9, "{}", out.samples[50]);
+    }
+
+    #[test]
+    fn a_fades_shape_bends_the_middle_but_never_the_ends() {
+        assert!((fade_gain(0.5, 0.0) - 0.7071).abs() < 0.001, "zero is equal power");
+        assert!(fade_gain(0.5, -1.0) > 0.9, "comes up early");
+        assert!(fade_gain(0.5, 1.0) < 0.3, "comes up late");
+        for shape in [-1.0, -0.3, 0.0, 0.6, 1.0] {
+            assert_eq!(fade_gain(0.0, shape), 0.0);
+            assert!((fade_gain(1.0, shape) - 1.0).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn a_bent_fade_changes_the_audio_it_leaves() {
+        let edit = |shape| AudioEdit { fade_in_ms: 100, fade_in_shape: shape, ..AudioEdit::default() };
+        let (early, late) = (cut(&flat(1000, 1.0), &edit(-1.0)), cut(&flat(1000, 1.0), &edit(1.0)));
+        assert!(early.samples[50] > late.samples[50] + 0.4, "{} {}", early.samples[50], late.samples[50]);
+    }
+
+    #[test]
+    fn the_fade_picture_shades_outside_the_curve_and_only_inside_the_fade() {
+        let edit = AudioEdit { fade_in_ms: 500, ..AudioEdit::default() };
+        let px = draw_fades((0, 1000), (0, 1000), 1000, &edit, 100, 41, [1, 2, 3], [9, 9, 9]);
+        let alpha = |x: usize, y: usize| px[(y * 100 + x) * 4 + 3];
+        assert_eq!(alpha(2, 0), 150, "the very start is cut away at the top");
+        assert_eq!(alpha(2, 40), 150, "and the bottom");
+        assert_eq!(alpha(80, 0), 0, "past the fade nothing's drawn");
+        let looped = AudioEdit { looped: true, ..edit };
+        assert!(draw_fades((0, 1000), (0, 1000), 1000, &looped, 100, 41, [1, 2, 3], [9, 9, 9]).iter().all(|b| *b == 0));
     }
 
     #[test]

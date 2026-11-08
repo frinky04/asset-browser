@@ -34,6 +34,13 @@ const TIMELINE_ZOOM_SPEED: f32 = 0.006;
 const VIEW_EASE: f64 = 16.0;
 /// Points the pointer travels before a press on the waveform becomes a drag.
 const REGION_TRAVEL: f32 = 3.0;
+/// The picture of the fade curves, scaled over the waveform.
+const FADE_W: u32 = 720;
+const FADE_H: u32 = 360;
+/// How much a fade bends per point the dot is dragged.
+const FADE_SHAPE_SPEED: f32 = 0.012;
+/// Near the middle a fade settles straight, so it's easy to get back there.
+const FADE_SHAPE_DETENT: f32 = 0.06;
 /// How far before a loop's end "hear the seam" starts.
 const SEAM_LEAD_SECONDS: f32 = 2.0;
 
@@ -111,6 +118,8 @@ pub struct Editor {
     /// The edited section's loudest moment, in decibels of full scale.
     pub peak_db: Option<f32>,
     peak_index: Option<Arc<sound::PeakIndex>>,
+    /// Where a click on the timeline asked playback to start, in the source's seconds.
+    pub cue: Option<f32>,
     /// The frames the timeline shows, when zoomed in; `None` shows the whole sound.
     pub view: Option<(u64, u64)>,
     /// The edges the timeline is easing toward, and where they are on the way.
@@ -125,6 +134,8 @@ pub struct Editor {
     pending_zoom: Option<(f32, f32)>,
     /// The timeline drawn for `view`.
     pub timeline_wave: Pixels,
+    /// The fade curves, drawn to lie over the timeline.
+    pub fade_wave: Pixels,
     /// Where a drag across the waveform began, once it has moved far enough to be one.
     region_anchor: u64,
     region_active: bool,
@@ -190,6 +201,7 @@ impl Default for Editor {
             scale_text: TextEdit::new("1"),
             peak_db: None,
             peak_index: None,
+            cue: None,
             view: None,
             view_goal: None,
             view_now: (0.0, 0.0),
@@ -198,6 +210,7 @@ impl Default for Editor {
             timeline_wanted: false,
             pending_zoom: None,
             timeline_wave: Pixels::new(),
+            fade_wave: Pixels::new(),
             region_anchor: 0,
             region_active: false,
             playhead_was_in_view: false,
@@ -413,6 +426,7 @@ impl App {
         self.edit.expanded = None;
         self.edit.folding = None;
         self.edit.peak_index = None;
+        self.edit.cue = None;
         self.edit.view = None;
         self.edit.view_goal = None;
         self.edit.timeline_wanted = false;
@@ -475,6 +489,7 @@ impl App {
     pub(crate) fn edit_changed(&mut self) {
         let Some(asset) = self.selected_asset() else { return };
         self.redraw_seam();
+        self.redraw_fades();
         let Some(decoded) = self.edit.decoded(asset.key).cloned() else { return };
         // The last size stays up while the next one renders, so the readout doesn't blink.
         self.edit.coded = None;
@@ -850,7 +865,120 @@ impl App {
         let mut edit = self.audio_edit();
         edit.section = (start > 0 || end < frames).then_some((start, end));
         self.store_recipe(Edit::Audio(edit));
+        // A new section is what you'll want to hear next.
+        self.edit.cue = None;
+        self.sync_playhead();
+        self.redraw_fades();
         if commit { self.edit_changed(); } else { self.redraw_seam(); }
+    }
+
+    /// Redraws the fade curves that lie over the waveform.
+    pub(crate) fn redraw_fades(&mut self) {
+        let (Some((start, end, frames)), Some((view_start, view_end, _)), Some((rate, _))) = (self.audio_section(), self.audio_view(), self.source_format()) else { return };
+        if frames == 0 { return }
+        let dark = self.resolved_dark.get();
+        let (shade, line) = if dark { ([27, 27, 27], [242, 242, 242]) } else { ([237, 237, 239], [22, 22, 24]) };
+        let px = sound::draw_fades((view_start, view_end), (start, end), rate, &self.audio_edit(), FADE_W, FADE_H, shade, line);
+        self.edit.fade_wave.set(FADE_W, FADE_H, px);
+    }
+
+    /// Whether there's a fade to draw over the waveform.
+    pub fn has_fades(&self) -> bool {
+        let edit = self.audio_edit();
+        !edit.looped && (edit.fade_in_ms > 0 || edit.fade_out_ms > 0)
+    }
+
+    /// Changes the audio edit from a handle; `commit` is false until the handle is let go.
+    fn adjust_audio(&mut self, commit: bool, change: impl FnOnce(&mut AudioEdit)) {
+        let mut edit = self.audio_edit();
+        change(&mut edit);
+        self.store_recipe(Edit::Audio(edit));
+        self.redraw_fades();
+        if commit { self.edit_changed(); }
+    }
+
+    /// Dragging a fade's corner handle along the timeline sets how long it is.
+    pub fn drag_fade_length(&mut self, end: Marker, drag: &mut rune::Drag, tx: &mut Tx) {
+        let edit = self.audio_edit();
+        let (Some((start, stop, _)), Some((view_start, view_end, _)), Some((rate, _))) = (self.audio_section(), self.audio_view(), self.source_format()) else { return };
+        let (current, other, toward) = match end {
+            Marker::Start => (edit.fade_in_ms, edit.fade_out_ms, 1.0),
+            Marker::End => (edit.fade_out_ms, edit.fade_in_ms, -1.0),
+        };
+        if drag.phase == rune::Phase::Down {
+            drag.data = current as f32;
+            return;
+        }
+        let ms_per_point = (view_end - view_start) as f32 / self.stage_size[0].max(1.0) / rate.max(1) as f32 * 1000.0;
+        let room = (((stop - start) * 1000 / u64::from(rate.max(1))) as u32).saturating_sub(other);
+        let ms = (drag.data + toward * drag.dx * ms_per_point).round().clamp(0.0, room as f32) as u32;
+        self.adjust_audio(drag.phase == rune::Phase::Up, |edit| match end {
+            Marker::Start => {
+                edit.fade_in_ms = ms;
+                if ms == 0 { edit.fade_in_shape = 0.0; }
+            }
+            Marker::End => {
+                edit.fade_out_ms = ms;
+                if ms == 0 { edit.fade_out_shape = 0.0; }
+            }
+        });
+        tx.instant();
+    }
+
+    /// Dragging the dot on a fade's curve up or down bends it.
+    pub fn drag_fade_shape(&mut self, end: Marker, drag: &mut rune::Drag, tx: &mut Tx) {
+        let edit = self.audio_edit();
+        if drag.phase == rune::Phase::Down {
+            drag.data = if end == Marker::Start { edit.fade_in_shape } else { edit.fade_out_shape };
+            return;
+        }
+        let shape = (drag.data + drag.dy * FADE_SHAPE_SPEED).clamp(-1.0, 1.0);
+        let shape = if shape.abs() < FADE_SHAPE_DETENT { 0.0 } else { shape };
+        self.adjust_audio(drag.phase == rune::Phase::Up, |edit| match end {
+            Marker::Start => edit.fade_in_shape = shape,
+            Marker::End => edit.fade_out_shape = shape,
+        });
+        tx.instant();
+    }
+
+    /// Takes a fade away, or straightens its curve.
+    pub fn clear_fade(&mut self, end: Marker) {
+        self.adjust_audio(true, |edit| match end {
+            Marker::Start => (edit.fade_in_ms, edit.fade_in_shape) = (0, 0.0),
+            Marker::End => (edit.fade_out_ms, edit.fade_out_shape) = (0, 0.0),
+        });
+    }
+
+    pub fn straighten_fade(&mut self, end: Marker) {
+        self.adjust_audio(true, |edit| match end {
+            Marker::Start => edit.fade_in_shape = 0.0,
+            Marker::End => edit.fade_out_shape = 0.0,
+        });
+    }
+
+    /// Where playback starts: the clicked point, if it's inside what's kept, or else the start
+    /// of the section or sound. In the source's own seconds.
+    pub(crate) fn cue_point(&self) -> f32 {
+        let Some(pcm) = self.audio_source() else { return self.edit.cue.unwrap_or(0.0) };
+        let (start, end) = self.audio_edit().bounds(pcm.frames());
+        let rate = pcm.rate.max(1) as f32;
+        let (start, end) = (start as f32 / rate, end as f32 / rate);
+        self.edit.cue.filter(|at| (start..end).contains(at)).unwrap_or(start)
+    }
+
+    /// Plays the edit from `at` in the source's own seconds; false if there's nothing to play yet.
+    pub(crate) fn play_audition_from(&mut self, at: f32) -> bool {
+        let Some((_, timeline)) = self.audition() else { return false };
+        self.play_audition(at - timeline.start)
+    }
+
+    /// Brings `at` seconds onto a zoomed timeline, if it's off it.
+    pub(crate) fn reveal_time(&mut self, at: f32) {
+        let (Some((start, end)), Some((rate, _))) = (self.edit.view, self.source_format()) else { return };
+        let frame = f64::from(at) * f64::from(rate);
+        if (start as f64..end as f64).contains(&frame) { return }
+        let span = (end - start) as f64;
+        self.aim_view(frame - span * 0.1, span);
     }
 
     /// The frames on the timeline, and the sound's length. The whole sound unless zoomed.
@@ -948,6 +1076,7 @@ impl App {
         let (Some(pcm), Some(index)) = (self.audio_source(), self.edit.peak_index.clone()) else { return };
         let px = sound::draw_timeline(&pcm, &index, start, end, WAVE_W, WAVE_H, self.wave_color());
         self.edit.timeline_wave.set(WAVE_W, WAVE_H, px);
+        self.redraw_fades();
     }
 
     /// A wheel over the timeline: up and down zoom about the pointer, sideways pans.

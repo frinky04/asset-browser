@@ -172,7 +172,8 @@ const CUBE: Icon = Icon { name: "ab-cube", view: 16.0, body: r#"<path d="M8 1.8l
 const SOUND: Icon = Icon { name: "ab-sound", view: 16.0, body: r#"<path d="M2.5 6.5v3M5.25 4v8M8 2v12M10.75 4.5v7M13.5 6.5v3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"# };
 const GRID: Icon = Icon { name: "ab-grid", view: 16.0, body: r#"<rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1" stroke="currentColor" stroke-width="1.3" fill="none"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1" stroke="currentColor" stroke-width="1.3" fill="none"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1" stroke="currentColor" stroke-width="1.3" fill="none"/><rect x="9" y="9" width="4.5" height="4.5" rx="1" stroke="currentColor" stroke-width="1.3" fill="none"/>"# };
 pub(crate) const PLAY: Icon = Icon { name: "ab-play", view: 16.0, body: r#"<path d="M5 3.2v9.6L13 8 5 3.2z" fill="currentColor"/>"# };
-const PAUSE: Icon = Icon { name: "ab-pause", view: 16.0, body: r#"<path d="M4.5 3h2.5v10H4.5zM9 3h2.5v10H9z" fill="currentColor"/>"# };
+const STOP: Icon = Icon { name: "ab-stop", view: 16.0, body: r#"<rect x="3.5" y="3.5" width="9" height="9" rx="1.5" fill="currentColor"/>"# };
+const SKIP_BACK: Icon = Icon { name: "ab-skip-back", view: 16.0, body: r#"<path d="M12.5 3.4v9.2L5.6 8l6.9-4.6z" fill="currentColor"/><path d="M3.6 3.5v9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>"# };
 pub(crate) const REFRESH: Icon = Icon { name: "ab-refresh", view: 16.0, body: r#"<path d="M13.2 7A5.3 5.3 0 003.4 5.2M2.8 9a5.3 5.3 0 009.8 1.8M3.2 2.6v2.9h2.9M12.8 13.4v-2.9H9.9" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>"# };
 pub(crate) const TRASH: Icon = Icon { name: "ab-trash", view: 16.0, body: r#"<path d="M2.8 4.3h10.4M6.2 4.1V2.9h3.6v1.2M4 4.5l.6 8.2c0 .5.5.9 1 .9h4.8c.5 0 1-.4 1-.9l.6-8.2" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>"# };
 pub(crate) const CLOSE: Icon = Icon { name: "ab-close", view: 16.0, body: r#"<path d="M3.8 3.8l8.4 8.4M12.2 3.8l-8.4 8.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>"# };
@@ -206,7 +207,8 @@ fn swap(off: El, on: El, showing: bool) -> El {
 /// One of several things sharing a grid cell, whose size is the largest of them: swapping which
 /// one shows fades, and can't move anything around the cell.
 pub(crate) fn layer(e: El, showing: bool) -> El {
-    let e = e.grid_cell(0).opacity(if showing { 1.0 } else { 0.0 }).motion(motion::SNAPPY);
+    // Allowed to be narrower than its contents would like, so one long line can't widen the cell.
+    let e = e.grid_cell(0).min_w(0.0).opacity(if showing { 1.0 } else { 0.0 }).motion(motion::SNAPPY);
     if showing { e } else { e.inert() }
 }
 
@@ -876,11 +878,18 @@ fn pane(s: &App, id: u32, asset: &Asset) -> Pane {
                 hints
             });
             let dock = row().key("tools").w_full().gap(10.0).items_center()
-                .child(el().key("play").role("button").label(if playing { "Pause" } else { "Play" }).focusable(true).size(30.0, 30.0).radius(15.0).center().fill(T.accent).press_scale(0.9).cursor(Cursor::Pointer)
-                    .on_press_tx(|s: &mut App, tx| { s.toggle_playback(tx); tx.blur(); })
-                    .child(swap(icon(&PLAY, 14.0).color(T.on_accent), icon(&PAUSE, 14.0).color(T.on_accent), playing)))
-                .child(text("0:00.0 / 0:00.0").live_text(&s.clock).font(LABEL).color(T.muted).grow(1.0))
-                .child(toggle("Play on select", s.autoplay, |s, tx| { s.autoplay = !s.autoplay; tx.blur(); }));
+                .child(el().key("play").role("button").label(if playing { "Stop" } else { "Play" }).help("Play or stop (Space). Shift pauses.").focusable(true).size(30.0, 30.0).radius(15.0).center().fill(T.accent).press_scale(0.9).cursor(Cursor::Pointer)
+                    .on_press_tx(|s: &mut App, tx| {
+                        if tx.mods().shift { s.pause_playback(tx); } else { s.toggle_playback(tx); }
+                        tx.blur();
+                    })
+                    .child(swap(icon(&PLAY, 14.0).color(T.on_accent), icon(&STOP, 14.0).color(T.on_accent), playing)))
+                .child(el().key("rewind").role("button").label("Back to start").help("Back to start (Home)").focusable(true).size(26.0, 26.0).radius(CONTROL_RADIUS).center()
+                    .hover(T.hover).press(T.press).press_scale(0.92).cursor(Cursor::Pointer)
+                    .on_press_tx(|s: &mut App, tx| { s.rewind_playback(tx); tx.blur(); })
+                    .child(icon(&SKIP_BACK, 14.0).color(T.muted)))
+                .child(el().grow(1.0).min_w(0.0).child(text("0:00.0 / 0:00.0").live_text(&s.clock).font(LABEL).color(T.muted).truncate_fade()))
+                .child(toggle(if s.inspector_width() < 360.0 { "Auto" } else { "Play on select" }, s.autoplay, |s, tx| { s.autoplay = !s.autoplay; tx.blur(); }).help("Play sounds when they're selected"));
             let detail = format!("{}, {} Hz, {} ch", clock(*seconds), commas(*rate as usize), channels);
             let detail = s.drag_detail(asset, detail);
             Pane { tools: None, stage: col().w_full().px(16.0).pb(36.0).child(wave), hint: None, corner, dock: Some(dock), actions: vec![drag_bar(id, None, "Drag sound out", detail)] }
@@ -1067,7 +1076,9 @@ pub fn on_key(s: &mut App, event: &rune::KeyEvent, tx: &mut Tx) -> bool {
         Key::Right => s.step_selection(1, tx),
         Key::Up => s.step_selection(-cols, tx),
         Key::Down => s.step_selection(cols, tx),
+        Key::Text(t) if t == " " && event.mods.shift => s.pause_playback(tx),
         Key::Text(t) if t == " " => s.toggle_playback(tx),
+        Key::Home if s.audio_selected() => s.rewind_playback(tx),
         Key::Text(t) if t == "/" => s.search.focused = true,
         Key::Escape if !s.search.text.is_empty() => {
             s.search = rune::TextEdit::new("");
