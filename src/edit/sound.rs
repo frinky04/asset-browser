@@ -73,32 +73,64 @@ pub fn draw_fades(view: (u64, u64), section: (u64, u64), rate: u32, edit: &Audio
         }
         fading.then_some(gain)
     };
-    let mut paint = |x: usize, y: usize, color: [u8; 3], alpha: u8| {
-        let at = (y * w + x) * 4;
-        out[at..at + 3].copy_from_slice(&color);
-        out[at + 3] = alpha;
-    };
-    let mut previous: Option<f32> = None;
+    // Line coverage per pixel. Kept apart and laid down once at the end, so where two segments
+    // of the curve meet it isn't drawn twice and left darker.
+    let mut covered = vec![0.0f32; w * h];
+    let mut previous: Option<(f32, f32)> = None;
     for x in 0..w {
         let Some(gain) = gain_at(x) else {
             previous = None;
             continue;
         };
         let top = mid * (1.0 - gain);
-        for y in 0..(top.floor() as usize).min(h) {
-            paint(x, y, shade, 150);
-            paint(x, h - 1 - y, shade, 150);
+        // How much of each pixel above the curve is cut away, so the shade's edge is soft too.
+        for y in 0..(top.ceil() as usize).min(h) {
+            let alpha = (FADE_SHADE_ALPHA * (top - y as f32).clamp(0.0, 1.0)) as u8;
+            for row in [y, h - 1 - y] {
+                let at = (row * w + x) * 4;
+                out[at..at + 3].copy_from_slice(&shade);
+                out[at + 3] = alpha;
+            }
         }
-        // Joined to the last column, so a steep part of the curve has no gaps.
-        let from = previous.unwrap_or(top);
-        let (low, high) = (from.min(top), from.max(top));
-        for y in (low - 1.0).floor().max(0.0) as usize..=((high + 1.0).ceil() as usize).min(h - 1) {
-            paint(x, y, line, 255);
-            paint(x, h - 1 - y, line, 255);
+        let here = (x as f32 + 0.5, top + 0.5);
+        let from = previous.unwrap_or(here);
+        cover_segment(&mut covered, w, h, from, here);
+        cover_segment(&mut covered, w, h, (from.0, h as f32 - from.1), (here.0, h as f32 - here.1));
+        previous = Some(here);
+    }
+    for (index, coverage) in covered.iter().enumerate().filter(|(_, c)| **c > 0.0) {
+        let pixel = &mut out[index * 4..index * 4 + 4];
+        let under = f32::from(pixel[3]) / 255.0 * (1.0 - coverage);
+        let alpha = coverage + under;
+        for channel in 0..3 {
+            pixel[channel] = ((f32::from(line[channel]) * coverage + f32::from(shade[channel]) * under) / alpha) as u8;
         }
-        previous = Some(top);
+        pixel[3] = (alpha * 255.0) as u8;
     }
     out
+}
+
+/// Half the fade line's width, in pixels of its picture.
+const FADE_LINE_HALF: f32 = 1.5;
+const FADE_SHADE_ALPHA: f32 = 150.0;
+
+/// Marks how much of each pixel a line from `a` to `b` covers, from its distance to the line.
+fn cover_segment(covered: &mut [f32], width: usize, height: usize, a: (f32, f32), b: (f32, f32)) {
+    let reach = FADE_LINE_HALF + 1.0;
+    let (left, right) = (((a.0.min(b.0) - reach).floor().max(0.0)) as usize, ((a.0.max(b.0) + reach).ceil() as usize).min(width));
+    let (top, bottom) = (((a.1.min(b.1) - reach).floor().max(0.0)) as usize, ((a.1.max(b.1) + reach).ceil() as usize).min(height));
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let length = (dx * dx + dy * dy).max(1e-6);
+    for y in top..bottom {
+        for x in left..right {
+            let (px, py) = (x as f32 + 0.5 - a.0, y as f32 + 0.5 - a.1);
+            let along = ((px * dx + py * dy) / length).clamp(0.0, 1.0);
+            let distance = (px - dx * along).hypot(py - dy * along);
+            let coverage = (FADE_LINE_HALF + 0.5 - distance).clamp(0.0, 1.0);
+            let slot = &mut covered[y * width + x];
+            *slot = slot.max(coverage);
+        }
+    }
 }
 
 fn apply_fades(pcm: &mut Pcm, edit: &AudioEdit) {
@@ -568,6 +600,19 @@ mod tests {
         assert_eq!(alpha(80, 0), 0, "past the fade nothing's drawn");
         let looped = AudioEdit { looped: true, ..edit };
         assert!(draw_fades((0, 1000), (0, 1000), 1000, &looped, 100, 41, [1, 2, 3], [9, 9, 9]).iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn the_fade_line_has_soft_edges_on_shallow_and_steep_parts() {
+        let edit = AudioEdit { fade_in_ms: 1000, ..AudioEdit::default() };
+        let (width, height) = (200usize, 101usize);
+        let px = draw_fades((0, 1000), (0, 1000), 1000, &edit, width as u32, height as u32, [10, 10, 10], [240, 240, 240]);
+        // A pixel the line only partly covers comes out lighter than the shade and darker than
+        // the line, on both the gentle end of the curve and its steep start.
+        let partial = |columns: std::ops::Range<usize>| columns.flat_map(|x| (0..height / 2).map(move |y| (x, y)))
+            .filter(|(x, y)| { let c = px[(y * width + x) * 4]; c > 30 && c < 225 }).count();
+        assert!(partial(2..12) > 3, "steep part");
+        assert!(partial(150..190) > 3, "gentle part");
     }
 
     #[test]

@@ -35,8 +35,8 @@ const VIEW_EASE: f64 = 16.0;
 /// Points the pointer travels before a press on the waveform becomes a drag.
 const REGION_TRAVEL: f32 = 3.0;
 /// The picture of the fade curves, scaled over the waveform.
-const FADE_W: u32 = 720;
-const FADE_H: u32 = 360;
+const FADE_W: u32 = 960;
+const FADE_H: u32 = 480;
 /// How much a fade bends per point the dot is dragged.
 const FADE_SHAPE_SPEED: f32 = 0.012;
 /// Near the middle a fade settles straight, so it's easy to get back there.
