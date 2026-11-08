@@ -134,8 +134,8 @@ fn write_resized(dir: &Path, source: &Path, asset: &Asset, max: u32, nearest: bo
     Ok(name)
 }
 
-/// Copies what an OBJ or DAE refers to, flattened beside it, and points the staged copies at
-/// the flattened names.
+/// Copies what an OBJ, DAE or FBX refers to, flattened beside it, and points the staged OBJ and
+/// DAE at the flattened names. An FBX keeps its paths: programs look beside it for a stale one.
 fn companions(dir: &Path, source: &Path, name: &str, ext: &str, names: &mut Vec<String>) {
     let base = source.parent().unwrap_or(Path::new("."));
     let bring = |reference: &str, names: &mut Vec<String>| -> Option<String> {
@@ -178,6 +178,9 @@ fn companions(dir: &Path, source: &Path, name: &str, ext: &str, names: &mut Vec<
                 if flat != reference { changed = changed.replace(&format!(">{reference}<"), &format!(">{flat}<")); }
             }
             if changed != text { let _ = std::fs::write(dir.join(name), changed); }
+        }
+        "fbx" => {
+            for file in crate::model::fbx_texture_files(source) { bring(&file.to_string_lossy(), names); }
         }
         _ => {}
     }
@@ -291,6 +294,20 @@ mod tests {
         assert!(std::fs::read_to_string(root.join("Pack/crate.mtl")).unwrap().contains("tex/wood.png"), "the library's isn't");
         let model = crate::model::load(&files[0]).unwrap();
         assert_eq!(model.images.len(), 1, "the staged model finds its texture");
+    }
+
+    #[test]
+    fn an_fbx_brings_its_textures_and_the_staged_copy_finds_them() {
+        let f = Fixture::new("fbx");
+        let root = f.root();
+        image::RgbaImage::new(2, 2).save(root.join("Pack/tex/wood.png")).unwrap();
+        std::fs::write(root.join("Pack/quad.fbx"), crate::model::FBX_QUAD).unwrap();
+        let a = asset(&root, "Pack/quad.fbx");
+        let files = stage_in(&f.stage(), &root.join("Pack/quad.fbx"), &a, Options::default()).unwrap();
+        let names: Vec<_> = files.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["quad.fbx", "wood.png"]);
+        assert_eq!(std::fs::read_to_string(&files[0]).unwrap(), crate::model::FBX_QUAD, "the staged FBX is a plain copy");
+        assert_eq!(crate::model::load(&files[0]).unwrap().images.len(), 1, "the staged model finds its texture");
     }
 
     #[test]

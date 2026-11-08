@@ -4,7 +4,7 @@
 
 A fast browser for a folder of game assets on Windows, built with [Rune](https://github.com/anomalyco/rune).
 
-- Thumbnails for textures (png, jpg, bmp, tga, webp), models (glb, gltf, obj, dae) and audio (wav, ogg, mp3, flac).
+- Thumbnails for textures (png, jpg, bmp, tga, webp), models (glb, gltf, obj, dae, fbx) and audio (wav, ogg, mp3, flac).
 - Search names and folders, filter by pack, type and format. `-word` excludes.
 - Orbit, pan and zoom models. Pan, zoom and tile textures. Scrub audio.
 - Drag anything out to a folder or another program. Drags hand over a staged copy, so the library file is never touched.

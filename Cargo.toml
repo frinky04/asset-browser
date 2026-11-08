@@ -19,6 +19,7 @@ roxmltree = "0.20"
 symphonia = { version = "0.5", features = ["all"] }
 rodio = { version = "0.20", default-features = false, features = ["symphonia-all"] }
 walkdir = "2"
+ufbx = "0.11"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [

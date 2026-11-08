@@ -27,7 +27,7 @@ fn isolate() {
 fn the_filter_row_stays_inside_its_panel_at_every_width() {
     isolate();
     let mut files = Vec::new();
-    for ext in ["png", "jpg", "jpeg", "bmp", "tga", "webp", "glb", "gltf", "obj", "dae", "wav", "ogg", "mp3", "flac"] {
+    for ext in ["png", "jpg", "jpeg", "bmp", "tga", "webp", "glb", "gltf", "obj", "dae", "fbx", "wav", "ogg", "mp3", "flac"] {
         for i in 0..3 { files.push(library::Entry { rel: format!("Pack/{ext}_{i}.{ext}"), size: 1, mtime: 1 }); }
     }
     let mut state = app::init_with(rune::prefs::Prefs::memory());

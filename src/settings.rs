@@ -65,7 +65,7 @@ pub fn sheet(s: &App) -> El {
     let library = section("Library", vec![
         setting("Folder", Some(s.library_folder()), outlined("Change", "Change", false, &FOLDER, |_, tx| pick_library_folder(tx))),
         setting("Check for new files", Some("Happens at every launch, and here on demand".to_owned()), outlined("Rescan", "Scanning", s.scanning, &REFRESH, |s, _| s.rescan())),
-        switch_row("Show every format of a model", "When a pack ships it as GLB, OBJ and DAE", s.filter.all_formats, |s| s.toggle_all_formats()),
+        switch_row("Show every format of a model", "When a pack ships it as GLB, OBJ, DAE and FBX", s.filter.all_formats, |s| s.toggle_all_formats()),
     ]);
 
     let previews = section("Previews", vec![
@@ -77,7 +77,7 @@ pub fn sheet(s: &App) -> El {
     let export = section("Dragging out", vec![
         setting("Texture size", Some("The largest side when dragging from the grid".to_owned()), segments("default-drag", vec![plain("Full", None), plain("1024", Some(1024u32)), plain("512", Some(512)), plain("256", Some(256))], s.drag_max, |s, v, _| s.drag_max = v)),
         setting("Resize filter", Some("Hard pixels keeps pixel art crisp".to_owned()), segments("default-filter", vec![plain("Smooth", false), plain("Hard pixels", true)], s.nearest, |s, v, _| s.nearest = v)),
-        switch_row("Bring model files along", "OBJ and DAE keep their materials and textures", s.companions, |s| s.companions = !s.companions),
+        switch_row("Bring model files along", "OBJ, DAE and FBX keep their materials and textures", s.companions, |s| s.companions = !s.companions),
     ]);
 
     let (thumbs, staged) = s.storage.map_or((None, None), |(t, d)| (Some(t), Some(d)));

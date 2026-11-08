@@ -774,7 +774,7 @@ fn pane(s: &App, id: u32, asset: &Asset) -> Pane {
                 n => format!("{n} textures"),
             };
             let mut actions = vec![drag_bar(id, None, "Drag model out", format!("{} tris, {images}", commas(m.triangles())))];
-            if matches!(asset.ext, "obj" | "dae") {
+            if matches!(asset.ext, "obj" | "dae" | "fbx") {
                 actions.push(row().w_full().justify_between().items_center()
                     .child(label("Material and texture files", SMALL, T.muted))
                     .child(segments("companions", vec![plain("Include", true), plain("Leave out", false)], s.companions, |s, v, _| s.companions = v)));
