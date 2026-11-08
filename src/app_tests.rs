@@ -576,7 +576,10 @@ fn material_edits_show_on_the_stage_and_leave_as_a_glb() {
     let mut rt = app_on(&root);
     open_editor(&mut rt, "tri.obj");
     assert!(rt.state.stage.surface.is_some(), "the editor shades the model's materials");
-    assert_eq!(rt.state.edit.expanded, Some(0), "the first material starts open");
+    assert_eq!(rt.state.edit.expanded, None, "materials start folded");
+    click(&mut rt, "material-0");
+    assert_eq!(rt.state.edit.expanded, Some(0));
+    for _ in 0..40 { rt.frame(1.0 / 60.0); }
 
     // A slider moves the stage straight away, before any render.
     let (x, y) = rt.find("m0-rough").unwrap();
@@ -753,6 +756,7 @@ fn material_rows_show_a_ball_presets_and_their_maps() {
     let root = edit_fixture();
     let mut rt = app_on(&root);
     open_editor(&mut rt, "tri.obj");
+    click(&mut rt, "material-0");
     for _ in 0..40 { rt.frame(1.0 / 60.0); }
     assert!(rt.find("ball-0").is_some());
     assert_eq!(rt.state.edit.balls[0].size(), (crate::edit::ball::BALL_PX, crate::edit::ball::BALL_PX), "the ball was drawn");
@@ -785,6 +789,7 @@ fn a_material_row_springs_open_and_closed_inside_a_fixed_panel() {
     let root = edit_fixture();
     let mut rt = app_on(&root);
     open_editor(&mut rt, "tri.obj");
+    click(&mut rt, "material-0");
     for _ in 0..40 { rt.frame(1.0 / 60.0); }
     let panel = rect(&rt, "edit-panel");
     let stage = rect(&rt, "stage")[3];

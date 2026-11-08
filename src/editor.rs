@@ -449,9 +449,7 @@ impl App {
             if self.selected_key() == Some(key) {
                 match result {
                     Ok(decoded) => {
-                        // A model's first material opens by itself, so the panel starts useful.
                         if let Decoded::Model(doc) = decoded.as_ref() {
-                            if self.edit.expanded.is_none() && !doc.materials.is_empty() { self.edit.expanded = Some(0); }
                             self.edit.balls = doc.materials.iter().map(|_| Pixels::new()).collect();
                             self.edit.ball_seen = vec![None; doc.materials.len()];
                             self.edit.map_thumbs = (0..doc.image_count()).map(|_| Pixels::new()).collect();
