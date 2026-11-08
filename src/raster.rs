@@ -126,6 +126,7 @@ mod tests {
             parts: vec![Part { start: 0, count: 3, material: 0 }],
             materials: vec![Material { color: [1.0, 0.0, 0.0, 1.0], image: None }],
             images: vec![],
+            ..Default::default()
         };
         let px = render_thumb(&model, 32);
         let solid = px.chunks(4).filter(|p| p[3] == 255).count();

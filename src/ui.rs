@@ -845,6 +845,11 @@ fn inspector(s: &App) -> El {
         let detail = facts_line(asset, s.thumbs.facts(asset.key));
         if !detail.is_empty() { facts.push(("Pixels", detail)); }
     }
+    if let (Preview::Model(m), Some(file)) = (&s.preview, s.current_guess()) {
+        let name = file.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        let more = m.guessed.len() - 1;
+        facts.push(("Texture guessed", if more > 0 { format!("{name} +{more}") } else { name }));
+    }
     facts.push(("Pack", s.lib.packs[asset.pack as usize].name.clone()));
     if s.window_height >= SHORT_WINDOW {
         body = body.child(facts_card(facts));

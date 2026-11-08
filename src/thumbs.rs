@@ -345,7 +345,7 @@ fn worker(shared: &Arc<Shared>, crawls: bool) {
         let mut image = match (&cached, &shared.store) {
             (Some(entry), Some(store)) => if show { store.read(entry) } else { None },
             _ => {
-                let made = make(&library.path(asset), asset);
+                let made = make(&library.path(asset), &library.root, asset);
                 let encoded = made.image.as_ref().and_then(|(w, h, rgba)| qoi::encode_to_vec(rgba, *w, *h).ok());
                 if let Some(store) = &shared.store {
                     store.put(key, encoded.as_deref(), made.facts);
@@ -392,10 +392,10 @@ fn failed() -> Made {
 }
 
 /// Makes a thumbnail from the source file, surviving whatever a corrupt file does to a decoder.
-fn make(path: &Path, asset: &Asset) -> Made {
+fn make(path: &Path, library: &Path, asset: &Asset) -> Made {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match asset.kind {
         Kind::Texture => texture_thumb(path),
-        Kind::Model => model_thumb(path),
+        Kind::Model => model_thumb(path, library),
         Kind::Audio => audio_thumb(path),
     }));
     result.ok().flatten().unwrap_or_else(failed)
@@ -419,8 +419,8 @@ fn texture_thumb(path: &Path) -> Option<Made> {
     Some(Made { image: Some((w, h, rgba.into_raw())), facts: Facts { width, height, ..Facts::default() } })
 }
 
-fn model_thumb(path: &Path) -> Option<Made> {
-    let m = model::load(path).ok()?;
+fn model_thumb(path: &Path, library: &Path) -> Option<Made> {
+    let m = model::load(path, library).ok()?;
     let rgba = raster::render_thumb(&m, THUMB);
     Some(Made { image: Some((THUMB, THUMB, rgba)), facts: Facts { width: m.triangles() as u32, ..Facts::default() } })
 }
@@ -479,7 +479,7 @@ mod tests {
         let f = d.join("x.png");
         std::fs::write(&f, b"not a png").unwrap();
         let lib = Library::build(d.clone(), vec![crate::library::Entry { rel: "x.png".into(), size: 9, mtime: 1 }]);
-        let made = make(&f, &lib.assets[0]);
+        let made = make(&f, &d, &lib.assets[0]);
         assert!(made.facts.failed && made.image.is_none());
         std::fs::remove_dir_all(&d).unwrap();
     }

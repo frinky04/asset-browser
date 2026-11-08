@@ -81,7 +81,7 @@ fn fill(dir: &Path, source: &Path, asset: &Asset, options: Options) -> Result<()
         Kind::Model => {
             names.push(copy_beside(dir, source, asset.name())?);
             if options.companions {
-                companions(dir, source, asset.name(), asset.ext, &mut names);
+                companions(dir, source, asset, &mut names);
             }
         }
     }
@@ -136,7 +136,8 @@ fn write_resized(dir: &Path, source: &Path, asset: &Asset, max: u32, nearest: bo
 
 /// Copies what an OBJ, DAE or FBX refers to, flattened beside it, and points the staged OBJ and
 /// DAE at the flattened names. An FBX keeps its paths: programs look beside it for a stale one.
-fn companions(dir: &Path, source: &Path, name: &str, ext: &str, names: &mut Vec<String>) {
+fn companions(dir: &Path, source: &Path, asset: &Asset, names: &mut Vec<String>) {
+    let (name, ext) = (asset.name(), asset.ext);
     let base = source.parent().unwrap_or(Path::new("."));
     let bring = |reference: &str, names: &mut Vec<String>| -> Option<String> {
         let found = crate::model::resolve(base, reference)?;
@@ -183,6 +184,11 @@ fn companions(dir: &Path, source: &Path, name: &str, ext: &str, names: &mut Vec<
             for file in crate::model::fbx_texture_files(source) { bring(&file.to_string_lossy(), names); }
         }
         _ => {}
+    }
+    // What the preview found by guessing travels with the model too, so a drop looks the same.
+    let library = source.ancestors().nth(asset.rel.split('/').count()).unwrap_or(base);
+    if matches!(ext, "obj" | "dae" | "fbx" | "glb" | "gltf") && let Ok(model) = crate::model::load(source, library) {
+        for file in &model.guessed { bring(&file.to_string_lossy(), names); }
     }
 }
 
@@ -292,8 +298,27 @@ mod tests {
         assert_eq!(names, ["crate.obj", "crate.mtl", "wood.png"]);
         assert!(std::fs::read_to_string(&files[1]).unwrap().contains("map_Kd wood.png"), "the staged material is repointed");
         assert!(std::fs::read_to_string(root.join("Pack/crate.mtl")).unwrap().contains("tex/wood.png"), "the library's isn't");
-        let model = crate::model::load(&files[0]).unwrap();
+        let model = crate::model::load(&files[0], f.stage().as_path()).unwrap();
         assert_eq!(model.images.len(), 1, "the staged model finds its texture");
+    }
+
+    #[test]
+    fn a_guessed_texture_travels_with_the_model_and_the_library_stays_the_limit() {
+        let f = Fixture::new("guessed");
+        let root = f.root();
+        std::fs::write(root.join("Pack/crate.obj"), "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").unwrap();
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([150, 90, 40, 255])).save(root.join("Pack/tex/crate_diffuse.png")).unwrap();
+        let a = asset(&root, "Pack/crate.obj");
+        let files = stage_in(&f.stage(), &root.join("Pack/crate.obj"), &a, Options::default()).unwrap();
+        let names: Vec<_> = files.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["crate.obj", "crate_diffuse.png"]);
+
+        // A folder above the library is out of bounds, however well its files fit.
+        let library = root.join("Pack/Models");
+        std::fs::create_dir_all(&library).unwrap();
+        std::fs::copy(root.join("Pack/crate.obj"), library.join("crate.obj")).unwrap();
+        let model = crate::model::load(&library.join("crate.obj"), &library).unwrap();
+        assert!(model.guessed.is_empty(), "{:?}", model.guessed);
     }
 
     #[test]
@@ -307,7 +332,7 @@ mod tests {
         let names: Vec<_> = files.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
         assert_eq!(names, ["quad.fbx", "wood.png"]);
         assert_eq!(std::fs::read_to_string(&files[0]).unwrap(), crate::model::FBX_QUAD, "the staged FBX is a plain copy");
-        assert_eq!(crate::model::load(&files[0]).unwrap().images.len(), 1, "the staged model finds its texture");
+        assert_eq!(crate::model::load(&files[0], f.stage().as_path()).unwrap().images.len(), 1, "the staged model finds its texture");
     }
 
     #[test]

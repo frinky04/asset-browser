@@ -14,6 +14,7 @@ mod native_drag;
 mod raster;
 mod settings;
 mod stage;
+mod texture_guess;
 mod thumbs;
 mod ui;
 mod wave;

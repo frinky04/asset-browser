@@ -634,6 +634,12 @@ impl App {
         self.storage_job.request((), |()| measure_storage());
     }
 
+    /// The texture the preview's model is showing by guesswork, if any.
+    pub fn current_guess(&self) -> Option<&Path> {
+        let Preview::Model(model) = &self.preview else { return None };
+        model.guessed.first().map(PathBuf::as_path)
+    }
+
     pub fn library_folder(&self) -> String {
         self.root.display().to_string()
     }
@@ -680,7 +686,8 @@ impl App {
     fn request_preview(&mut self, path: PathBuf, kind: Kind) {
         let wave_color = self.wave_color();
         self.awaiting_preview = true;
-        self.loading.request((path, kind), move |(p, kind)| load_preview(&p, kind, wave_color));
+        let library = self.lib.root.clone();
+        self.loading.request((path, kind), move |(p, kind)| load_preview(&p, &library, kind, wave_color));
     }
 
     /// Shows on button `name` that its action happened.
@@ -1038,10 +1045,10 @@ fn drag_picture((w, h, rgba): (u32, u32, Vec<u8>)) -> (u32, u32, Vec<u8>) {
     (fw, fh, fitted.into_raw())
 }
 
-fn load_preview(path: &Path, kind: Kind, wave_color: [u8; 3]) -> Loaded {
+fn load_preview(path: &Path, library: &Path, kind: Kind, wave_color: [u8; 3]) -> Loaded {
     let run = || match kind {
         Kind::Texture => load_texture(path).map(Loaded::Texture),
-        Kind::Model => model::load(path).map(|m| Loaded::Model(Arc::new(m))),
+        Kind::Model => model::load(path, library).map(|m| Loaded::Model(Arc::new(m))),
         Kind::Audio => wave::peaks(path, WAVE_W as usize).map(|p| Loaded::Audio {
             rgba: wave::draw(&p.values, WAVE_W, WAVE_H, wave_color),
             seconds: p.seconds,

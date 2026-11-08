@@ -153,6 +153,8 @@ impl Library {
             });
             let name_at = f.rel.rfind('/').map_or(0, |i| i + 1) as u32;
             let key = key_of(&f.rel, f.size, f.mtime);
+            // Bumped when model thumbnails change meaning, so cached ones are redrawn.
+            let key = if kind == Kind::Model { fnv(key, b"model-thumbs-2") } else { key };
             let hay = f.rel.to_lowercase();
             assets.push(Asset { rel: f.rel, name_at, pack, ext, kind, size: f.size, mtime: f.mtime, key, hay, shadowed: false });
         }

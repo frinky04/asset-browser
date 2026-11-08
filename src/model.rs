@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use glam::{Mat3, Mat4, Vec3};
 
+use crate::texture_guess::{self, MaterialSource};
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
@@ -45,6 +47,10 @@ pub struct Model {
     pub parts: Vec<Part>,
     pub materials: Vec<Material>,
     pub images: Vec<Image>,
+    /// What the file says about each material, by index, for guessing missing textures.
+    pub sources: Vec<MaterialSource>,
+    /// Texture files chosen by guessing rather than linked by the model.
+    pub guessed: Vec<PathBuf>,
 }
 
 impl Model {
@@ -112,9 +118,11 @@ pub fn resolve(base: &Path, reference: &str) -> Option<PathBuf> {
     beside.is_file().then_some(beside)
 }
 
-pub fn load(path: &Path) -> Result<Model, String> {
+/// Reads a model. Materials missing their textures are filled in from around it, never looking
+/// outside `library`.
+pub fn load(path: &Path, library: &Path) -> Result<Model, String> {
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-    let model = match ext.as_str() {
+    let mut model = match ext.as_str() {
         "glb" | "gltf" => load_gltf(path),
         "obj" => load_obj(path),
         "dae" => load_dae(path),
@@ -122,6 +130,7 @@ pub fn load(path: &Path) -> Result<Model, String> {
         other => Err(format!("{other} models aren't supported")),
     }?;
     if model.indices.is_empty() { return Err("the file has no triangles".into()); }
+    texture_guess::fill(path, library, &mut model);
     Ok(model)
 }
 
@@ -150,6 +159,7 @@ fn load_gltf(path: &Path) -> Result<Model, String> {
             })
         });
         model.materials.push(Material { color: pbr.base_color_factor(), image });
+        model.sources.push(MaterialSource { name: m.name().unwrap_or("").to_owned(), reference: None });
         model.materials.len() as u32 - 1
     }).collect();
     model.materials.push(Material::default());
@@ -187,15 +197,24 @@ fn load_gltf(path: &Path) -> Result<Model, String> {
 
 fn load_obj(path: &Path) -> Result<Model, String> {
     let options = tobj::LoadOptions { triangulate: true, single_index: true, ignore_points: true, ignore_lines: true };
-    let (meshes, materials) = tobj::load_obj(path, &options).map_err(|e| e.to_string())?;
-    let materials = materials.unwrap_or_default();
     let base = path.parent().unwrap_or(Path::new("."));
+    let (meshes, materials) = match tobj::load_obj(path, &options) {
+        // Blender writes a bare `usemtl` for an empty slot, which the parser rejects outright.
+        Err(tobj::LoadError::MaterialParseError) => {
+            let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+            let kept: String = text.lines().filter(|l| l.trim() != "usemtl").flat_map(|l| [l, "\n"]).collect();
+            tobj::load_obj_buf(&mut kept.as_bytes(), &options, |mtl| tobj::load_mtl(base.join(mtl)))
+        }
+        other => other,
+    }.map_err(|e| e.to_string())?;
+    let materials = materials.unwrap_or_default();
     let mut model = Model::default();
     let mut seen = HashMap::new();
     for m in &materials {
         let image = m.diffuse_texture.as_deref().and_then(|t| load_image_file(base, t, &mut model.images, &mut seen));
         let d = m.diffuse.unwrap_or([1.0, 1.0, 1.0]);
         model.materials.push(Material { color: if image.is_some() { [1.0; 4] } else { [d[0], d[1], d[2], 1.0] }, image });
+        model.sources.push(MaterialSource { name: m.name.clone(), reference: m.diffuse_texture.clone() });
     }
     model.materials.push(Material::default());
     let fallback = model.materials.len() as u32 - 1;
@@ -371,6 +390,8 @@ fn add_dae_mesh(mesh: roxmltree::Node<'_, '_>, world: Mat4, bound: &HashMap<&str
         let material = prim.attribute("material").and_then(|m| bound.get(m)).and_then(|t| materials.get(t)).copied().unwrap_or_default();
         model.materials.push(material);
         let id = model.materials.len() as u32 - 1;
+        model.sources.resize(id as usize, MaterialSource::default());
+        model.sources.push(MaterialSource { name: prim.attribute("material").unwrap_or("").to_owned(), reference: None });
         model.add(vertices, tris, id);
     }
 }
@@ -428,6 +449,8 @@ fn load_fbx(path: &Path) -> Result<Model, String> {
                 model.images.len() as u32 - 1
             })
         }));
+        let reference = file.and_then(|f| scene.texture_files.get(f.file_index as usize)).map(|source| source.filename.to_string());
+        model.sources.push(MaterialSource { name: m.element.name.to_string(), reference });
         let mut material = Material { image, ..Material::default() };
         if image.is_some() {
             material.color = [1.0; 4];
@@ -564,11 +587,28 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("quad.dae");
         std::fs::write(&file, DAE).unwrap();
-        let model = load(&file).unwrap();
+        let model = load(&file, &dir).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(model.triangles(), 2);
         let top = model.vertices.iter().map(|v| v.pos[2]).fold(f32::MAX, f32::min);
         assert!((top + 1.0).abs() < 1e-5, "y became -z: {top}");
+    }
+
+    #[test]
+    fn an_obj_with_a_bare_usemtl_and_a_stale_texture_path_still_finds_its_texture() {
+        let dir = std::env::temp_dir().join(format!("ab-obj-usemtl-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("Models/Props")).unwrap();
+        std::fs::create_dir_all(dir.join("Textures")).unwrap();
+        let obj = "mtllib tin.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nusemtl tin\nf 1/1 2/1 3/1\nusemtl \nf 1/1 2/1 3/1\n";
+        std::fs::write(dir.join("Models/Props/tin.obj"), obj).unwrap();
+        std::fs::write(dir.join("Models/Props/tin.mtl"), "newmtl tin\nmap_Kd C:/tin_label.png\n").unwrap();
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([180, 60, 30, 255])).save(dir.join("Textures/tin_label.png")).unwrap();
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([128, 128, 255, 255])).save(dir.join("Textures/tin_label_normal.png")).unwrap();
+        let model = load(&dir.join("Models/Props/tin.obj"), &dir).unwrap();
+        let guessed: Vec<_> = model.guessed.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(model.triangles(), 2);
+        assert_eq!(guessed, ["tin_label.png"]);
     }
 
     fn fbx_dir(name: &str) -> PathBuf {
@@ -583,7 +623,7 @@ mod tests {
     fn an_fbx_polygon_triangulates_turns_y_up_and_finds_its_texture() {
         let dir = fbx_dir("textured");
         image::RgbaImage::new(2, 2).save(dir.join("tex/wood.png")).unwrap();
-        let model = load(&dir.join("quad.fbx")).unwrap();
+        let model = load(&dir.join("quad.fbx"), &dir).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(model.triangles(), 2);
         let top = model.vertices.iter().map(|v| v.pos[2]).fold(f32::MAX, f32::min);
@@ -598,7 +638,7 @@ mod tests {
     #[test]
     fn an_fbx_with_a_missing_texture_falls_back_to_its_colour() {
         let dir = fbx_dir("untextured");
-        let model = load(&dir.join("quad.fbx")).unwrap();
+        let model = load(&dir.join("quad.fbx"), &dir).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         let material = model.materials[model.parts[0].material as usize];
         assert_eq!(material.image, None);
@@ -612,7 +652,7 @@ mod tests {
         let text = FBX_QUAD.replace("tex/wood.png", "C:/gone/artist/tex/wood.png");
         std::fs::create_dir_all(dir.join("Models/FBX")).unwrap();
         std::fs::write(dir.join("Models/FBX/quad.fbx"), text).unwrap();
-        let model = load(&dir.join("Models/FBX/quad.fbx")).unwrap();
+        let model = load(&dir.join("Models/FBX/quad.fbx"), &dir).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(model.images.len(), 1);
     }
@@ -624,7 +664,7 @@ mod tests {
         let video = format!("    Video: 5, \"Video::wood\", \"Clip\" {{\n        Type: \"Clip\"\n        Filename: \"C:/gone/artist/tex/wood.png\"\n        RelativeFilename: \"tex/wood.png\"\n        Content: , \"{PNG}\"\n    }}\n}}\nConnections:");
         let text = FBX_QUAD.replace("}\nConnections:", &video).replace("C: \"OO\",1,2", "C: \"OO\",1,2\n    C: \"OO\",5,4");
         std::fs::write(dir.join("quad.fbx"), text).unwrap();
-        let model = load(&dir.join("quad.fbx")).unwrap();
+        let model = load(&dir.join("quad.fbx"), &dir).unwrap();
         let on_disk = fbx_texture_files(&dir.join("quad.fbx"));
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!((model.images.len(), model.images[0].width), (1, 1));
@@ -635,7 +675,7 @@ mod tests {
     fn a_broken_fbx_is_an_error_and_not_a_crash() {
         let dir = fbx_dir("broken");
         std::fs::write(dir.join("quad.fbx"), b"Kaydara FBX Binary  \x00\x1a\x00garbage").unwrap();
-        assert!(load(&dir.join("quad.fbx")).is_err());
+        assert!(load(&dir.join("quad.fbx"), &dir).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
