@@ -1,4 +1,4 @@
-//! Loads GLB, glTF, OBJ and DAE files into one renderable form.
+//! Loads GLB, glTF, OBJ, DAE and FBX files into one renderable form.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -118,6 +118,7 @@ pub fn load(path: &Path) -> Result<Model, String> {
         "glb" | "gltf" => load_gltf(path),
         "obj" => load_obj(path),
         "dae" => load_dae(path),
+        "fbx" => load_fbx(path),
         other => Err(format!("{other} models aren't supported")),
     }?;
     if model.indices.is_empty() { return Err("the file has no triangles".into()); }
@@ -374,6 +375,175 @@ fn add_dae_mesh(mesh: roxmltree::Node<'_, '_>, world: Mat4, bound: &HashMap<&str
     }
 }
 
+/// Reads from memory so a path that isn't valid UTF-8 still opens.
+fn parse_fbx(path: &Path, opts: ufbx::LoadOpts<'_>) -> Result<ufbx::SceneRoot, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    ufbx::load_memory(&bytes, opts).map_err(|e| e.description.to_string())
+}
+
+/// Where a texture an FBX names lives on disk. The relative path is the one that survives a
+/// pack being moved; the absolute one usually points at the artist's machine.
+fn fbx_texture_path(base: &Path, file: &ufbx::TextureFile) -> Option<PathBuf> {
+    let references = [&file.relative_filename, &file.absolute_filename, &file.filename];
+    references.iter().find_map(|r| resolve(base, r)).or_else(|| references.iter().find_map(|r| find_in_parents(base, r)))
+}
+
+/// A path from the artist's machine still ends in the pack's own layout, like
+/// `Textures/wood.png`, and that folder is usually somewhere above the model.
+fn find_in_parents(base: &Path, reference: &str) -> Option<PathBuf> {
+    const LEVELS: usize = 6;
+    let cleaned = reference.replace('\\', "/");
+    let mut parts = cleaned.rsplit('/');
+    let (name, folder) = (parts.next()?, parts.next()?);
+    base.ancestors().take(LEVELS).map(|dir| dir.join(folder).join(name)).find(|p| p.is_file())
+}
+
+/// The files on disk an FBX's textures come from. Embedded ones travel inside the FBX.
+pub fn fbx_texture_files(path: &Path) -> Vec<PathBuf> {
+    let Ok(scene) = parse_fbx(path, ufbx::LoadOpts { ignore_geometry: true, ignore_animation: true, ..Default::default() }) else { return Vec::new() };
+    let base = path.parent().unwrap_or(Path::new("."));
+    scene.texture_files.iter().filter(|f| f.content.is_empty()).filter_map(|f| fbx_texture_path(base, f)).collect()
+}
+
+fn load_fbx(path: &Path) -> Result<Model, String> {
+    let scene = parse_fbx(path, ufbx::LoadOpts {
+        ignore_animation: true,
+        generate_missing_normals: true,
+        target_axes: ufbx::CoordinateAxes::right_handed_y_up(),
+        ..Default::default()
+    })?;
+    let base = path.parent().unwrap_or(Path::new("."));
+    let mut model = Model::default();
+    let mut image_ids: HashMap<u32, Option<u32>> = HashMap::new();
+    // Pushed in order, so a material's `typed_id` is also its index in `model.materials`.
+    for m in scene.materials.iter() {
+        let pbr = &m.pbr;
+        let file = pbr.base_color.texture.as_ref().or(m.fbx.diffuse_color.texture.as_ref()).and_then(|t| t.file_textures.first());
+        let image = file.and_then(|f| *image_ids.entry(f.file_index).or_insert_with(|| {
+            let source = scene.texture_files.get(f.file_index as usize)?;
+            let decoded = decode_image(&source.content)
+                .or_else(|| fbx_texture_path(base, source).and_then(|p| std::fs::read(p).ok()).and_then(|b| decode_image(&b)));
+            decoded.map(|img| {
+                model.images.push(img);
+                model.images.len() as u32 - 1
+            })
+        }));
+        let mut material = Material { image, ..Material::default() };
+        if image.is_some() {
+            material.color = [1.0; 4];
+        } else if pbr.base_color.has_value {
+            let factor = if pbr.base_factor.has_value { pbr.base_factor.value_vec4.x } else { 1.0 };
+            let c = pbr.base_color.value_vec4;
+            material.color = [(c.x * factor) as f32, (c.y * factor) as f32, (c.z * factor) as f32, 1.0];
+        }
+        model.materials.push(material);
+    }
+    model.materials.push(Material::default());
+    let fallback = model.materials.len() as u32 - 1;
+    for node in scene.nodes.iter().filter(|n| n.visible) {
+        if let Some(mesh) = node.mesh.as_ref() { add_fbx_mesh(node, mesh, fallback, &mut model); }
+    }
+    Ok(model)
+}
+
+fn add_fbx_mesh(node: &ufbx::Node, mesh: &ufbx::Mesh, fallback: u32, model: &mut Model) {
+    let m = &node.geometry_to_world;
+    let world = Mat4::from_cols_array(&[m.m00, m.m10, m.m20, 0.0, m.m01, m.m11, m.m21, 0.0, m.m02, m.m12, m.m22, 0.0, m.m03, m.m13, m.m23, 1.0].map(|v| v as f32));
+    let normal_m = Mat3::from_mat4(world).inverse().transpose();
+    let mut corners = vec![0u32; mesh.max_face_triangles * 3];
+    for part in mesh.material_parts.iter() {
+        let mut vertices = Vec::with_capacity(part.num_triangles * 3);
+        for face in part.face_indices.iter().filter_map(|f| mesh.faces.get(*f as usize)) {
+            let triangles = mesh.triangulate_face(&mut corners, *face) as usize;
+            for &corner in &corners[..triangles * 3] {
+                let corner = corner as usize;
+                let p = mesh.vertex_position[corner];
+                let normal = if mesh.vertex_normal.exists {
+                    let n = mesh.vertex_normal[corner];
+                    (normal_m * Vec3::new(n.x as f32, n.y as f32, n.z as f32)).normalize_or_zero().into()
+                } else {
+                    [0.0; 3]
+                };
+                let uv = if mesh.vertex_uv.exists {
+                    let t = mesh.vertex_uv[corner];
+                    [t.x as f32, 1.0 - t.y as f32]
+                } else {
+                    [0.0; 2]
+                };
+                vertices.push(Vertex { pos: world.transform_point3(Vec3::new(p.x as f32, p.y as f32, p.z as f32)).into(), normal, uv });
+            }
+        }
+        let indices = (0..vertices.len() as u32).collect();
+        // A node can override the materials of the mesh it instances.
+        let index = part.index as usize;
+        let material = node.materials.get(index).or(mesh.materials.get(index)).map_or(fallback, |m| m.element.typed_id);
+        model.add(vertices, indices, material);
+    }
+}
+
+/// A Z-up quad whose texture is named by a path relative to the file and a dead absolute one.
+#[cfg(test)]
+pub(crate) const FBX_QUAD: &str = r#"; FBX 7.4.0 project file
+FBXHeaderExtension:  {
+    FBXHeaderVersion: 1003
+    FBXVersion: 7400
+}
+GlobalSettings:  {
+    Version: 1000
+    Properties70:  {
+        P: "UpAxis", "int", "Integer", "",2
+        P: "UpAxisSign", "int", "Integer", "",1
+        P: "FrontAxis", "int", "Integer", "",1
+        P: "FrontAxisSign", "int", "Integer", "",-1
+        P: "CoordAxis", "int", "Integer", "",0
+        P: "CoordAxisSign", "int", "Integer", "",1
+    }
+}
+Objects:  {
+    Geometry: 1, "Geometry::quad", "Mesh" {
+        Vertices: *12 { a: 0,0,0,1,0,0,1,1,0,0,1,0 }
+        PolygonVertexIndex: *4 { a: 0,1,2,-4 }
+        GeometryVersion: 124
+        LayerElementUV: 0 {
+            Version: 101
+            Name: "uv"
+            MappingInformationType: "ByPolygonVertex"
+            ReferenceInformationType: "Direct"
+            UV: *8 { a: 0,0,1,0,1,1,0,1 }
+        }
+        Layer: 0 {
+            Version: 100
+            LayerElement:  {
+                Type: "LayerElementUV"
+                TypedIndex: 0
+            }
+        }
+    }
+    Model: 2, "Model::quad", "Mesh" {
+        Version: 232
+    }
+    Material: 3, "Material::red", "" {
+        Version: 102
+        ShadingModel: "lambert"
+        Properties70:  {
+            P: "DiffuseColor", "Color", "", "A",1,0,0
+        }
+    }
+    Texture: 4, "Texture::wood", "" {
+        Type: "TextureVideoClip"
+        Version: 202
+        FileName: "C:/gone/artist/wood.png"
+        RelativeFilename: "tex/wood.png"
+    }
+}
+Connections:  {
+    C: "OO",1,2
+    C: "OO",2,0
+    C: "OO",3,2
+    C: "OP",4,3,"DiffuseColor"
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,5 +569,73 @@ mod tests {
         assert_eq!(model.triangles(), 2);
         let top = model.vertices.iter().map(|v| v.pos[2]).fold(f32::MAX, f32::min);
         assert!((top + 1.0).abs() < 1e-5, "y became -z: {top}");
+    }
+
+    fn fbx_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ab-fbx-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("tex")).unwrap();
+        std::fs::write(dir.join("quad.fbx"), FBX_QUAD).unwrap();
+        dir
+    }
+
+    #[test]
+    fn an_fbx_polygon_triangulates_turns_y_up_and_finds_its_texture() {
+        let dir = fbx_dir("textured");
+        image::RgbaImage::new(2, 2).save(dir.join("tex/wood.png")).unwrap();
+        let model = load(&dir.join("quad.fbx")).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(model.triangles(), 2);
+        let top = model.vertices.iter().map(|v| v.pos[2]).fold(f32::MAX, f32::min);
+        assert!((top + 1.0).abs() < 1e-5, "y became -z: {top}");
+        assert_eq!(model.images.len(), 1);
+        assert_eq!(model.materials[model.parts[0].material as usize].image, Some(0));
+        let corner = model.vertices.iter().find(|v| v.pos == [0.0; 3]).unwrap();
+        assert_eq!(corner.uv, [0.0, 1.0], "v is flipped to match the renderer");
+        assert!(corner.normal != [0.0; 3], "missing normals are generated");
+    }
+
+    #[test]
+    fn an_fbx_with_a_missing_texture_falls_back_to_its_colour() {
+        let dir = fbx_dir("untextured");
+        let model = load(&dir.join("quad.fbx")).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let material = model.materials[model.parts[0].material as usize];
+        assert_eq!(material.image, None);
+        assert_eq!(material.color, [1.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn an_fbx_with_a_stale_path_finds_its_texture_in_a_folder_above_it() {
+        let dir = fbx_dir("stale");
+        image::RgbaImage::new(2, 2).save(dir.join("tex/wood.png")).unwrap();
+        let text = FBX_QUAD.replace("tex/wood.png", "C:/gone/artist/tex/wood.png");
+        std::fs::create_dir_all(dir.join("Models/FBX")).unwrap();
+        std::fs::write(dir.join("Models/FBX/quad.fbx"), text).unwrap();
+        let model = load(&dir.join("Models/FBX/quad.fbx")).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(model.images.len(), 1);
+    }
+
+    #[test]
+    fn an_embedded_fbx_texture_decodes_and_stays_inside_the_file() {
+        const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        let dir = fbx_dir("embedded");
+        let video = format!("    Video: 5, \"Video::wood\", \"Clip\" {{\n        Type: \"Clip\"\n        Filename: \"C:/gone/artist/tex/wood.png\"\n        RelativeFilename: \"tex/wood.png\"\n        Content: , \"{PNG}\"\n    }}\n}}\nConnections:");
+        let text = FBX_QUAD.replace("}\nConnections:", &video).replace("C: \"OO\",1,2", "C: \"OO\",1,2\n    C: \"OO\",5,4");
+        std::fs::write(dir.join("quad.fbx"), text).unwrap();
+        let model = load(&dir.join("quad.fbx")).unwrap();
+        let on_disk = fbx_texture_files(&dir.join("quad.fbx"));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!((model.images.len(), model.images[0].width), (1, 1));
+        assert!(on_disk.is_empty());
+    }
+
+    #[test]
+    fn a_broken_fbx_is_an_error_and_not_a_crash() {
+        let dir = fbx_dir("broken");
+        std::fs::write(dir.join("quad.fbx"), b"Kaydara FBX Binary  \x00\x1a\x00garbage").unwrap();
+        assert!(load(&dir.join("quad.fbx")).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

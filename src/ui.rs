@@ -413,7 +413,7 @@ fn filter_bar(s: &App) -> El {
     let mut filters = row().key("filters").w_full().py(12.0).px(GRID_PAD).gap(12.0).items_center().child(kind_tabs(s));
     if !all.is_empty() { filters = filters.child(formats.key("format-group").h(CONTROL_H).radius(GROUP_RADIUS).border(1.0, T.line).padding(GROUP_PAD)); }
     filters.child(el().grow(1.0))
-        .child(toggle("Every format", s.filter.all_formats, |s, tx| s.toggle_all_formats(tx)).help("Show every copy of a model when a pack ships it as GLB, OBJ and DAE"))
+        .child(toggle("Every format", s.filter.all_formats, |s, tx| s.toggle_all_formats(tx)).help("Show every copy of a model when a pack ships it as GLB, OBJ, DAE and FBX"))
 }
 
 fn sidebar(s: &App) -> El {
@@ -774,7 +774,7 @@ fn pane(s: &App, id: u32, asset: &Asset) -> Pane {
                 n => format!("{n} textures"),
             };
             let mut actions = vec![drag_bar(id, None, "Drag model out", format!("{} tris, {images}", commas(m.triangles())))];
-            if matches!(asset.ext, "obj" | "dae") {
+            if matches!(asset.ext, "obj" | "dae" | "fbx") {
                 actions.push(row().w_full().justify_between().items_center()
                     .child(label("Material and texture files", SMALL, T.muted))
                     .child(segments("companions", vec![plain("Include", true), plain("Leave out", false)], s.companions, |s, v, _| s.companions = v)));

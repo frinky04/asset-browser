@@ -21,8 +21,8 @@ impl Kind {
     }
 }
 
-/// Every format the browser shows. FBX and `.blend` are left out of v1 on purpose.
-const FORMATS: [(&str, Kind); 14] = [
+/// Every format the browser shows. `.blend` is left out on purpose.
+const FORMATS: [(&str, Kind); 15] = [
     ("png", Kind::Texture),
     ("jpg", Kind::Texture),
     ("jpeg", Kind::Texture),
@@ -33,6 +33,7 @@ const FORMATS: [(&str, Kind); 14] = [
     ("gltf", Kind::Model),
     ("obj", Kind::Model),
     ("dae", Kind::Model),
+    ("fbx", Kind::Model),
     ("wav", Kind::Audio),
     ("ogg", Kind::Audio),
     ("mp3", Kind::Audio),
@@ -164,10 +165,10 @@ impl Library {
     }
 }
 
-/// Packs ship the same model as GLB, OBJ and DAE: keep the most self-contained one in view.
+/// Packs ship the same model as GLB, OBJ, DAE and FBX: keep the most self-contained one in view.
 fn mark_shadowed(assets: &mut [Asset]) {
     fn rank(ext: &str) -> u8 {
-        match ext { "glb" => 0, "gltf" => 1, "obj" => 2, _ => 3 }
+        match ext { "glb" => 0, "gltf" => 1, "obj" => 2, "dae" => 3, _ => 4 }
     }
     let mut best: HashMap<(u32, String), (u8, usize)> = HashMap::new();
     for (i, a) in assets.iter().enumerate().filter(|(_, a)| a.kind == Kind::Model) {
@@ -320,7 +321,7 @@ mod tests {
             entry("Mega/Tex/brick.png"),
             entry("Sfx/door creak.WAV"),
             entry("Sfx/readme.txt"),
-            entry("Sfx/thing.fbx"),
+            entry("Sfx/thing.blend"),
             entry("loose.glb"),
         ])
     }
@@ -334,7 +335,15 @@ mod tests {
         let l = lib();
         assert_eq!(l.assets.len(), 6);
         assert!(l.packs.iter().any(|p| p.name == LOOSE_PACK));
-        assert!(!l.assets.iter().any(|a| a.name().ends_with("fbx")));
+        assert!(!l.assets.iter().any(|a| a.name().ends_with("blend")));
+    }
+
+    #[test]
+    fn an_fbx_is_a_model_that_only_shows_when_no_other_format_of_it_does() {
+        let l = Library::build(PathBuf::from("C:/lib"), vec![entry("P/door.dae"), entry("P/door.FBX"), entry("P/lever.fbx")]);
+        let lever = l.assets.iter().find(|a| a.name() == "lever.fbx").unwrap();
+        assert_eq!((lever.ext, lever.kind), ("fbx", Kind::Model));
+        assert_eq!(names(&l, &search(&l, &Filter::default())), ["door.dae", "lever.fbx"]);
     }
 
     #[test]
