@@ -1,12 +1,14 @@
 //! The application's state and everything that changes it.
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rune::prefs::Prefs;
-use rune::{Latest, Live, LiveText, Pixels, TextEdit, Tx, Waker};
+use rune::{Latest, Live, LiveText, Pixels, ScrollPos, Spring, TextEdit, Tx, Waker, WheelEvent};
 
 use crate::audio::Audio;
 use crate::export::{self, Options};
@@ -32,6 +34,10 @@ const INSPECTOR_MAX: f32 = 900.0;
 /// The grid keeps at least this much when the inspector grows.
 const MAIN_MIN_WIDTH: f32 = 600.0;
 const INSPECTOR_PREF: &str = "inspector_width";
+const SIDEBAR_PREF: &str = "sidebar_open";
+const SIDEBAR_SPRING: Spring = Spring::new(0.3, 0.0);
+/// How long a button shows that its action happened.
+const CONFIRM_FOR: Duration = Duration::from_millis(1400);
 
 pub enum Preview {
     None,
@@ -47,6 +53,45 @@ enum Loaded {
     Model(Arc<Model>),
     Audio { rgba: Vec<u8>, seconds: f32, rate: u32, channels: u16 },
     Failed(String),
+}
+
+/// Eases a notched mouse wheel: each step moves a target, and the view springs to it. Trackpads
+/// already deliver smooth deltas and are left alone.
+#[derive(Clone, Default)]
+pub struct Glide {
+    /// The viewport's offset and how far it can scroll.
+    position: Rc<Cell<[f32; 2]>>,
+    target: Rc<Cell<Option<(f32, Instant)>>>,
+}
+
+/// A wheel notch arrives as 40 points; this makes one notch a useful distance.
+const WHEEL_GAIN: f32 = 2.5;
+const WHEEL_SPRING: Spring = Spring::new(0.2, 0.0);
+/// A target older than this is finished with: the view may have been moved another way since.
+const GLIDE_MEMORY: Duration = Duration::from_millis(350);
+
+impl Glide {
+    /// What the viewport's `on_scroll_offset` should report to.
+    pub fn watch(&self) -> impl Fn(ScrollPos) + 'static {
+        let position = self.position.clone();
+        move |p: ScrollPos| position.set([p.offset[1], p.max[1]])
+    }
+
+    /// Takes a wheel event over viewport `key`; false leaves it to the viewport.
+    pub fn wheel(&self, key: &str, e: WheelEvent, tx: &mut Tx) -> bool {
+        if e.precise || e.dy == 0.0 { return false }
+        let [offset, max] = self.position.get();
+        let from = self.target.get().filter(|(_, at)| at.elapsed() < GLIDE_MEMORY).map_or(offset, |(y, _)| y);
+        let to = (from - e.dy * WHEEL_GAIN).clamp(0.0, max);
+        self.target.set(Some((to, Instant::now())));
+        tx.scroll_to_with(key, 0.0, to, WHEEL_SPRING);
+        tx.live_only();
+        true
+    }
+
+    pub fn forget(&self) {
+        self.target.set(None);
+    }
 }
 
 pub struct App {
@@ -75,6 +120,15 @@ pub struct App {
     pub grid_width: f32,
     pub window_width: f32,
     pub window_height: f32,
+    pub sidebar_open: bool,
+    pub grid_glide: Glide,
+    pub packs_glide: Glide,
+    /// Which button just confirmed an action, and when that confirmation ends.
+    pub confirmed: Option<(&'static str, Instant)>,
+    /// Whether the audio was playing when the view last ran.
+    pub showing_playing: bool,
+    /// Keeps checking playback while a sound is still opening.
+    audio_watch_until: Option<Instant>,
     inspector_w: f32,
     prefs: Prefs,
     pub columns: usize,
@@ -119,6 +173,7 @@ fn configured_root() -> PathBuf {
 pub fn init() -> App {
     let prefs = Prefs::open("asset-browser-v2");
     let inspector_w = prefs.get(INSPECTOR_PREF).unwrap_or(INSPECTOR_DEFAULT);
+    let sidebar_open = prefs.get(SIDEBAR_PREF).unwrap_or(true);
     App {
         lib: Arc::new(Library::default()),
         results: Results::default(),
@@ -143,6 +198,12 @@ pub fn init() -> App {
         grid_width: 900.0,
         window_width: 1520.0,
         window_height: 900.0,
+        sidebar_open,
+        grid_glide: Glide::default(),
+        packs_glide: Glide::default(),
+        confirmed: None,
+        showing_playing: false,
+        audio_watch_until: None,
         inspector_w,
         prefs,
         columns: 5,
@@ -291,7 +352,16 @@ impl App {
             changed = true;
         }
         self.update_status(tx);
+        if self.confirmed.is_some_and(|(_, until)| Instant::now() >= until) {
+            self.confirmed = None;
+            changed = true;
+        }
         if matches!(self.preview, Preview::Audio { .. }) { self.track_playback(tx); }
+        let playing = self.audio.is_playing();
+        if playing != self.showing_playing {
+            self.showing_playing = playing;
+            changed = true;
+        }
         // Snapshots wait for their thumbnails. `AB_FRAME_MS` runs a benchmark at that pace
         // against the real workers instead.
         if headless() {
@@ -325,7 +395,24 @@ impl App {
         let x = position / seconds.max(0.001) * self.stage_size[0];
         self.playhead.set([x, 0.0]);
         self.clock.set(format!("{} / {}", clock(position), clock(seconds)));
-        if self.audio.is_playing() { tx.wake_after(Duration::from_millis(33)); }
+        let opening = self.audio_watch_until.is_some_and(|t| Instant::now() < t);
+        if self.audio.is_playing() || opening { tx.wake_after(Duration::from_millis(33)); }
+    }
+
+    /// Shows on button `name` that its action happened.
+    pub fn confirm(&mut self, name: &'static str, tx: &mut Tx) {
+        self.confirmed = Some((name, Instant::now() + CONFIRM_FOR));
+        tx.wake_after(CONFIRM_FOR);
+    }
+
+    pub fn is_confirmed(&self, name: &str) -> bool {
+        self.confirmed.is_some_and(|(n, _)| n == name)
+    }
+
+    pub fn toggle_sidebar(&mut self, tx: &mut Tx) {
+        self.sidebar_open = !self.sidebar_open;
+        tx.motion(SIDEBAR_SPRING);
+        if !headless() { let _ = self.prefs.set(SIDEBAR_PREF, &self.sidebar_open); }
     }
 
     fn adopt(&mut self, lib: Library) {
@@ -349,6 +436,7 @@ impl App {
 
     pub fn refilter(&mut self, tx: &mut Tx) {
         self.refilter_keeping_scroll();
+        self.grid_glide.forget();
         tx.scroll_to_instant("grid", 0.0, 0.0);
     }
 
@@ -432,7 +520,10 @@ impl App {
         self.awaiting_preview = true;
         self.audio.stop();
         self.loading.request((path.clone(), asset.kind), move |(p, kind)| load_preview(&p, kind));
-        if asset.kind == Kind::Audio && self.autoplay && !headless() { self.audio.play(path); }
+        if asset.kind == Kind::Audio && self.autoplay && !headless() {
+            self.audio.play(path);
+            self.watch_audio(tx);
+        }
         tx.wake_after(Duration::from_millis(1));
     }
 
@@ -476,7 +567,8 @@ impl App {
 
     /// The inspector's width after the window has had its say.
     pub fn inspector_width(&self) -> f32 {
-        let room = self.window_width - ui::SIDEBAR_W - ui::WINDOW_GAP * 4.0 - MAIN_MIN_WIDTH;
+        let sidebar = if self.sidebar_open { ui::SIDEBAR_W + ui::WINDOW_GAP } else { 0.0 };
+        let room = self.window_width - sidebar - ui::WINDOW_GAP * 3.0 - MAIN_MIN_WIDTH;
         self.inspector_w.min(room).max(INSPECTOR_MIN)
     }
 
@@ -499,7 +591,7 @@ impl App {
         self.stage.view = View { tile: keep.tile, seams: keep.seams, smooth: keep.smooth, zoom: if keep.tile { 0.34 } else { 1.0 }, ..View::default() };
     }
 
-    pub fn toggle_playback(&mut self) {
+    pub fn toggle_playback(&mut self, tx: &mut Tx) {
         let Some(asset) = self.selected.and_then(|i| self.lib.assets.get(i as usize)) else { return };
         if asset.kind != Kind::Audio { return }
         if self.audio.is_finished() {
@@ -507,6 +599,12 @@ impl App {
         } else {
             self.audio.toggle();
         }
+        self.watch_audio(tx);
+    }
+
+    fn watch_audio(&mut self, tx: &mut Tx) {
+        self.audio_watch_until = Some(Instant::now() + Duration::from_millis(600));
+        tx.wake_after(Duration::from_millis(33));
     }
 
     pub fn seek_fraction(&mut self, fraction: f32, tx: &mut Tx) {

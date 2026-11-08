@@ -181,6 +181,41 @@ fn browsing_previewing_and_dragging_out_end_to_end() {
     rt.pointer_up(x + 50.0, y + 5.0);
     assert!((rt.state.stage.view.yaw - before - 50.0 * 0.009).abs() < 1e-3);
 
+    // The panel collapses and comes back, and the grid takes its room.
+    let open_width = rt.state.grid_width;
+    click(&mut rt, "sidebar-toggle");
+    for _ in 0..40 { rt.frame(1.0 / 60.0); }
+    assert!(!rt.state.sidebar_open);
+    assert!((rt.state.grid_width - (open_width + 252.0)).abs() < 1.0, "{} from {open_width}", rt.state.grid_width);
+    assert!(rt.presented("sidebar").unwrap().0[2] < 1.0, "fully closed");
+    click(&mut rt, "sidebar-toggle");
+    for _ in 0..40 { rt.frame(1.0 / 60.0); }
+    assert!(rt.state.sidebar_open);
+    assert!((rt.state.grid_width - open_width).abs() < 1.0);
+
+    // Copying says so, and the button keeps its size either way.
+    let width_of = |rt: &Runtime<App>| rt.presented("Copy path").unwrap().0[2];
+    let before = width_of(&rt);
+    click(&mut rt, "Copy path");
+    assert!(rt.state.is_confirmed("copy"));
+    assert_eq!(width_of(&rt), before, "the label swap doesn't resize it");
+
+    // A notched wheel eases toward its target instead of jumping there.
+    click(&mut rt, "L");
+    for _ in 0..20 { rt.frame(1.0 / 60.0); }
+    let grid_top = |rt: &Runtime<App>| rt.presented("rows").unwrap().0[1];
+    let start = grid_top(&rt);
+    let (x, y) = rt.find("grid").unwrap();
+    rt.pointer_move(x, y);
+    let notch = rune::WheelEvent::new(0.0, -40.0).at(x, y).precise(false);
+    rt.wheel_event(notch);
+    rt.frame(1.0 / 120.0);
+    let first = start - grid_top(&rt);
+    for _ in 0..80 { rt.frame(1.0 / 60.0); }
+    let settled = start - grid_top(&rt);
+    assert!((settled - 100.0).abs() < 1.0, "one notch travels 100 points, moved {settled}");
+    assert!(first < settled * 0.8, "moved {first} of {settled} on the first frame");
+
     // Arrow keys walk the grid.
     let left = KeyEvent { key: Key::Left, mods: Default::default() };
     rt.update(move |s, tx| { ui::on_key(s, &left, tx); });

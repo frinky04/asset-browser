@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 
-use rune::Pixels;
+use rune::{Live, Pixels};
 
 use crate::library::{Asset, Kind, Library};
 use crate::{model, raster, wave};
@@ -135,6 +135,8 @@ fn read_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
 
 struct Slot {
     pixels: Pixels,
+    /// 0 until the thumbnail arrives, so it can fade in without a view run.
+    fade: Live<f32>,
     loaded: bool,
     stamp: u64,
 }
@@ -200,15 +202,16 @@ impl Thumbs {
         self.shared.work.notify_all();
     }
 
-    /// The tile's image, empty until its thumbnail arrives. Handles are stable per file version.
-    pub fn pixels(&self, key: u64) -> Pixels {
-        let Ok(mut guard) = self.shared.slots.lock() else { return Pixels::new() };
+    /// The tile's image and its opacity, both empty until its thumbnail arrives. Handles are
+    /// stable per file version.
+    pub fn tile(&self, key: u64) -> (Pixels, Live<f32>) {
+        let Ok(mut guard) = self.shared.slots.lock() else { return (Pixels::new(), Live::new(1.0)) };
         let (slots, clock) = &mut *guard;
         *clock += 1;
         let stamp = *clock;
-        let slot = slots.entry(key).or_insert_with(|| Slot { pixels: Pixels::new(), loaded: false, stamp });
+        let slot = slots.entry(key).or_insert_with(|| Slot { pixels: Pixels::new(), fade: Live::new(0.0), loaded: false, stamp });
         slot.stamp = stamp;
-        slot.pixels.clone()
+        (slot.pixels.clone(), slot.fade.clone())
     }
 
     /// Replaces what's wanted now. Called as the grid scrolls, so it stays cheap.
@@ -324,6 +327,7 @@ fn worker(shared: &Arc<Shared>, crawls: bool) {
                 if let Some(slot) = guard.0.get_mut(&key).filter(|s| show || !s.loaded) {
                     slot.loaded = true;
                     if let Some((w, h, rgba)) = image { slot.pixels.set(w, h, rgba); }
+                    slot.fade.set(1.0);
                 }
             }
         }
@@ -439,10 +443,12 @@ mod tests {
         let key = lib.assets[0].key;
         let thumbs = Thumbs::new(d.join("cache"));
         thumbs.set_library(lib);
-        let pixels = thumbs.pixels(key);
+        let (pixels, fade) = thumbs.tile(key);
+        assert_eq!(fade.get(), 0.0);
         thumbs.want(vec![0]);
         thumbs.settle(std::time::Duration::from_secs(5));
         assert_eq!(pixels.size(), (256, 128));
+        assert_eq!(fade.get(), 1.0, "and it fades in");
         assert_eq!(thumbs.facts(key).unwrap().width, 512);
         assert_eq!(thumbs.progress(), (1, 1));
     }

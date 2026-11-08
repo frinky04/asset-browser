@@ -5,8 +5,9 @@
 use std::sync::LazyLock;
 
 use rune::color::hex;
-use rune::{Color, Cursor, Cx, El, GrowthSpec, Icon, Phase, PointerButton, ScrollSpec, SurfaceFit, TextStyle, Tx, col, el, icon, memo, row, text};
-use rune_kit::{Kit, PaletteSeed, ScrollBar, TextInput};
+use rune::tok::motion;
+use rune::{Color, Cursor, Cx, El, GrowthSpec, Icon, Phase, PointerButton, ScrollSpec, Spring, SurfaceFit, TextStyle, Transition, Tx, col, el, icon, memo, row, text};
+use rune_kit::{Kit, PaletteSeed, ScrollBar, ScrollBarStyle, TextInput};
 
 use crate::app::{App, GRID_GAP, GRID_INSET, GRID_PAD, INSPECTOR_DEFAULT, TILE_PAD, Preview, bytes, clock, commas, ladder};
 use crate::library::{Asset, Kind, Sort};
@@ -25,6 +26,7 @@ pub struct Tokens {
     accent: Color,
     on_accent: Color,
     hover: Color,
+    press: Color,
 }
 
 fn color(s: &str) -> Color {
@@ -43,6 +45,7 @@ pub static T: LazyLock<Tokens> = LazyLock::new(|| Tokens {
     accent: color("#F2F2F2"),
     on_accent: color("#0A0A0A"),
     hover: color("#FFFFFF0C"),
+    press: color("#FFFFFF18"),
 });
 
 const PANEL_RADIUS: f32 = 12.0;
@@ -52,8 +55,16 @@ pub const WINDOW_GAP: f32 = 8.0;
 pub const SIDEBAR_W: f32 = 244.0;
 /// The outer height a segmented control comes to, shared with the controls beside them.
 const CONTROL_H: f32 = 30.0;
+/// A segment inside that height, less the hairline and the 2-point padding on each side.
+const SEGMENT_H: f32 = 24.0;
 const TILE_GAP: f32 = 7.0;
 const TILE_RADIUS: f32 = 11.0;
+const PACK_ROW: f32 = 32.0;
+const PACK_GAP: f32 = 1.0;
+const PACK_LEFT: f32 = 8.0;
+const PACK_RIGHT: f32 = 12.0;
+/// How long a thumbnail takes to appear once it has arrived.
+const THUMB_FADE: Spring = Spring::new(0.16, 0.0);
 const EDGE_STRONG: &str = "#484848";
 /// Below this the inspector gives its details' room to the preview.
 const SHORT_WINDOW: f32 = 740.0;
@@ -62,6 +73,8 @@ fn kit() -> &'static Kit {
     static K: LazyLock<KitCell> = LazyLock::new(|| {
         let mut k = Kit::from_palette(PaletteSeed { bg: T.panel, fg: T.text, accent: T.accent });
         k.c.border_focus = T.faint;
+        k.c.border_muted = color("#3C3C3C");
+        k.c.border_strong = color("#6A6A6A");
         k.radius.md = CONTROL_RADIUS;
         KitCell(k)
     });
@@ -92,7 +105,8 @@ const PAUSE: Icon = Icon { name: "ab-pause", view: 16.0, body: r#"<path d="M4.5 
 const FOLDER: Icon = Icon { name: "ab-folder", view: 16.0, body: r#"<path d="M2 4.5A1.5 1.5 0 013.5 3h2.6l1.5 1.7h4.9A1.5 1.5 0 0114 6.2v5.3a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 11.5v-7z" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linejoin="round"/>"# };
 const COPY: Icon = Icon { name: "ab-copy", view: 16.0, body: r#"<rect x="5.5" y="5.5" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M10.5 3.5v-.0A1 1 0 009.5 2.5h-6a1 1 0 00-1 1v6a1 1 0 001 1" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round"/>"# };
 const CHECK: Icon = Icon { name: "ab-check", view: 16.0, body: r#"<path d="M3.5 8.5l3 3 6-7" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>"# };
-const GRIP: Icon = Icon { name: "ab-grip", view: 16.0, body: r#"<g fill="currentColor"><circle cx="5.5" cy="3.5" r="1.35"/><circle cx="10.5" cy="3.5" r="1.35"/><circle cx="5.5" cy="8" r="1.35"/><circle cx="10.5" cy="8" r="1.35"/><circle cx="5.5" cy="12.5" r="1.35"/><circle cx="10.5" cy="12.5" r="1.35"/></g>"# };
+const PANEL: Icon = Icon { name: "ab-panel", view: 16.0, body: r#"<rect x="2" y="3" width="12" height="10" rx="2" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M6.2 3.3v9.4" stroke="currentColor" stroke-width="1.3"/>"# };
+const GRIP: Icon =Icon { name: "ab-grip", view: 16.0, body: r#"<g fill="currentColor"><circle cx="5.5" cy="3.5" r="1.35"/><circle cx="10.5" cy="3.5" r="1.35"/><circle cx="5.5" cy="8" r="1.35"/><circle cx="10.5" cy="8" r="1.35"/><circle cx="5.5" cy="12.5" r="1.35"/><circle cx="10.5" cy="12.5" r="1.35"/></g>"# };
 
 fn label(s: impl Into<String>, style: TextStyle, c: Color) -> El {
     text(s.into()).font(style).color(c)
@@ -107,13 +121,25 @@ fn hairline() -> El {
     el().w_full().h(1.0).fill(T.line).a11y_hidden()
 }
 
-/// A quiet outlined button with an icon.
-fn outlined(name: &str, glyph: &'static Icon, f: impl Fn(&mut App, &mut Tx) + 'static) -> El {
+/// Two things in the same cell: `on` fades in as `off` fades out, without either moving or
+/// changing the size of what holds them.
+fn swap(off: El, on: El, showing: bool) -> El {
+    let shown = |e: El, visible: bool| e.grid_cell(0).opacity(if visible { 1.0 } else { 0.0 }).scale(if visible { 1.0 } else { 0.86 }).motion(motion::SNAPPY).center_y();
+    el().equal_columns(1).child(shown(off, !showing)).child(shown(on, showing))
+}
+
+/// A quiet outlined button with an icon, which says so when its action has happened.
+fn outlined(name: &str, done: &str, done_now: bool, glyph: &'static Icon, f: impl Fn(&mut App, &mut Tx) + 'static) -> El {
     row().key(name.to_owned()).role("button").focusable(true).label(name.to_owned()).px(11.0).h(30.0).gap(7.0).radius(CONTROL_RADIUS).items_center()
-        .border(1.0, T.line).hover(T.hover).cursor(Cursor::Pointer)
+        .border(1.0, T.line).hover(T.hover).press(T.press).press_scale(0.97).cursor(Cursor::Pointer)
         .on_press_tx(f)
-        .child(icon(glyph, 14.0).color(T.muted))
-        .child(label(name.to_owned(), LABEL, T.text))
+        .child(swap(icon(glyph, 14.0).color(T.muted), icon(&CHECK, 14.0).color(T.text), done_now))
+        .child(swap(label(name.to_owned(), LABEL, T.text), label(done.to_owned(), LABEL, T.text), done_now))
+}
+
+/// An overlay thumb, clear of whatever the list draws beside it.
+fn scroll_style() -> ScrollBarStyle {
+    ScrollBarStyle::scroll_view(kit())
 }
 
 struct Segment<V> {
@@ -129,14 +155,19 @@ fn plain<V>(name: impl Into<String>, value: V) -> Segment<V> {
 
 /// A row of mutually exclusive choices inside a hairline. The current one is raised.
 fn segments<V: Copy + PartialEq + 'static>(key: &str, items: Vec<Segment<V>>, current: V, on: impl Fn(&mut App, V, &mut Tx) + Clone + 'static) -> El {
-    let mut bar = row().key(key.to_owned()).h(CONTROL_H).radius(CONTROL_RADIUS + 2.0).border(1.0, T.line).padding(2.0).gap(1.0).items_center();
-    for Segment { name, count, glyph, value } in items {
+    let mut bar = row().key(key.to_owned()).role("radiogroup").h(CONTROL_H).radius(CONTROL_RADIUS + 2.0).border(1.0, T.line).padding(2.0).equal_columns(items.len());
+    // The indicator shares the chosen segment's cell, so it slides when the choice moves.
+    if let Some(at) = items.iter().position(|i| i.value == current) {
+        bar = bar.child(el().key("indicator").grid_cell(at).h(SEGMENT_H).radius(CONTROL_RADIUS).fill(T.raised).lead(motion::LEAD, motion::DEFAULT).a11y_hidden());
+    }
+    for (at, Segment { name, count, glyph, value }) in items.into_iter().enumerate() {
         let selected = value == current;
         let on = on.clone();
         let whole = count.as_ref().map_or_else(|| name.clone(), |c| format!("{name} {c}"));
-        let mut item = row().role("radio").checked(selected).label(whole.clone()).focusable(true).key(whole).px(9.0).h(26.0).gap(6.0).radius(CONTROL_RADIUS).items_center()
-            .fill(if selected { T.raised } else { Color::TRANSPARENT })
+        let mut item = row().role("radio").checked(selected).label(whole.clone()).focusable(true).key(whole).grid_cell(at).px(10.0).h(SEGMENT_H).gap(6.0).radius(CONTROL_RADIUS).center()
             .hover(if selected { Color::TRANSPARENT } else { T.hover })
+            .press(T.press)
+            .press_scale(0.96)
             .cursor(Cursor::Pointer)
             .on_press_tx(move |s: &mut App, tx| on(s, value, tx));
         if let Some(g) = glyph { item = item.child(icon(g, 14.0).color(if selected { T.text } else { T.muted })); }
@@ -157,9 +188,11 @@ fn kind_tabs_width(s: &App) -> f32 {
     let r = &s.results;
     let tab = |name: &str, n: u32| {
         let count = if s.is_compact() { 0.0 } else { 6.0 + short_count(n).len() as f32 * 7.0 };
-        18.0 + 20.0 + name.len() as f32 * 7.2 + count
+        20.0 + 20.0 + name.len() as f32 * 7.2 + count
     };
-    6.0 + tab("All", r.any_kind) + tab("Textures", r.by_kind[0]) + tab("Models", r.by_kind[1]) + tab("Audio", r.by_kind[2])
+    // The tabs share equal columns, so the widest sets them all.
+    let widest = tab("All", r.any_kind).max(tab("Textures", r.by_kind[0])).max(tab("Models", r.by_kind[1])).max(tab("Audio", r.by_kind[2]));
+    6.0 + widest * 4.0
 }
 
 fn kind_tabs(s: &App) -> El {
@@ -202,8 +235,13 @@ fn header(s: &App) -> El {
     if !s.is_compact() {
         title = title.child(label(format!("{} assets", commas(s.results.ids.len())), SMALL, T.muted).mb(2.0));
     }
-    row().key("toolbar").w_full().h(58.0).px(GRID_PAD).gap(12.0).items_center()
-        .child(title)
+    let toggle_panel = el().key("sidebar-toggle").role("button").focusable(true).label("Toggle library panel").help("Toggle library panel (Ctrl+B)").size(30.0, 30.0).radius(CONTROL_RADIUS).center()
+        .hover(T.hover).press(T.press).press_scale(0.94).cursor(Cursor::Pointer)
+        .on_press_tx(|s: &mut App, tx| s.toggle_sidebar(tx))
+        .child(icon(&PANEL, 16.0).color(T.muted));
+    row().key("toolbar").w_full().h(58.0).pl(GRID_PAD - 7.0).pr(GRID_PAD).gap(8.0).items_center()
+        .child(toggle_panel)
+        .child(title.mr(4.0))
         .child(if s.grid_width < 700.0 { sort_cycle(s) } else { segments("sort", sorts, s.filter.sort, |s, v, tx| s.set_sort(v, tx)) })
         .child(search_box(s))
 }
@@ -226,6 +264,8 @@ fn chip(key: String, name: String, count: Option<String>, on: bool, f: impl Fn(&
     let mut c = row().key(key.clone()).role("button").focusable(true).label(key).px(9.0).h(26.0).gap(5.0).radius(CONTROL_RADIUS).items_center()
         .fill(if on { T.raised } else { Color::TRANSPARENT })
         .hover(if on { Color::TRANSPARENT } else { T.hover })
+        .press(T.press)
+        .press_scale(0.96)
         .cursor(Cursor::Pointer)
         .on_press_tx(f)
         .child(label(name, SMALL, if on { T.text } else { T.muted }));
@@ -235,14 +275,21 @@ fn chip(key: String, name: String, count: Option<String>, on: bool, f: impl Fn(&
 
 /// An on/off control, drawn so its state reads without comparing it to its neighbours.
 fn toggle(name: &str, on: bool, f: impl Fn(&mut App, &mut Tx) + 'static) -> El {
-    let mut t = row().key(name.to_owned()).role("switch").checked(on).focusable(true).label(name.to_owned()).px(10.0).h(CONTROL_H).gap(5.0).radius(CONTROL_RADIUS).items_center()
+    // The box is always there, so turning it on moves nothing.
+    let tick = icon(&CHECK, 10.0).color(T.on_accent).opacity(if on { 1.0 } else { 0.0 }).scale(if on { 1.0 } else { 0.6 }).motion(motion::SNAPPY);
+    let check = el().key("check").size(14.0, 14.0).radius(4.0).center().motion(motion::SNAPPY)
+        .fill(if on { T.accent } else { Color::TRANSPARENT })
+        .border(1.0, if on { T.accent } else { T.faint })
+        .child(tick);
+    row().key(name.to_owned()).role("switch").checked(on).focusable(true).label(name.to_owned()).px(10.0).h(CONTROL_H).gap(7.0).radius(CONTROL_RADIUS).items_center()
         .border(1.0, T.line)
-        .fill(if on { T.raised } else { Color::TRANSPARENT })
-        .hover(if on { Color::TRANSPARENT } else { T.hover })
+        .hover(T.hover)
+        .press(T.press)
+        .press_scale(0.97)
         .cursor(Cursor::Pointer)
-        .on_press_tx(f);
-    if on { t = t.child(icon(&CHECK, 12.0).color(T.text)); }
-    t.child(label(name.to_owned(), LABEL, if on { T.text } else { T.muted }))
+        .on_press_tx(f)
+        .child(check)
+        .child(label(name.to_owned(), LABEL, if on { T.text } else { T.muted }))
 }
 
 /// A chip that's its own label.
@@ -292,26 +339,40 @@ fn filter_bar(s: &App) -> El {
 }
 
 fn sidebar(s: &App) -> El {
-    let mut list = col().key("packlist").w_full().px(8.0).pb(8.0).gap(1.0);
+    // Rows stop short of the panel's edge, leaving the scroll thumb a clear lane of its own.
+    let mut list = col().key("packlist").w_full().pl(PACK_LEFT).pr(PACK_RIGHT).pb(8.0).gap(PACK_GAP).instant_changes();
     let row_for = |name: String, count: usize, on: bool, pack: Option<u32>| {
-        row().key(name.clone()).role("button").focusable(true).label(name.clone()).w_full().h(32.0).px(10.0).radius(CONTROL_RADIUS).items_center().gap(8.0)
-            .fill(if on { T.raised } else { Color::TRANSPARENT })
+        row().key(name.clone()).role("button").focusable(true).label(name.clone()).w_full().h(PACK_ROW).px(10.0).radius(CONTROL_RADIUS).items_center().gap(8.0)
             .hover(if on { Color::TRANSPARENT } else { T.hover })
+            .press(T.press)
+            .press_scale(0.985)
             .cursor(Cursor::Pointer)
             .on_press_tx(move |s: &mut App, tx| s.set_pack(pack, tx))
             .child(el().grow(1.0).min_w(0.0).child(text(name).font(BODY).color(if on { T.text } else { T.muted }).truncate()))
             .child(label(commas(count), SMALL, if on { T.muted } else { T.faint }))
     };
     list = list.child(row_for("All packs".to_owned(), s.results.any_pack as usize, s.filter.pack.is_none(), None));
+    let (mut shown, mut active) = (1usize, 0usize);
     for (i, pack) in s.lib.packs.iter().enumerate() {
         let i = i as u32;
         let count = s.results.by_pack.get(i as usize).copied().unwrap_or(0) as usize;
         // A filter's dead ends only add noise; the selected pack stays so it can be cleared.
         if count == 0 && s.filter.pack != Some(i) { continue }
+        if s.filter.pack == Some(i) { active = shown; }
+        shown += 1;
         list = list.child(row_for(pack.name.clone(), count, s.filter.pack == Some(i), Some(i)));
     }
-    let scroller = col().key("packs").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(list).scroll_bar(kit());
-    surface(col().key("sidebar").w(SIDEBAR_W).h_full().min_h(0.0))
+    // One pill that slides to the chosen pack.
+    let pill = el().key("pack-pill").pin(Some(PACK_LEFT), Some(active as f32 * (PACK_ROW + PACK_GAP)), Some(PACK_RIGHT), None).h(PACK_ROW).radius(CONTROL_RADIUS).fill(T.raised)
+        .lead(motion::LEAD, motion::DEFAULT).a11y_hidden();
+    let scroller = col().key("packs").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false })
+        .on_wheel(|s: &mut App, e, tx| s.packs_glide.wheel("packs", e, tx))
+        .on_scroll_offset(s.packs_glide.watch())
+        .child(col().w_full().child(pill).child(list)).scroll_bar_styled(scroll_style());
+    let open = s.sidebar_open;
+    let mut panel = surface(el().key("sidebar").w(if open { SIDEBAR_W } else { 0.0 }).h_full().min_h(0.0)).opacity(if open { 1.0 } else { 0.0 }).clip_soft(0.0);
+    if !open { panel = panel.inert(); }
+    panel.child(col().w(SIDEBAR_W).h_full().min_h(0.0)
         .child(col().w_full().h(58.0).px(18.0).justify_center()
             .child(text("Library").key("library-title").font(TITLE).color(T.text))
             .child(label(format!("{} files in {} packs", commas(s.lib.assets.len()), s.lib.packs.len()), SMALL, T.muted)))
@@ -319,14 +380,14 @@ fn sidebar(s: &App) -> El {
         .child(hairline())
         .child(el().w_full().padding(8.0).child(
             row().key("change-root").role("button").focusable(true).label("Change library folder").w_full().h(32.0).px(10.0).gap(8.0).radius(CONTROL_RADIUS).items_center()
-                .hover(T.hover).cursor(Cursor::Pointer)
+                .hover(T.hover).press(T.press).press_scale(0.985).cursor(Cursor::Pointer)
                 .on_press_tx(|_: &mut App, tx: &mut Tx| {
                     tx.open_folder(rune::FileDialogOptions { title: "Choose a library folder".into(), ..Default::default() }, |s: &mut App, picked, _| {
                         if let Ok(Some(path)) = picked { s.change_root(path); }
                     });
                 })
                 .child(icon(&FOLDER, 14.0).color(T.muted))
-                .child(label("Change library folder", BODY, T.muted))))
+                .child(label("Change library folder", BODY, T.muted)))))
 }
 
 fn facts_line(asset: &Asset, facts: Option<Facts>) -> String {
@@ -351,20 +412,19 @@ fn tile(s: &App, id: u32, width: f32, selected: bool) -> El {
     let asset = &s.lib.assets[id as usize];
     let facts = s.thumbs.facts(asset.key);
     let failed = facts.is_some_and(|f| f.failed);
-    let px = s.thumbs.pixels(asset.key);
+    let (px, fade) = s.thumbs.tile(asset.key);
     let inner = width - TILE_PAD * 2.0;
-    let mut picture = el().w(inner).h(s.picture_height()).radius(WELL_RADIUS).fill(T.well).center();
-    picture = if asset.kind == Kind::Audio {
-        // A waveform is drawn to its edges, so it's the one thumbnail that needs a margin.
-        picture.child(el().w(inner - 24.0).h((s.picture_height() - 14.0).max(1.0)).pixels_fit(&px, SurfaceFit::Fit))
-    } else {
-        picture.pixels_fit(&px, SurfaceFit::Fit)
-    };
+    // A waveform is drawn to its edges, so it's the one thumbnail that needs a margin.
+    let (image_w, image_h) = if asset.kind == Kind::Audio { (inner - 24.0, (s.picture_height() - 14.0).max(1.0)) } else { (inner, s.picture_height()) };
+    let image = el().w(image_w).h(image_h).radius(WELL_RADIUS).pixels_fit(&px, SurfaceFit::Fit).live_opacity(fade.smooth(THUMB_FADE));
+    let mut picture = el().w(inner).h(s.picture_height()).radius(WELL_RADIUS).fill(T.well).center().child(image);
     if failed { picture = picture.child(icon(kind_icon(asset.kind), 22.0).color(T.faint)); }
     // Lifts the well under the pointer too, without the view running for every tile crossed.
     picture = picture.child(el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).radius(WELL_RADIUS).fill(color("#FFFFFF10")).border(1.0, color("#3A3A3A")).inert().group_opacity(0.0, 1.0));
     let max = s.drag_max;
     col().key(format!("a{id}")).role("button").label(asset.name().to_owned()).w(width).padding(TILE_PAD).gap(TILE_GAP).radius(TILE_RADIUS).cursor(Cursor::Grab).hover_group()
+        // Filters swap tiles at once; only their colours ease.
+        .transition(Transition::none())
         .fill(if selected { T.raised } else { Color::TRANSPARENT })
         .border(1.0, if selected { T.accent } else { Color::TRANSPARENT })
         .hover(if selected { Color::TRANSPARENT } else { T.hover })
@@ -439,8 +499,11 @@ fn grid(s: &App) -> El {
         .virtual_rows_version((s.generation, s.columns))
         .on_visible_rows(|s: &mut App, range| { s.request_range(range); false });
     let empty = s.results.ids.is_empty() && !s.scanning;
-    let body = col().key("grid").w_full().grow(1.0).min_h(0.0).pt(GRID_INSET)
-        .scroll(ScrollSpec { stick_bottom: false }).child(rows).scroll_bar(kit());
+    let body = col().key("grid").w_full().grow(1.0).min_h(0.0).pt(GRID_INSET).instant_changes()
+        .scroll(ScrollSpec { stick_bottom: false })
+        .on_wheel(|s: &mut App, e, tx| s.grid_glide.wheel("grid", e, tx))
+        .on_scroll_offset(s.grid_glide.watch())
+        .child(rows).scroll_bar_styled(scroll_style());
     let mut pane = col().w_full().grow(1.0).min_h(0.0).on_layout(|s: &mut App, r: [f32; 4]| {
         if (r[2] - s.grid_width).abs() > 0.5 { s.set_grid_width(r[2]); }
     });
@@ -465,7 +528,10 @@ fn status_bar(s: &App) -> El {
     } else {
         bar.child(el().grow(1.0))
     };
-    if let Some(m) = &s.message { bar = bar.child(el().min_w(0.0).child(text(m.clone()).key("message").font(SMALL).color(T.text).truncate())); }
+    if let Some(m) = &s.message {
+        bar = bar.child(el().key(format!("message-{m}")).min_w(0.0).transition(Transition::offset(0.0, 5.0).combined(Transition::opacity()))
+            .child(text(m.clone()).key("message").font(SMALL).color(T.text).truncate()));
+    }
     if s.filter.kind.is_none_or(|k| k == Kind::Texture) {
         let mut drag_at = row().gap(8.0).items_center();
         if !s.is_compact() { drag_at = drag_at.child(label("Drag textures at", SMALL, T.muted)); }
@@ -538,7 +604,7 @@ fn rung(id: u32, name: String, max: Option<u32>, side: f32, on: bool) -> El {
             s.drag_gesture(id, max, drag);
             if drag.phase == Phase::Move { tx.live_only(); }
         })
-        .child(el().w(side).h(side).radius(6.0).center().fill(T.raised).hover(T.hover).border(1.0, if on { T.accent } else { color(EDGE_STRONG) })
+        .child(el().w(side).h(side).radius(6.0).center().fill(T.raised).hover(T.hover).press(T.press).motion(motion::SNAPPY).border(1.0, if on { T.accent } else { color(EDGE_STRONG) })
             .child(icon(&GRIP, 12.0).color(if on { T.text } else { T.muted })))
         .child(label(name, SMALL, if on { T.text } else { T.muted }))
 }
@@ -644,7 +710,7 @@ fn pane(s: &App, id: u32, asset: &Asset) -> Pane {
             Pane { tools: None, stage: model_stage_handlers(stage_el()), hint: Some("Drag to orbit, right-drag to pan, scroll to zoom"), corner: Some(tool("Reset view", false, |s, _| s.reset_view())), dock: None, actions }
         }
         Preview::Audio { seconds, rate, channels } => {
-            let playing = s.audio.is_playing();
+            let playing = s.showing_playing;
             let wave = el().key("waveform").w_full().h(200.0).cursor(Cursor::Pointer)
                 .pixels(&s.wave)
                 .on_layout(|s: &mut App, r: [f32; 4]| s.stage_size = [r[2], r[3]])
@@ -653,9 +719,9 @@ fn pane(s: &App, id: u32, asset: &Asset) -> Pane {
                 })
                 .child(el().key("playhead").w(1.5).h_full().fill(T.accent).absolute(0.0, 0.0).live_offset(&s.playhead));
             let dock = row().key("tools").w_full().gap(10.0).items_center()
-                .child(el().key("play").role("button").label(if playing { "Pause" } else { "Play" }).focusable(true).size(30.0, 30.0).radius(15.0).center().fill(T.accent).cursor(Cursor::Pointer)
-                    .on_press(|s: &mut App| s.toggle_playback())
-                    .child(icon(if playing { &PAUSE } else { &PLAY }, 14.0).color(T.on_accent)))
+                .child(el().key("play").role("button").label(if playing { "Pause" } else { "Play" }).focusable(true).size(30.0, 30.0).radius(15.0).center().fill(T.accent).press_scale(0.9).cursor(Cursor::Pointer)
+                    .on_press_tx(|s: &mut App, tx| s.toggle_playback(tx))
+                    .child(swap(icon(&PLAY, 14.0).color(T.on_accent), icon(&PAUSE, 14.0).color(T.on_accent), playing)))
                 .child(text("0:00.0 / 0:00.0").live_text(&s.clock).font(NUMBERS).color(T.muted).grow(1.0))
                 .child(toggle("Play on select", s.autoplay, |s, _| s.autoplay = !s.autoplay));
             let detail = format!("{}, {} Hz, {} ch", clock(*seconds), commas(*rate as usize), channels);
@@ -682,7 +748,10 @@ fn inspector(s: &App) -> El {
             .child(label("Preview textures, models and audio here.", SMALL, T.muted).mt(4.0));
     };
     let Pane { tools, stage, hint, corner, dock, actions } = pane(s, id, asset);
-    let mut body = col().w_full().padding(14.0).gap(12.0).min_h(0.0).grow(1.0);
+    // Selecting within a kind swaps at once; arriving at a different kind fades the new layout in.
+    let kind_key = match asset.kind { Kind::Texture => "texture-pane", Kind::Model => "model-pane", Kind::Audio => "audio-pane" };
+    let mut body = col().key(kind_key).w_full().padding(14.0).gap(12.0).min_h(0.0).grow(1.0).instant_changes()
+        .transition(Transition::asymmetric(Transition::opacity(), Transition::none()));
     body = body.child(col().w_full().gap(2.0)
         .child(text(asset.name().to_owned()).key("name").font(FILE_TITLE).color(T.text).wrap_anywhere().max_lines(2))
         .child(text(asset.folder().to_owned()).font(SMALL).color(T.muted).truncate_head().w_full()));
@@ -715,8 +784,14 @@ fn inspector(s: &App) -> El {
 
     let path = s.asset_path(id).map(|p| p.display().to_string()).unwrap_or_default();
     body = body.child(row().w_full().gap(8.0)
-        .child(outlined("Show in Explorer", &FOLDER, move |s, _| s.reveal(id)))
-        .child(outlined("Copy path", &COPY, move |_, tx| tx.copy(path.clone()))));
+        .child(outlined("Show in Explorer", "Opened", s.is_confirmed("reveal"), &FOLDER, move |s, tx| {
+            s.reveal(id);
+            s.confirm("reveal", tx);
+        }))
+        .child(outlined("Copy path", "Copied", s.is_confirmed("copy"), &COPY, move |s, tx| {
+            tx.copy(path.clone());
+            s.confirm("copy", tx);
+        })));
     shell.child(body)
 }
 
@@ -746,7 +821,7 @@ pub fn view(s: &App, _: &mut Cx<App>) -> El {
     row().key("root").w_full().h_full().fill(T.bg).padding(WINDOW_GAP)
         .on_layout(|s: &mut App, r: [f32; 4]| { s.window_width = r[2]; s.window_height = r[3]; })
         .child(sidebar(s))
-        .child(el().w(WINDOW_GAP).h_full())
+        .child(el().key("sidebar-gap").w(if s.sidebar_open { WINDOW_GAP } else { 0.0 }).h_full())
         .child(main)
         .child(inspector_handle())
         .child(inspector(s))
@@ -754,6 +829,10 @@ pub fn view(s: &App, _: &mut Cx<App>) -> El {
 
 pub fn on_key(s: &mut App, event: &rune::KeyEvent, tx: &mut Tx) -> bool {
     use rune::Key;
+    if event.is_command('b') {
+        s.toggle_sidebar(tx);
+        return true;
+    }
     if tx.focused().is_some_and(|f| f.contains("search")) {
         if matches!(event.key, Key::Escape) { tx.blur(); return true; }
         return false;
@@ -764,7 +843,7 @@ pub fn on_key(s: &mut App, event: &rune::KeyEvent, tx: &mut Tx) -> bool {
         Key::Right => s.step_selection(1, tx),
         Key::Up => s.step_selection(-cols, tx),
         Key::Down => s.step_selection(cols, tx),
-        Key::Text(t) if t == " " => s.toggle_playback(),
+        Key::Text(t) if t == " " => s.toggle_playback(tx),
         Key::Text(t) if t == "/" => s.search.focused = true,
         Key::Escape if !s.search.text.is_empty() => {
             s.search = rune::TextEdit::new("");
