@@ -16,8 +16,6 @@ use crate::raster::LIGHT;
 /// The slot's `El::effect` mark and the element key the stage's size is read from.
 pub const STAGE_MARK: u32 = 1;
 pub const STAGE_KEY: &str = "stage";
-/// The stage's backdrop, sRGB-encoded: the same colour as the UI's wells.
-const BACKDROP: [f32; 3] = [0.106, 0.106, 0.106];
 pub const FOV_DEGREES: f32 = 38.0;
 /// The stage's corner radius in points, matching the wells around it.
 const CORNER_RADIUS: f32 = 8.0;
@@ -84,11 +82,25 @@ pub struct StageState {
     pub view: View,
     /// Bumped when the camera should jump rather than ease.
     pub snap: u64,
+    pub look: Look,
+}
+
+/// Colours the stage paints itself, sRGB-encoded, to match the UI's theme.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Look {
+    pub backdrop: [f32; 3],
+    /// The two squares of the checkerboard behind transparent textures.
+    pub check: [f32; 2],
+}
+
+impl Look {
+    pub const DARK: Look = Look { backdrop: [0.106, 0.106, 0.106], check: [0.16, 0.22] };
+    pub const LIGHT: Look = Look { backdrop: [0.929, 0.929, 0.937], check: [0.80, 0.90] };
 }
 
 impl Default for StageState {
     fn default() -> Self {
-        StageState { scene: Scene::Empty, revision: 0, view: View::default(), snap: 0 }
+        StageState { scene: Scene::Empty, revision: 0, view: View::default(), snap: 0, look: Look::DARK }
     }
 }
 
@@ -132,7 +144,7 @@ struct V { @builtin(position) p: vec4f, @location(0) uv: vec2f }
 "#;
 
 const TEXTURE_WGSL: &str = r#"
-struct U { view: vec2f, size: vec2f, offset: vec2f, zoom: f32, tile: f32, seams: f32, back: vec3f }
+struct U { view: vec2f, size: vec2f, offset: vec2f, zoom: f32, tile: f32, seams: f32, check_a: f32, check_b: f32, back: vec3f }
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var image: texture_2d<f32>;
 @group(0) @binding(2) var smp: sampler;
@@ -146,7 +158,7 @@ struct V { @builtin(position) p: vec4f, @location(0) px: vec2f }
     let texel = textureSample(image, smp, uv);
     let cell = floor(v.px / 9.0);
     let odd = (cell.x + cell.y) % 2.0;
-    let check = mix(vec3f(0.16), vec3f(0.22), abs(odd));
+    let check = mix(vec3f(u.check_a), vec3f(u.check_b), abs(odd));
     var out = mix(check, texel.rgb, texel.a);
     let inside = all(uv >= vec2f(0.0)) && all(uv <= vec2f(1.0));
     if (u.tile < 0.5 && !inside) { out = u.back; }
@@ -185,7 +197,8 @@ struct TextureUniform {
     zoom: f32,
     tile: f32,
     seams: f32,
-    pad: [f32; 3],
+    check: [f32; 2],
+    pad: f32,
     back: [f32; 3],
     end: f32,
 }
@@ -514,6 +527,7 @@ impl Compositor<App> for StageCompositor {
             self.seen_revision = state.revision;
         }
         // Ease the camera; a headless run lands at once, so a snapshot is exact.
+        let look = state.look;
         let target = state.view;
         let jump = state.snap != self.seen_snap || rune::tooling::headless_run().is_some();
         self.seen_snap = state.snap;
@@ -534,7 +548,7 @@ impl Compositor<App> for StageCompositor {
                     self.target = Some(Target::new(f.device, pipes, size));
                 }
                 f.queue.write_buffer(&pipes.blit_shape, 0, bytemuck::cast_slice(&[size.0 as f32, size.1 as f32, CORNER_RADIUS * scale, 0.0]));
-                if let Some(target) = &self.target { draw_scene(f.queue, f.encoder, pipes, target, scene, &view, [r[2], r[3]], scale); }
+                if let Some(target) = &self.target { draw_scene(f.queue, f.encoder, pipes, target, scene, &view, [r[2], r[3]], scale, look); }
                 Some([r[0] * scale, r[1] * scale, size.0 as f32, size.1 as f32])
             }
             _ => None,
@@ -560,8 +574,8 @@ impl Compositor<App> for StageCompositor {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_scene(queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, pipes: &Pipes, target: &Target, scene: &GpuScene, view: &View, stage: [f32; 2], scale: f32) {
-    let back = wgpu::Color { r: f64::from(BACKDROP[0]), g: f64::from(BACKDROP[1]), b: f64::from(BACKDROP[2]), a: 1.0 };
+fn draw_scene(queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, pipes: &Pipes, target: &Target, scene: &GpuScene, view: &View, stage: [f32; 2], scale: f32, look: Look) {
+    let back = wgpu::Color { r: f64::from(look.backdrop[0]), g: f64::from(look.backdrop[1]), b: f64::from(look.backdrop[2]), a: 1.0 };
     match scene {
         GpuScene::Texture { size, groups } => {
             let fit = fit_scale(stage, *size);
@@ -572,8 +586,9 @@ fn draw_scene(queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, pipes: &P
                 zoom: fit * view.zoom * scale,
                 tile: f32::from(u8::from(view.tile)),
                 seams: f32::from(u8::from(view.seams)),
-                pad: [0.0; 3],
-                back: BACKDROP,
+                check: look.check,
+                pad: 0.0,
+                back: look.backdrop,
                 end: 0.0,
             };
             queue.write_buffer(&pipes.texture_uniform, 0, bytemuck::bytes_of(&uniform));

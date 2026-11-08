@@ -30,7 +30,7 @@ fn the_filter_row_stays_inside_its_panel_at_every_width() {
     for ext in ["png", "jpg", "jpeg", "bmp", "tga", "webp", "glb", "gltf", "obj", "dae", "wav", "ogg", "mp3", "flac"] {
         for i in 0..3 { files.push(library::Entry { rel: format!("Pack/{ext}_{i}.{ext}"), size: 1, mtime: 1 }); }
     }
-    let mut state = app::init();
+    let mut state = app::init_with(rune::prefs::Prefs::memory());
     state.lib = Arc::new(library::Library::build(PathBuf::from("Z:/none"), files));
     state.results = library::search(&state.lib, &state.filter);
     state.scanning = false;
@@ -55,6 +55,47 @@ fn the_filter_row_stays_inside_its_panel_at_every_width() {
     }
 }
 
+#[test]
+fn settings_open_apply_and_survive_a_restart() {
+    isolate();
+    let mut state = app::init_with(rune::prefs::Prefs::memory());
+    state.lib = Arc::new(library::Library::build(PathBuf::from("Z:/none"), vec![library::Entry { rel: "Pack/a.png".into(), size: 1, mtime: 1 }]));
+    state.results = library::search(&state.lib, &state.filter);
+    state.scanning = false;
+    let mut rt = Runtime::new(state, ui::view, (1520.0, 900.0), Env::new(true, 1.0));
+    settle(&mut rt);
+
+    click(&mut rt, "settings-button");
+    assert!(rt.state.settings_open);
+    for _ in 0..40 { rt.frame(1.0 / 60.0); }
+    click(&mut rt, "theme/Light");
+    assert_eq!(rt.state.theme, app::Theme::Light);
+    settle(&mut rt);
+    assert!(!rt.state.resolved_dark.get(), "the view drew with the light palette");
+    let (x, y) = rt.find("volume").unwrap();
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    settle(&mut rt);
+    rt.pointer_up(x, y);
+    settle(&mut rt);
+    assert!((rt.state.volume - 0.5).abs() < 0.02, "the middle of the slider is half: {}", rt.state.volume);
+    click(&mut rt, "Play sounds on select");
+    assert!(!rt.state.autoplay);
+    rt.update(|s, tx| { s.poll(tx); });
+    assert_eq!(rt.state.stage.look, crate::stage::Look::LIGHT, "the preview follows the theme");
+
+    // Escape closes it, and keys don't reach the grid underneath meanwhile.
+    rt.key(KeyEvent { key: Key::Escape, mods: Default::default() });
+    settle(&mut rt);
+    assert!(!rt.state.settings_open);
+
+    // A new launch reads what was saved.
+    let again = app::init_with(std::mem::replace(&mut rt.state.prefs, rune::prefs::Prefs::memory()));
+    assert_eq!(again.theme, app::Theme::Light);
+    assert!(!again.autoplay);
+    assert!((again.volume - rt.state.volume).abs() < 1e-3);
+}
+
 fn fixture() -> (PathBuf, Vec<u8>) {
     let dir = std::env::temp_dir().join(format!("ab-app-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -71,7 +112,7 @@ fn fixture() -> (PathBuf, Vec<u8>) {
 }
 
 fn app_on(root: &Path) -> Runtime<App> {
-    let mut state = app::init();
+    let mut state = app::init_with(rune::prefs::Prefs::memory());
     state.lib = Arc::new(library::Library::build(root.to_path_buf(), library::walk(root)));
     state.thumbs.set_library(state.lib.clone());
     state.results = library::search(&state.lib, &state.filter);

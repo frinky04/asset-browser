@@ -3,14 +3,16 @@
 //! only colour on screen.
 
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rune::color::hex;
 use rune::tok::motion;
 use rune::{Color, Cursor, Cx, El, GrowthSpec, Icon, Phase, PointerButton, ScrollSpec, Spring, SurfaceFit, TextStyle, Transition, Tx, col, el, icon, memo, row, text};
 use rune_kit::{Kit, PaletteSeed, ScrollBar, ScrollBarStyle, TextInput};
 
-use crate::app::{App, GRID_GAP, GRID_INSET, GRID_PAD, INSPECTOR_DEFAULT, TILE_PAD, Preview, bytes, clock, commas, ladder};
+use crate::app::{App, GRID_GAP, GRID_INSET, GRID_PAD, INSPECTOR_DEFAULT, TILE_PAD, Preview, Theme, bytes, clock, commas, ladder};
 use crate::library::{Asset, Kind, Sort};
+use crate::settings;
 use crate::stage::{FOV_DEGREES, STAGE_KEY, STAGE_MARK, actual_size_zoom, zoom_about};
 use crate::thumbs::Facts;
 
@@ -19,21 +21,26 @@ pub struct Tokens {
     panel: Color,
     well: Color,
     raised: Color,
-    line: Color,
-    text: Color,
-    muted: Color,
+    pub(crate) line: Color,
+    pub(crate) text: Color,
+    pub(crate) muted: Color,
     faint: Color,
-    accent: Color,
+    pub(crate) accent: Color,
     on_accent: Color,
-    hover: Color,
-    press: Color,
+    pub(crate) hover: Color,
+    pub(crate) press: Color,
+    well_hover: Color,
+    well_edge: Color,
+    edge_strong: Color,
+    scroll_thumb: Color,
+    scroll_thumb_hover: Color,
 }
 
 fn color(s: &str) -> Color {
     hex(s).unwrap_or(Color::WHITE)
 }
 
-pub static T: LazyLock<Tokens> = LazyLock::new(|| Tokens {
+static DARK: LazyLock<Tokens> = LazyLock::new(|| Tokens {
     bg: color("#090909"),
     panel: color("#151515"),
     well: color("#1B1B1B"),
@@ -46,10 +53,58 @@ pub static T: LazyLock<Tokens> = LazyLock::new(|| Tokens {
     on_accent: color("#0A0A0A"),
     hover: color("#FFFFFF0C"),
     press: color("#FFFFFF18"),
+    well_hover: color("#FFFFFF10"),
+    well_edge: color("#3A3A3A"),
+    edge_strong: color("#484848"),
+    scroll_thumb: color("#3C3C3C"),
+    scroll_thumb_hover: color("#6A6A6A"),
 });
 
-const PANEL_RADIUS: f32 = 12.0;
-const WELL_RADIUS: f32 = 8.0;
+static LIGHT: LazyLock<Tokens> = LazyLock::new(|| Tokens {
+    bg: color("#E4E4E6"),
+    panel: color("#F8F8F9"),
+    well: color("#EDEDEF"),
+    raised: color("#DEDEE1"),
+    line: color("#D6D6D9"),
+    text: color("#161618"),
+    muted: color("#5C5C63"),
+    faint: color("#7C7C84"),
+    accent: color("#161618"),
+    on_accent: color("#F8F8F9"),
+    hover: color("#0000000A"),
+    press: color("#00000016"),
+    well_hover: color("#00000010"),
+    well_edge: color("#C4C4C8"),
+    edge_strong: color("#B4B4B9"),
+    scroll_thumb: color("#C8C8CC"),
+    scroll_thumb_hover: color("#9A9AA0"),
+});
+
+static IS_DARK: AtomicBool = AtomicBool::new(true);
+
+/// Which palette the view builds with. Set at the top of each view run.
+pub fn set_dark(dark: bool) {
+    IS_DARK.store(dark, Ordering::Relaxed);
+}
+
+fn is_dark() -> bool {
+    IS_DARK.load(Ordering::Relaxed)
+}
+
+/// The current palette, read as `T.text`.
+pub struct CurrentPalette;
+
+impl std::ops::Deref for CurrentPalette {
+    type Target = Tokens;
+    fn deref(&self) -> &Tokens {
+        if is_dark() { &DARK } else { &LIGHT }
+    }
+}
+
+pub static T: CurrentPalette = CurrentPalette;
+
+pub(crate) const PANEL_RADIUS: f32 = 12.0;
+pub(crate) const WELL_RADIUS: f32 = 8.0;
 const CONTROL_RADIUS: f32 = 7.0;
 pub const WINDOW_GAP: f32 = 8.0;
 pub const TITLEBAR_H: f32 = 46.0;
@@ -72,20 +127,22 @@ const PACK_LEFT: f32 = 8.0;
 const PACK_RIGHT: f32 = 12.0;
 /// How long a thumbnail takes to appear once it has arrived.
 const THUMB_FADE: Spring = Spring::new(0.16, 0.0);
-const EDGE_STRONG: &str = "#484848";
 /// Below this the inspector gives its details' room to the preview.
 const SHORT_WINDOW: f32 = 740.0;
 
+fn kit_for(t: &Tokens) -> KitCell {
+    let mut k = Kit::from_palette(PaletteSeed { bg: t.panel, fg: t.text, accent: t.accent });
+    k.c.border_focus = t.faint;
+    k.c.border_muted = t.scroll_thumb;
+    k.c.border_strong = t.scroll_thumb_hover;
+    k.radius.md = CONTROL_RADIUS;
+    KitCell(k)
+}
+
 fn kit() -> &'static Kit {
-    static K: LazyLock<KitCell> = LazyLock::new(|| {
-        let mut k = Kit::from_palette(PaletteSeed { bg: T.panel, fg: T.text, accent: T.accent });
-        k.c.border_focus = T.faint;
-        k.c.border_muted = color("#3C3C3C");
-        k.c.border_strong = color("#6A6A6A");
-        k.radius.md = CONTROL_RADIUS;
-        KitCell(k)
-    });
-    &K.0
+    static DARK_KIT: LazyLock<KitCell> = LazyLock::new(|| kit_for(&DARK));
+    static LIGHT_KIT: LazyLock<KitCell> = LazyLock::new(|| kit_for(&LIGHT));
+    if is_dark() { &DARK_KIT.0 } else { &LIGHT_KIT.0 }
 }
 
 struct KitCell(Kit);
@@ -96,10 +153,10 @@ unsafe impl Sync for KitCell {}
 
 const NAME: TextStyle = TextStyle::new(13.0, 500.0).lh(18.0);
 const LABEL: TextStyle = TextStyle::new(12.5, 500.0).lh(16.0);
-const BODY: TextStyle = TextStyle::new(13.0, 500.0).lh(17.0);
-const SMALL: TextStyle = TextStyle::new(12.0, 400.0).lh(16.0).features("'tnum' 1");
-const NUMBERS: TextStyle = TextStyle::new(12.0, 500.0).lh(16.0).features("'tnum' 1");
-const TITLE: TextStyle = TextStyle::new(16.0, 600.0).lh(21.0);
+pub(crate) const BODY: TextStyle = TextStyle::new(13.0, 500.0).lh(17.0);
+pub(crate) const SMALL: TextStyle = TextStyle::new(12.0, 400.0).lh(16.0).features("'tnum' 1");
+pub(crate) const NUMBERS: TextStyle = TextStyle::new(12.0, 500.0).lh(16.0).features("'tnum' 1");
+pub(crate) const TITLE: TextStyle = TextStyle::new(16.0, 600.0).lh(21.0);
 const FILE_TITLE: TextStyle = TextStyle::new(15.0, 600.0).lh(20.0);
 
 const SEARCH: Icon = Icon { name: "ab-search", view: 16.0, body: r#"<circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.4" fill="none"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>"# };
@@ -109,22 +166,26 @@ const SOUND: Icon = Icon { name: "ab-sound", view: 16.0, body: r#"<path d="M2.5 
 const GRID: Icon = Icon { name: "ab-grid", view: 16.0, body: r#"<rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1" stroke="currentColor" stroke-width="1.3" fill="none"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1" stroke="currentColor" stroke-width="1.3" fill="none"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1" stroke="currentColor" stroke-width="1.3" fill="none"/><rect x="9" y="9" width="4.5" height="4.5" rx="1" stroke="currentColor" stroke-width="1.3" fill="none"/>"# };
 const PLAY: Icon = Icon { name: "ab-play", view: 16.0, body: r#"<path d="M5 3.2v9.6L13 8 5 3.2z" fill="currentColor"/>"# };
 const PAUSE: Icon = Icon { name: "ab-pause", view: 16.0, body: r#"<path d="M4.5 3h2.5v10H4.5zM9 3h2.5v10H9z" fill="currentColor"/>"# };
-const FOLDER: Icon = Icon { name: "ab-folder", view: 16.0, body: r#"<path d="M2 4.5A1.5 1.5 0 013.5 3h2.6l1.5 1.7h4.9A1.5 1.5 0 0114 6.2v5.3a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 11.5v-7z" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linejoin="round"/>"# };
+pub(crate) const REFRESH: Icon = Icon { name: "ab-refresh", view: 16.0, body: r#"<path d="M13.2 7A5.3 5.3 0 003.4 5.2M2.8 9a5.3 5.3 0 009.8 1.8M3.2 2.6v2.9h2.9M12.8 13.4v-2.9H9.9" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>"# };
+pub(crate) const TRASH: Icon = Icon { name: "ab-trash", view: 16.0, body: r#"<path d="M2.8 4.3h10.4M6.2 4.1V2.9h3.6v1.2M4 4.5l.6 8.2c0 .5.5.9 1 .9h4.8c.5 0 1-.4 1-.9l.6-8.2" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>"# };
+pub(crate) const CLOSE: Icon = Icon { name: "ab-close", view: 16.0, body: r#"<path d="M3.8 3.8l8.4 8.4M12.2 3.8l-8.4 8.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>"# };
+const SLIDERS: Icon = Icon { name: "ab-sliders", view: 16.0, body: r#"<path d="M2.5 5h6.2M12.2 5h1.3M2.5 11h1.3M7.2 11h6.3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="10.4" cy="5" r="1.8" stroke="currentColor" stroke-width="1.4" fill="none"/><circle cx="5.5" cy="11" r="1.8" stroke="currentColor" stroke-width="1.4" fill="none"/>"# };
+pub(crate) const FOLDER: Icon =Icon { name: "ab-folder", view: 16.0, body: r#"<path d="M2 4.5A1.5 1.5 0 013.5 3h2.6l1.5 1.7h4.9A1.5 1.5 0 0114 6.2v5.3a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 11.5v-7z" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linejoin="round"/>"# };
 const COPY: Icon = Icon { name: "ab-copy", view: 16.0, body: r#"<rect x="5.5" y="5.5" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M10.5 3.5v-.0A1 1 0 009.5 2.5h-6a1 1 0 00-1 1v6a1 1 0 001 1" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round"/>"# };
 const CHECK: Icon = Icon { name: "ab-check", view: 16.0, body: r#"<path d="M3.5 8.5l3 3 6-7" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>"# };
 const PANEL: Icon = Icon { name: "ab-panel", view: 16.0, body: r#"<rect x="2" y="3" width="12" height="10" rx="2" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M6.2 3.3v9.4" stroke="currentColor" stroke-width="1.3"/>"# };
 const GRIP: Icon =Icon { name: "ab-grip", view: 16.0, body: r#"<g fill="currentColor"><circle cx="5.5" cy="3.5" r="1.35"/><circle cx="10.5" cy="3.5" r="1.35"/><circle cx="5.5" cy="8" r="1.35"/><circle cx="10.5" cy="8" r="1.35"/><circle cx="5.5" cy="12.5" r="1.35"/><circle cx="10.5" cy="12.5" r="1.35"/></g>"# };
 
-fn label(s: impl Into<String>, style: TextStyle, c: Color) -> El {
+pub(crate) fn label(s: impl Into<String>, style: TextStyle, c: Color) -> El {
     text(s.into()).font(style).color(c)
 }
 
 /// A lifted surface floating on the near-black window.
-fn surface(e: El) -> El {
+pub(crate) fn surface(e: El) -> El {
     e.fill(T.panel).radius(PANEL_RADIUS).border(1.0, T.line)
 }
 
-fn hairline() -> El {
+pub(crate) fn hairline() -> El {
     el().w_full().h(1.0).fill(T.line).a11y_hidden()
 }
 
@@ -136,7 +197,7 @@ fn swap(off: El, on: El, showing: bool) -> El {
 }
 
 /// A quiet outlined button with an icon, which says so when its action has happened.
-fn outlined(name: &str, done: &str, done_now: bool, glyph: &'static Icon, f: impl Fn(&mut App, &mut Tx) + 'static) -> El {
+pub(crate) fn outlined(name: &str, done: &str, done_now: bool, glyph: &'static Icon, f: impl Fn(&mut App, &mut Tx) + 'static) -> El {
     row().key(name.to_owned()).role("button").focusable(true).label(name.to_owned()).px(11.0).h(30.0).gap(7.0).radius(CONTROL_RADIUS).items_center()
         .border(1.0, T.line).hover(T.hover).press(T.press).press_scale(0.97).cursor(Cursor::Pointer)
         .on_press_tx(f)
@@ -145,23 +206,23 @@ fn outlined(name: &str, done: &str, done_now: bool, glyph: &'static Icon, f: imp
 }
 
 /// An overlay thumb, clear of whatever the list draws beside it.
-fn scroll_style() -> ScrollBarStyle {
+pub(crate) fn scroll_style() -> ScrollBarStyle {
     ScrollBarStyle::scroll_view(kit())
 }
 
-struct Segment<V> {
+pub(crate) struct Segment<V> {
     name: String,
     count: Option<String>,
     glyph: Option<&'static Icon>,
     value: V,
 }
 
-fn plain<V>(name: impl Into<String>, value: V) -> Segment<V> {
+pub(crate) fn plain<V>(name: impl Into<String>, value: V) -> Segment<V> {
     Segment { name: name.into(), count: None, glyph: None, value }
 }
 
 /// A row of mutually exclusive choices inside a hairline. The current one is raised.
-fn segments<V: Copy + PartialEq + 'static>(key: &str, items: Vec<Segment<V>>, current: V, on: impl Fn(&mut App, V, &mut Tx) + Clone + 'static) -> El {
+pub(crate) fn segments<V: Copy + PartialEq + 'static>(key: &str, items: Vec<Segment<V>>, current: V, on: impl Fn(&mut App, V, &mut Tx) + Clone + 'static) -> El {
     let mut bar = row().key(key.to_owned()).role("radiogroup").h(CONTROL_H).radius(GROUP_RADIUS).border(1.0, T.line).padding(GROUP_PAD).equal_columns(items.len());
     // The indicator shares the chosen segment's cell, so it slides when the choice moves.
     if let Some(at) = items.iter().position(|i| i.value == current) {
@@ -258,6 +319,10 @@ fn titlebar(s: &App, cx: &mut Cx<App>) -> El {
         .child(title.ml(2.0))
         .child(segments("sort", sorts, s.filter.sort, |s, v, tx| s.set_sort(v, tx)))
         .child(search_box(s))
+        .child(el().key("settings-button").role("button").focusable(true).label("Settings").help("Settings (Ctrl+,)").size(30.0, 30.0).radius(CONTROL_RADIUS).center()
+            .hover(T.hover).press(T.press).press_scale(0.94).cursor(Cursor::Pointer)
+            .on_press_tx(|s: &mut App, _| s.open_settings())
+            .child(icon(&SLIDERS, 16.0).color(T.muted)))
 }
 
 fn chip(key: String, name: String, count: Option<String>, on: bool, f: impl Fn(&mut App, &mut Tx) + 'static) -> El {
@@ -275,12 +340,6 @@ fn chip(key: String, name: String, count: Option<String>, on: bool, f: impl Fn(&
 
 /// An on/off control, drawn so its state reads without comparing it to its neighbours.
 fn toggle(name: &str, on: bool, f: impl Fn(&mut App, &mut Tx) + 'static) -> El {
-    // The box is always there, so turning it on moves nothing.
-    let tick = icon(&CHECK, 10.0).color(T.on_accent).opacity(if on { 1.0 } else { 0.0 }).scale(if on { 1.0 } else { 0.6 }).motion(motion::SNAPPY);
-    let check = el().key("check").size(14.0, 14.0).radius(4.0).center().motion(motion::SNAPPY)
-        .fill(if on { T.accent } else { Color::TRANSPARENT })
-        .border(1.0, if on { T.accent } else { T.faint })
-        .child(tick);
     row().key(name.to_owned()).role("switch").checked(on).focusable(true).label(name.to_owned()).px(10.0).h(CONTROL_H).gap(7.0).radius(CONTROL_RADIUS).items_center()
         .border(1.0, T.line)
         .hover(T.hover)
@@ -288,8 +347,24 @@ fn toggle(name: &str, on: bool, f: impl Fn(&mut App, &mut Tx) + 'static) -> El {
         .press_scale(0.97)
         .cursor(Cursor::Pointer)
         .on_press_tx(f)
-        .child(check)
+        .child(checkbox(on))
         .child(label(name.to_owned(), LABEL, if on { T.text } else { T.muted }))
+}
+
+/// A checkbox that's always there, so turning it on moves nothing.
+pub(crate) fn checkbox(on: bool) -> El {
+    let tick = icon(&CHECK, 10.0).color(T.on_accent).opacity(if on { 1.0 } else { 0.0 }).scale(if on { 1.0 } else { 0.6 }).motion(motion::SNAPPY);
+    el().key("check").size(14.0, 14.0).radius(4.0).center().motion(motion::SNAPPY)
+        .fill(if on { T.accent } else { Color::TRANSPARENT })
+        .border(1.0, if on { T.accent } else { T.faint })
+        .child(tick)
+}
+
+/// Asks for a new library folder and switches to it.
+pub(crate) fn pick_library_folder(tx: &mut Tx) {
+    tx.open_folder(rune::FileDialogOptions { title: "Choose a library folder".into(), ..Default::default() }, |s: &mut App, picked, _| {
+        if let Ok(Some(path)) = picked { s.change_root(path); }
+    });
 }
 
 /// A chip that's its own label.
@@ -381,11 +456,7 @@ fn sidebar(s: &App) -> El {
         .child(el().w_full().padding(8.0).child(
             row().key("change-root").role("button").focusable(true).label("Change library folder").w_full().h(32.0).px(10.0).gap(8.0).radius(CONTROL_RADIUS).items_center()
                 .hover(T.hover).press(T.press).press_scale(0.985).cursor(Cursor::Pointer)
-                .on_press_tx(|_: &mut App, tx: &mut Tx| {
-                    tx.open_folder(rune::FileDialogOptions { title: "Choose a library folder".into(), ..Default::default() }, |s: &mut App, picked, _| {
-                        if let Ok(Some(path)) = picked { s.change_root(path); }
-                    });
-                })
+                .on_press_tx(|_: &mut App, tx: &mut Tx| pick_library_folder(tx))
                 .child(icon(&FOLDER, 14.0).color(T.muted))
                 .child(label("Change library folder", BODY, T.muted)))))
 }
@@ -420,7 +491,7 @@ fn tile(s: &App, id: u32, width: f32, selected: bool) -> El {
     let mut picture = el().w(inner).h(s.picture_height()).radius(WELL_RADIUS).fill(T.well).center().child(image);
     if failed { picture = picture.child(icon(kind_icon(asset.kind), 22.0).color(T.faint)); }
     // Lifts the well under the pointer too, without the view running for every tile crossed.
-    picture = picture.child(el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).radius(WELL_RADIUS).fill(color("#FFFFFF10")).border(1.0, color("#3A3A3A")).inert().group_opacity(0.0, 1.0));
+    picture = picture.child(el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).radius(WELL_RADIUS).fill(T.well_hover).border(1.0, T.well_edge).inert().group_opacity(0.0, 1.0));
     let max = s.drag_max;
     col().key(format!("a{id}")).role("button").label(asset.name().to_owned()).w(width).padding(TILE_PAD).gap(TILE_GAP).radius(TILE_RADIUS).cursor(Cursor::Grab).hover_group()
         // Filters swap tiles at once; only their colours ease.
@@ -454,7 +525,7 @@ fn grid_row(s: &App, r: usize) -> El {
     let selected = s.selected.and_then(|sel| ids[from..to].iter().position(|i| *i == sel));
     let drag = s.dragging.and_then(|d| ids[from..to].iter().position(|i| *i == d));
     let any_facts = ids[from..to].iter().filter(|i| s.thumbs.facts(s.lib.assets[**i as usize].key).is_some()).count();
-    let version = (s.generation, cols, width.to_bits(), selected, drag, any_facts, s.drag_max);
+    let version = (s.generation, cols, width.to_bits(), selected, drag, any_facts, s.drag_max, is_dark());
     memo(format!("r{r}"), version, || {
         let mut line = row().w_full().h(s.row_height()).px(GRID_INSET).gap(GRID_GAP).items_start();
         for (i, id) in ids[from..to].iter().enumerate() {
@@ -497,7 +568,7 @@ fn grid(s: &App) -> El {
     let rows = col().key("rows").w_full().growth(GrowthSpec::default())
         .virtual_rows(count, s.row_height(), |_: &App, i| format!("r{i}").into(), grid_row)
         .virtual_rows_version((s.generation, s.columns))
-        .on_visible_rows(|s: &mut App, range| { s.request_range(range); false });
+        .on_visible_rows(|s: &mut App, range| { s.show_rows(range); false });
     let empty = s.results.ids.is_empty() && !s.scanning;
     let body = col().key("grid").w_full().grow(1.0).min_h(0.0).pt(GRID_INSET).instant_changes()
         .scroll(ScrollSpec { stick_bottom: false })
@@ -605,7 +676,7 @@ fn rung(id: u32, name: String, max: Option<u32>, side: f32, on: bool) -> El {
             s.drag_gesture(id, max, drag);
             if drag.phase == Phase::Move { tx.live_only(); }
         })
-        .child(el().w(side).h(side).radius(6.0).center().fill(T.raised).hover(T.hover).press(T.press).motion(motion::SNAPPY).border(1.0, if on { T.accent } else { color(EDGE_STRONG) })
+        .child(el().w(side).h(side).radius(6.0).center().fill(T.raised).hover(T.hover).press(T.press).motion(motion::SNAPPY).border(1.0, if on { T.accent } else { T.edge_strong })
             .child(icon(&GRIP, 12.0).color(if on { T.text } else { T.muted })))
         .child(label(name, SMALL, if on { T.text } else { T.muted }))
 }
@@ -812,6 +883,13 @@ fn inspector_handle() -> El {
 }
 
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
+    let dark = match s.theme {
+        Theme::System => cx.system_dark(),
+        Theme::Light => false,
+        Theme::Dark => true,
+    };
+    set_dark(dark);
+    s.resolved_dark.set(dark);
     let main = surface(col().key("main").grow(1.0).h_full().min_w(0.0).min_h(0.0))
         .child(filter_bar(s))
         .child(hairline())
@@ -828,10 +906,17 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         .on_layout(|s: &mut App, r: [f32; 4]| { s.window_width = r[2]; s.window_height = r[3]; })
         .child(titlebar(s, cx))
         .child(panels)
+        .children(s.settings_open.then(|| settings::sheet(s)))
 }
 
 pub fn on_key(s: &mut App, event: &rune::KeyEvent, tx: &mut Tx) -> bool {
     use rune::Key;
+    if event.is_command(',') {
+        if s.settings_open { s.settings_open = false; } else { s.open_settings(); }
+        return true;
+    }
+    // Settings is modal: the grid doesn't hear keys underneath it.
+    if s.settings_open { return false }
     if event.is_command('b') {
         s.toggle_sidebar(tx);
         return true;

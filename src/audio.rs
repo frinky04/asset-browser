@@ -4,6 +4,7 @@
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -18,15 +19,17 @@ enum Command {
 pub struct Audio {
     commands: Sender<Command>,
     sink: Arc<Mutex<Option<Sink>>>,
+    /// The output level, as `f32` bits.
+    volume: Arc<AtomicU32>,
 }
-
-const VOLUME: f32 = 0.7;
 
 impl Audio {
     pub fn new() -> Audio {
         let (commands, inbox) = channel();
         let sink: Arc<Mutex<Option<Sink>>> = Arc::new(Mutex::new(None));
         let shared = sink.clone();
+        let volume = Arc::new(AtomicU32::new(0.7f32.to_bits()));
+        let level = volume.clone();
         let _ = std::thread::Builder::new().name("audio".into()).spawn(move || {
             // Opened on first use, so a machine with no output only loses sound.
             let mut output = None;
@@ -35,14 +38,19 @@ impl Audio {
                 if output.is_none() { output = OutputStream::try_default().ok(); }
                 let Some((_, handle)) = &output else { continue };
                 let Ok(next) = Sink::try_new(handle) else { continue };
-                next.set_volume(VOLUME);
+                next.set_volume(f32::from_bits(level.load(Ordering::Relaxed)));
                 let opened = File::open(&path).ok().and_then(|f| Decoder::new(BufReader::new(f)).ok());
                 let Some(source) = opened else { continue };
                 next.append(source);
                 if let Ok(mut slot) = shared.lock() { *slot = Some(next); }
             }
         });
-        Audio { commands, sink }
+        Audio { commands, sink, volume }
+    }
+
+    pub fn set_volume(&self, volume: f32) {
+        self.volume.store(volume.to_bits(), Ordering::Relaxed);
+        self.with(|s| s.set_volume(volume));
     }
 
     pub fn play(&self, path: PathBuf) {

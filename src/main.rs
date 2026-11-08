@@ -12,6 +12,7 @@ mod library;
 mod model;
 mod native_drag;
 mod raster;
+mod settings;
 mod stage;
 mod thumbs;
 mod ui;
@@ -35,7 +36,7 @@ fn main() {
         poll: Some(|s, _, tx| s.poll(tx)),
         on_key: Some(ui::on_key),
         min_size: Some((1200.0, 600.0)),
-        scenes: scenes!["textures", "models", "audio", "search", "small", "texture", "tile", "tile-seams", "big-texture", "model", "sound"],
+        scenes: scenes!["textures", "models", "audio", "search", "small", "texture", "tile", "tile-seams", "big-texture", "model", "sound", "settings", "light-start", "light-model", "light-sound", "light-big-texture", "light-settings"],
         ..AppSpec::new("Asset Browser", (1520.0, 900.0), app::init, ui::view)
     };
     App::new(spec)

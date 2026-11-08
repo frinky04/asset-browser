@@ -183,6 +183,20 @@ fn companions(dir: &Path, source: &Path, name: &str, ext: &str, names: &mut Vec<
     }
 }
 
+/// Bytes held by staged exports.
+pub fn staged_bytes() -> u64 {
+    let Ok(dirs) = std::fs::read_dir(stage_root()) else { return 0 };
+    dirs.filter_map(Result::ok)
+        .filter_map(|d| std::fs::read_dir(d.path()).ok())
+        .flat_map(|files| files.filter_map(Result::ok).filter_map(|f| f.metadata().ok()).map(|m| m.len()).collect::<Vec<_>>())
+        .sum()
+}
+
+/// Deletes every staged export. Programs that already took a copy keep it.
+pub fn clear_staged() {
+    let _ = std::fs::remove_dir_all(stage_root());
+}
+
 /// Drops the oldest staged exports past `MAX_STAGED`, and any left half-built. Files in use by
 /// the program they were dropped into are copies, so only recent ones are worth keeping.
 pub fn prune() {

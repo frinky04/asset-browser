@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 
 use rune::{Live, Pixels};
@@ -43,6 +43,8 @@ const INDEX_RECORD: usize = 8 + 8 + 4 + 4 + 4 + 4 + 1;
 
 /// The on-disk cache: `thumbs.pack` holds QOI images, `thumbs.idx` fixed records pointing into it.
 struct Store {
+    pack_path: PathBuf,
+    index_path: PathBuf,
     pack: File,
     index: Mutex<(File, File, u64)>,
     entries: RwLock<HashMap<u64, Entry>>,
@@ -75,9 +77,22 @@ impl Store {
         pack_len = pack_len.max(entries.values().map(|e| e.offset + u64::from(e.len)).max().unwrap_or(0));
         Ok(Store {
             pack: File::open(&pack_path)?,
+            pack_path,
+            index_path,
             index: Mutex::new((writer, index_writer, pack_len)),
             entries: RwLock::new(entries),
         })
+    }
+
+    /// Empties the cache, so every thumbnail is made again.
+    fn reset(&self) {
+        let Ok(mut guard) = self.index.lock() else { return };
+        // The handles appending to these can't truncate them.
+        for path in [&self.pack_path, &self.index_path] {
+            if let Ok(file) = OpenOptions::new().write(true).open(path) { let _ = file.set_len(0); }
+        }
+        guard.2 = 0;
+        if let Ok(mut entries) = self.entries.write() { entries.clear(); }
     }
 
     fn get(&self, key: u64) -> Option<Entry> {
@@ -138,6 +153,8 @@ struct Slot {
     /// 0 until the thumbnail arrives, so it can fade in without a view run.
     fade: Live<f32>,
     loaded: bool,
+    /// A waveform, which is drawn in the theme's colour.
+    audio: bool,
     stamp: u64,
 }
 
@@ -159,6 +176,8 @@ struct Shared {
     slots: Mutex<(HashMap<u64, Slot>, u64)>,
     done: AtomicUsize,
     quit: AtomicBool,
+    /// The colour waveforms are shown in, as 0xRRGGBB.
+    wave_color: AtomicU32,
 }
 
 #[derive(Clone)]
@@ -177,6 +196,7 @@ impl Thumbs {
             slots: Mutex::new((HashMap::new(), 0)),
             done: AtomicUsize::new(0),
             quit: AtomicBool::new(false),
+            wave_color: AtomicU32::new(pack_rgb(WAVE_COLOR)),
         });
         let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
         for i in 0..cores.div_ceil(2).clamp(2, 10) {
@@ -209,9 +229,22 @@ impl Thumbs {
         let (slots, clock) = &mut *guard;
         *clock += 1;
         let stamp = *clock;
-        let slot = slots.entry(key).or_insert_with(|| Slot { pixels: Pixels::new(), fade: Live::new(0.0), loaded: false, stamp });
+        let slot = slots.entry(key).or_insert_with(|| Slot { pixels: Pixels::new(), fade: Live::new(0.0), loaded: false, audio: false, stamp });
         slot.stamp = stamp;
         (slot.pixels.clone(), slot.fade.clone())
+    }
+
+    /// Sets the colour waveforms show in, dropping the ones already loaded in another.
+    pub fn set_wave_color(&self, color: [u8; 3]) {
+        if self.shared.wave_color.swap(pack_rgb(color), Ordering::Relaxed) == pack_rgb(color) { return }
+        if let Ok(mut guard) = self.shared.slots.lock() { guard.0.retain(|_, slot| !slot.audio); }
+    }
+
+    /// Forgets every thumbnail, on disk and in memory, so they're all made again.
+    pub fn rebuild(&self) {
+        if let Some(store) = &self.shared.store { store.reset(); }
+        if let Ok(mut guard) = self.shared.slots.lock() { guard.0.clear(); }
+        self.shared.done.store(0, Ordering::Relaxed);
     }
 
     /// Replaces what's wanted now. Called as the grid scrolls, so it stays cheap.
@@ -309,7 +342,7 @@ fn worker(shared: &Arc<Shared>, crawls: bool) {
         };
         let asset = &library.assets[id as usize];
         let cached = shared.store.as_ref().and_then(|s| s.get(key));
-        let image = match (&cached, &shared.store) {
+        let mut image = match (&cached, &shared.store) {
             (Some(entry), Some(store)) => if show { store.read(entry) } else { None },
             _ => {
                 let made = make(&library.path(asset), asset);
@@ -321,11 +354,17 @@ fn worker(shared: &Arc<Shared>, crawls: bool) {
                 made.image
             }
         };
+        let audio = asset.kind == Kind::Audio;
+        if audio && let Some((_, _, rgba)) = &mut image {
+            let [r, g, b] = unpack_rgb(shared.wave_color.load(Ordering::Relaxed));
+            for px in rgba.chunks_exact_mut(4) { (px[0], px[1], px[2]) = (r, g, b); }
+        }
         // A crawl can make a thumbnail a tile is waiting on, so either kind of job delivers it.
         if show || image.is_some() {
             if let Ok(mut guard) = shared.slots.lock() {
                 if let Some(slot) = guard.0.get_mut(&key).filter(|s| show || !s.loaded) {
                     slot.loaded = true;
+                    slot.audio = audio;
                     if let Some((w, h, rgba)) = image { slot.pixels.set(w, h, rgba); }
                     slot.fade.set(1.0);
                 }
@@ -333,6 +372,14 @@ fn worker(shared: &Arc<Shared>, crawls: bool) {
         }
         if let Ok(mut q) = shared.queue.lock() { q.inflight.remove(&key); }
     }
+}
+
+fn pack_rgb([r, g, b]: [u8; 3]) -> u32 {
+    u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)
+}
+
+fn unpack_rgb(c: u32) -> [u8; 3] {
+    [(c >> 16) as u8, (c >> 8) as u8, c as u8]
 }
 
 struct Made {
@@ -416,6 +463,11 @@ mod tests {
         drop(store);
         let again = Store::open(&d).unwrap();
         assert!(again.get(9).is_some(), "an append after a torn tail stays aligned");
+        again.reset();
+        assert!(again.get(9).is_none(), "a reset forgets everything");
+        again.put(10, Some(&encoded), Facts::default());
+        let entry = again.get(10).unwrap();
+        assert_eq!(again.read(&entry).unwrap().0, 2, "and the cache works after it");
         drop(again);
         std::fs::remove_dir_all(&d).unwrap();
     }

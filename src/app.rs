@@ -15,7 +15,7 @@ use crate::export::{self, Options};
 use crate::library::{self, Filter, Kind, Library, Results, Sort};
 use crate::model::{self, Image, Model};
 use crate::native_drag::{self, Ended};
-use crate::stage::{Scene, StageState, View};
+use crate::stage::{Look, Scene, StageState, View};
 use crate::thumbs::{Thumbs, WAVE_COLOR};
 use crate::{ui, wave};
 
@@ -53,6 +53,75 @@ enum Loaded {
     Model(Arc<Model>),
     Audio { rgba: Vec<u8>, seconds: f32, rate: u32, channels: u16 },
     Failed(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Theme {
+    System,
+    Light,
+    Dark,
+}
+
+impl Theme {
+    fn code(self) -> u8 {
+        match self { Theme::System => 0, Theme::Light => 1, Theme::Dark => 2 }
+    }
+
+    fn from_code(code: u8) -> Theme {
+        match code { 1 => Theme::Light, 2 => Theme::Dark, _ => Theme::System }
+    }
+}
+
+const DEFAULT_TILE: f32 = 158.0;
+const DEFAULT_VOLUME: f32 = 0.7;
+const LIGHT_WAVE_COLOR: [u8; 3] = [72, 72, 80];
+
+/// The preferences kept between launches, as they stood when last written.
+#[derive(Clone, Debug, PartialEq)]
+struct Saved {
+    theme: u8,
+    volume: f32,
+    autoplay: bool,
+    smooth: bool,
+    nearest: bool,
+    companions: bool,
+    drag_max: Option<u32>,
+    all_formats: bool,
+    tile_size: f32,
+}
+
+impl Saved {
+    fn load(prefs: &Prefs) -> Saved {
+        Saved {
+            theme: prefs.get("theme").unwrap_or(Theme::Dark.code()),
+            volume: prefs.get("volume").unwrap_or(DEFAULT_VOLUME),
+            autoplay: prefs.get("autoplay").unwrap_or(true),
+            smooth: prefs.get("smooth").unwrap_or(false),
+            nearest: prefs.get("nearest").unwrap_or(false),
+            companions: prefs.get("companions").unwrap_or(true),
+            drag_max: prefs.get("drag_max").unwrap_or(None),
+            all_formats: prefs.get("all_formats").unwrap_or(false),
+            tile_size: prefs.get("tile_size").unwrap_or(DEFAULT_TILE),
+        }
+    }
+
+    fn write(&self, prefs: &mut Prefs) {
+        let _ = prefs.set("theme", &self.theme);
+        let _ = prefs.set("volume", &self.volume);
+        let _ = prefs.set("autoplay", &self.autoplay);
+        let _ = prefs.set("smooth", &self.smooth);
+        let _ = prefs.set("nearest", &self.nearest);
+        let _ = prefs.set("companions", &self.companions);
+        let _ = prefs.set("drag_max", &self.drag_max);
+        let _ = prefs.set("all_formats", &self.all_formats);
+        let _ = prefs.set("tile_size", &self.tile_size);
+    }
+}
+
+/// Bytes of the thumbnail cache and of staged exports.
+fn measure_storage() -> (u64, u64) {
+    let thumbs = std::fs::metadata(export::app_dir().join("cache").join("thumbs.pack")).map_or(0, |m| m.len());
+    (thumbs, export::staged_bytes())
 }
 
 /// Pressing an asset this size or smaller starts copying it at once. Bigger ones wait until
@@ -142,6 +211,7 @@ pub struct App {
     pub sidebar_open: bool,
     pub grid_glide: Glide,
     pub packs_glide: Glide,
+    pub settings_glide: Glide,
     /// Which button just confirmed an action, and when that confirmation ends.
     pub confirmed: Option<(&'static str, Instant)>,
     /// Whether the audio was playing when the view last ran.
@@ -149,11 +219,24 @@ pub struct App {
     /// Keeps checking playback while a sound is still opening.
     audio_watch_until: Option<Instant>,
     inspector_w: f32,
-    prefs: Prefs,
+    pub(crate) prefs: Prefs,
     pub columns: usize,
     pub tile_size: f32,
     /// The largest side textures are dragged out of the grid at.
     pub drag_max: Option<u32>,
+    pub theme: Theme,
+    /// Whether the view last drew dark, which `Theme::System` decides at view time.
+    pub resolved_dark: Cell<bool>,
+    applied_dark: Option<bool>,
+    pub settings_open: bool,
+    pub volume: f32,
+    /// Holds off saving until a slider is let go.
+    pub volume_dragging: bool,
+    /// Thumbnail cache and staged exports, in bytes, once measured.
+    pub storage: Option<(u64, u64)>,
+    storage_job: Latest<(u64, u64)>,
+    saved: Saved,
+    visible_rows: std::ops::Range<usize>,
     pub nearest: bool,
     pub companions: bool,
     pub status: LiveText,
@@ -193,46 +276,65 @@ fn configured_root() -> PathBuf {
 }
 
 pub fn init() -> App {
-    let prefs = Prefs::open("asset-browser-v2");
+    init_with(Prefs::open("asset-browser-v2"))
+}
+
+/// The app reading its saved settings from `prefs`.
+pub fn init_with(prefs: Prefs) -> App {
     let inspector_w = prefs.get(INSPECTOR_PREF).unwrap_or(INSPECTOR_DEFAULT);
     let sidebar_open = prefs.get(SIDEBAR_PREF).unwrap_or(true);
+    let saved = Saved::load(&prefs);
+    let theme = Theme::from_code(saved.theme);
+    let audio = Audio::new();
+    audio.set_volume(saved.volume);
     App {
         lib: Arc::new(Library::default()),
         results: Results::default(),
         generation: 1,
-        filter: Filter::default(),
+        filter: Filter { all_formats: saved.all_formats, ..Filter::default() },
         search: TextEdit::new(""),
         thumbs: Thumbs::new(export::app_dir().join("cache")),
-        audio: Audio::new(),
+        audio,
         scanning: true,
         selected: None,
         preview: Preview::None,
         awaiting_preview: false,
         loading: Latest::default(),
-        stage: StageState::default(),
+        stage: StageState { view: View { smooth: saved.smooth, ..View::default() }, ..StageState::default() },
         stage_size: [320.0, 320.0],
         scale: 1.0,
         drag_last: [0.0; 2],
         wave: Pixels::new(),
         playhead: Live::new([0.0, 0.0]),
         clock: LiveText::new("0:00.0"),
-        autoplay: true,
+        autoplay: saved.autoplay,
         grid_width: 900.0,
         window_width: 1520.0,
         window_height: 900.0,
         sidebar_open,
         grid_glide: Glide::default(),
         packs_glide: Glide::default(),
+        settings_glide: Glide::default(),
         confirmed: None,
         showing_playing: false,
         audio_watch_until: None,
         inspector_w,
         prefs,
         columns: 5,
-        tile_size: 158.0,
-        drag_max: None,
-        nearest: false,
-        companions: true,
+        tile_size: saved.tile_size,
+        drag_max: saved.drag_max,
+        nearest: saved.nearest,
+        companions: saved.companions,
+        theme,
+        resolved_dark: Cell::new(theme != Theme::Light),
+        applied_dark: None,
+        settings_open: false,
+        volume: saved.volume,
+        volume_dragging: false,
+        storage: None,
+        storage_job: Latest::default(),
+        visible_rows: 0..0,
+        saved,
         status: LiveText::new("Reading library"),
         message: None,
         drag_started: false,
@@ -251,6 +353,7 @@ pub fn init() -> App {
 
 pub fn setup(s: &mut App, waker: Waker) {
     s.loading.set_waker(waker.clone());
+    s.storage_job.set_waker(waker.clone());
     s.waker = Some(waker);
     let root = s.root.clone();
     s.start_loading(root);
@@ -303,6 +406,11 @@ impl App {
     }
 
     fn run_scene(&mut self, name: &str, tx: &mut Tx) {
+        if let Some(rest) = name.strip_prefix("light-") {
+            self.theme = Theme::Light;
+            self.run_scene(rest, tx);
+            return;
+        }
         let first = |s: &App, kind: Kind, hint: &str| {
             s.lib.assets.iter().position(|a| a.kind == kind && !a.shadowed && a.hay.contains(hint)).map(|i| i as u32)
         };
@@ -315,6 +423,8 @@ impl App {
                 self.refilter(tx);
             }
             "small" => self.tile_size = 120.0,
+            "settings" => self.open_settings(),
+            "start" => {}
             "texture" | "tile" | "tile-seams" => {
                 self.set_kind(Some(Kind::Texture), tx);
                 if let Some(id) = first(self, Kind::Texture, "brick").or_else(|| first(self, Kind::Texture, "")) {
@@ -377,6 +487,16 @@ impl App {
             changed = true;
         }
         self.update_status(tx);
+        let dark = self.resolved_dark.get();
+        if self.applied_dark != Some(dark) {
+            self.apply_theme(dark);
+            changed = true;
+        }
+        if let Some(storage) = self.storage_job.take() {
+            self.storage = Some(storage);
+            changed = true;
+        }
+        self.save_settings();
         if self.confirmed.is_some_and(|(_, until)| Instant::now() >= until) {
             self.confirmed = None;
             changed = true;
@@ -422,6 +542,102 @@ impl App {
         self.clock.set(format!("{} / {}", clock(position), clock(seconds)));
         let opening = self.audio_watch_until.is_some_and(|t| Instant::now() < t);
         if self.audio.is_playing() || opening { tx.wake_after(Duration::from_millis(33)); }
+    }
+
+    fn wave_color(&self) -> [u8; 3] {
+        if self.resolved_dark.get() { WAVE_COLOR } else { LIGHT_WAVE_COLOR }
+    }
+
+    /// Brings what isn't drawn by the view into line with the current theme.
+    fn apply_theme(&mut self, dark: bool) {
+        let first = self.applied_dark.is_none();
+        self.applied_dark = Some(dark);
+        self.stage.look = if dark { Look::DARK } else { Look::LIGHT };
+        self.thumbs.set_wave_color(self.wave_color());
+        if first { return }
+        self.generation += 1;
+        self.request_range(self.visible_rows.clone());
+        if matches!(self.preview, Preview::Audio { .. })
+            && let Some(asset) = self.selected.and_then(|i| self.lib.assets.get(i as usize)).cloned()
+        {
+            self.request_preview(self.lib.path(&asset), asset.kind);
+        }
+    }
+
+    pub fn set_theme(&mut self, theme: Theme, tx: &mut Tx) {
+        self.theme = theme;
+        tx.color_motion(rune::tok::motion::CALM);
+    }
+
+    pub fn set_volume(&mut self, volume: f32) {
+        self.volume = volume.clamp(0.0, 1.0);
+        self.audio.set_volume(self.volume);
+    }
+
+    fn save_settings(&mut self) {
+        if self.volume_dragging || headless() { return }
+        let now = Saved {
+            theme: self.theme.code(),
+            volume: self.volume,
+            autoplay: self.autoplay,
+            smooth: self.stage.view.smooth,
+            nearest: self.nearest,
+            companions: self.companions,
+            drag_max: self.drag_max,
+            all_formats: self.filter.all_formats,
+            tile_size: self.tile_size,
+        };
+        if now != self.saved {
+            now.write(&mut self.prefs);
+            self.saved = now;
+        }
+    }
+
+    pub fn open_settings(&mut self) {
+        self.settings_open = true;
+        self.storage_job.request((), |()| measure_storage());
+    }
+
+    pub fn library_folder(&self) -> String {
+        self.root.display().to_string()
+    }
+
+    pub fn rescan(&mut self) {
+        let root = self.root.clone();
+        self.start_loading(root);
+    }
+
+    pub fn toggle_all_formats_now(&mut self) {
+        self.filter.all_formats = !self.filter.all_formats;
+        self.grid_glide.forget();
+        self.refilter_keeping_scroll();
+    }
+
+    pub fn rebuild_thumbnails(&mut self) {
+        self.thumbs.rebuild();
+        self.thumbs.set_library(self.lib.clone());
+        self.generation += 1;
+        self.request_range(self.visible_rows.clone());
+        self.storage_job.request((), |()| measure_storage());
+    }
+
+    pub fn clear_staged(&mut self) {
+        self.storage_job.request((), |()| {
+            export::clear_staged();
+            measure_storage()
+        });
+    }
+
+    /// The grid reports which rows are on screen.
+    pub fn show_rows(&mut self, rows: std::ops::Range<usize>) {
+        self.visible_rows = rows.clone();
+        self.request_range(rows);
+    }
+
+    fn request_preview(&mut self, path: PathBuf, kind: Kind) {
+        let wave_color = self.wave_color();
+        self.awaiting_preview = true;
+        self.loading.request((path, kind), move |(p, kind)| load_preview(&p, kind, wave_color));
     }
 
     /// Shows on button `name` that its action happened.
@@ -544,7 +760,7 @@ impl App {
         if matches!(self.preview, Preview::None) { self.preview = Preview::Loading; }
         self.awaiting_preview = true;
         self.audio.stop();
-        self.loading.request((path.clone(), asset.kind), move |(p, kind)| load_preview(&p, kind));
+        self.request_preview(path.clone(), asset.kind);
         if asset.kind == Kind::Audio && self.autoplay && !headless() {
             self.audio.play(path);
             self.watch_audio(tx);
@@ -784,12 +1000,12 @@ fn drag_picture((w, h, rgba): (u32, u32, Vec<u8>)) -> (u32, u32, Vec<u8>) {
     (fw, fh, fitted.into_raw())
 }
 
-fn load_preview(path: &Path, kind: Kind) -> Loaded {
+fn load_preview(path: &Path, kind: Kind, wave_color: [u8; 3]) -> Loaded {
     let run = || match kind {
         Kind::Texture => load_texture(path).map(Loaded::Texture),
         Kind::Model => model::load(path).map(|m| Loaded::Model(Arc::new(m))),
         Kind::Audio => wave::peaks(path, WAVE_W as usize).map(|p| Loaded::Audio {
-            rgba: wave::draw(&p.values, WAVE_W, WAVE_H, WAVE_COLOR),
+            rgba: wave::draw(&p.values, WAVE_W, WAVE_H, wave_color),
             seconds: p.seconds,
             rate: p.rate,
             channels: p.channels,
