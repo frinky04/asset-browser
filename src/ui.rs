@@ -29,7 +29,7 @@ pub struct Tokens {
     pub(crate) muted: Color,
     pub(crate) faint: Color,
     pub(crate) accent: Color,
-    on_accent: Color,
+    pub(crate) on_accent: Color,
     pub(crate) hover: Color,
     pub(crate) press: Color,
     well_hover: Color,

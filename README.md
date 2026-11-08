@@ -51,7 +51,7 @@ The list under the search box completes these: arrows pick a row, Tab or Enter t
 | --- | --- | --- |
 | Audio | Drag the waveform's markers to trim. Under Loop, slide the join in the seam view, crossfade it, or let **Find best join** line it up. Under Compress, set quality, sample rate and channels | Ogg Vorbis |
 | Textures | Palette size, dithering and encoder effort, on top of the size ladder | PNG |
-| Models | Every material's roughness, metallic, emissive, normal strength, tint and texture size, or a quick look: Matte, Satin, Gloss, Metal | GLB |
+| Models | Every material's roughness, metallic, emissive, normal strength, tint and texture size, or a quick look: Matte, Satin, Gloss, Metal. Texture filtering for the whole model, or per texture by clicking its thumbnail | GLB |
 
 Editing a GLB or glTF keeps its nodes, skins and animation. Other model formats leave as one static mesh. Each material shows on a little rendered ball with its maps beside it; hover one to pick it out on the model.
 

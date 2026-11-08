@@ -27,14 +27,48 @@ pub struct MaterialEdit {
     pub max_texture: Option<u32>,
 }
 
+/// How a texture is sampled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextureFilter {
+    Smooth,
+    Pixels,
+}
+
+impl TextureFilter {
+    pub fn title(self) -> &'static str {
+        match self {
+            TextureFilter::Smooth => "Smooth",
+            TextureFilter::Pixels => "Pixels",
+        }
+    }
+
+    /// glTF's magnification and minification codes. Pixels keeps its mipmaps, so it stays crisp
+    /// up close without sparkling in the distance.
+    fn codes(self) -> (u32, u32) {
+        match self {
+            TextureFilter::Smooth => (9729, 9987),
+            TextureFilter::Pixels => (9728, 9984),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ModelEdit {
     pub materials: BTreeMap<usize, MaterialEdit>,
+    /// The filter for every texture, unless `textures` says otherwise.
+    pub filter: Option<TextureFilter>,
+    /// Filters for particular images, by document image.
+    pub textures: BTreeMap<usize, TextureFilter>,
 }
 
 impl ModelEdit {
     pub fn is_unchanged(&self) -> bool {
-        self.materials.values().all(|m| *m == MaterialEdit::default())
+        self.filter.is_none() && self.textures.is_empty() && self.materials.values().all(|m| *m == MaterialEdit::default())
+    }
+
+    /// An edit of just one material.
+    pub fn single(material: usize, change: MaterialEdit) -> ModelEdit {
+        ModelEdit { materials: [(material, change)].into(), ..ModelEdit::default() }
     }
 }
 
@@ -107,6 +141,8 @@ pub struct SurfaceMaterial {
     pub normal_scale: f32,
     /// The document material this is, if any.
     pub doc: Option<u32>,
+    /// Filters for the base, metal/rough, normal and emissive maps. `None` is unspecified.
+    pub filters: [Option<TextureFilter>; 4],
 }
 
 /// What the preview draws a model's materials with.
@@ -172,6 +208,8 @@ pub struct ModelDoc {
     pub materials: Vec<MaterialInfo>,
     /// For each of `Model::materials`, the document material it is.
     flat: Vec<Option<usize>>,
+    /// What the file asks for, per image, where it says.
+    image_filters: Vec<Option<TextureFilter>>,
     /// Slow to make, and a material slider shouldn't redo them. Bounded by the sizes on offer.
     rebuilt: Mutex<HashMap<(usize, u32, bool), Arc<Rebuilt>>>,
     /// Whether this is a whole glTF document, rather than a flattened mesh.
@@ -278,7 +316,24 @@ fn from_gltf(path: &Path, model: Model) -> Result<ModelDoc, String> {
     adopt_guesses(&mut root, &mut images, &model);
     let materials = read_materials(&root);
     let flat = (0..model.materials.len()).map(|i| (i < materials.len()).then_some(i)).collect();
-    Ok(ModelDoc { root, buffer, images, materials, flat, rebuilt: Mutex::default(), keeps_scene: true })
+    let image_filters = read_filters(&root, images.len());
+    Ok(ModelDoc { root, buffer, images, materials, flat, image_filters, rebuilt: Mutex::default(), keeps_scene: true })
+}
+
+/// What each image's texture asks for, going by its magnification filter.
+fn read_filters(root: &Value, images: usize) -> Vec<Option<TextureFilter>> {
+    let mut filters = vec![None; images];
+    for texture in root.get("textures").and_then(Value::as_array).map_or(&[][..], Vec::as_slice) {
+        let Some(image) = texture.get("source").and_then(Value::as_u64) else { continue };
+        let sampler = texture.get("sampler").and_then(Value::as_u64).and_then(|s| root.get("samplers")?.get(s as usize));
+        let found = match sampler.and_then(|s| s.get("magFilter")).and_then(Value::as_u64) {
+            Some(9728) => Some(TextureFilter::Pixels),
+            Some(9729) => Some(TextureFilter::Smooth),
+            _ => None,
+        };
+        if let Some(slot) = filters.get_mut(image as usize) && slot.is_none() { *slot = found; }
+    }
+    filters
 }
 
 fn read_uri(base: &Path, uri: &str) -> Option<Vec<u8>> {
@@ -385,7 +440,8 @@ fn from_flat(mut model: Model) -> ModelDoc {
     }
     root["meshes"] = json!([{ "primitives": primitives }]);
     let materials = read_materials(&root);
-    ModelDoc { root, buffer, images, materials, flat, rebuilt: Mutex::default(), keeps_scene: false }
+    let image_filters = vec![None; images.len()];
+    ModelDoc { root, buffer, images, materials, flat, image_filters, rebuilt: Mutex::default(), keeps_scene: false }
 }
 
 /// Two 4-byte chunks' worth of GLB around `json` and `bin`.
@@ -434,7 +490,9 @@ impl ModelDoc {
         let (color, roughness, metallic, emissive) = self.values(index, edit);
         let info = &self.materials[index];
         let map = |slot| info.map(slot).map(|i| i as u32);
+        let filter = |slot| info.map(slot).and_then(|image| self.filter_of(image, edit));
         SurfaceMaterial {
+            filters: [filter(Slot::Base), filter(Slot::MetalRough), filter(Slot::Normal), filter(Slot::Emissive)],
             color,
             roughness,
             metallic,
@@ -453,9 +511,38 @@ impl ModelDoc {
         let default_material = model::Material::default();
         let materials = self.flat.iter().map(|doc| match doc {
             Some(index) => self.material_surface(*index, edit),
-            None => SurfaceMaterial { color: default_material.color, roughness: 1.0, metallic: 0.0, emissive: [0.0; 3], image: None, surface_image: None, normal_image: None, emissive_image: None, normal_scale: 1.0, doc: None },
+            None => SurfaceMaterial { color: default_material.color, roughness: 1.0, metallic: 0.0, emissive: [0.0; 3], image: None, surface_image: None, normal_image: None, emissive_image: None, normal_scale: 1.0, doc: None, filters: [None; 4] },
         }).collect();
         Surface { materials, images, focus: None }
+    }
+
+    /// What `image` is sampled with under `edit`: its own setting, then the whole model's, then
+    /// the file's.
+    pub fn filter_of(&self, image: usize, edit: &ModelEdit) -> Option<TextureFilter> {
+        edit.textures.get(&image).copied().or(edit.filter).or_else(|| self.file_filter(image))
+    }
+
+    /// What the file asks `image` to be sampled with, if it says.
+    pub fn file_filter(&self, image: usize) -> Option<TextureFilter> {
+        self.image_filters.get(image).copied().flatten()
+    }
+
+    /// Writes filters into samplers. Each change gets a sampler of its own, keeping the original's
+    /// wrap modes, because the one a texture points at may be shared with others.
+    fn apply_filters(root: &mut Value, edit: &ModelEdit) {
+        if edit.filter.is_none() && edit.textures.is_empty() { return }
+        for index in 0..root.get("textures").and_then(Value::as_array).map_or(0, Vec::len) {
+            let Some(image) = root["textures"][index].get("source").and_then(Value::as_u64) else { continue };
+            let Some(filter) = edit.textures.get(&(image as usize)).copied().or(edit.filter) else { continue };
+            let current = root["textures"][index].get("sampler").and_then(Value::as_u64).and_then(|s| root.get("samplers")?.get(s as usize)).cloned();
+            let mut sampler = current.unwrap_or_else(|| json!({}));
+            let (mag, min) = filter.codes();
+            sampler["magFilter"] = json!(mag);
+            sampler["minFilter"] = json!(min);
+            let known = root.get("samplers").and_then(Value::as_array).and_then(|all| all.iter().position(|s| *s == sampler));
+            let at = known.unwrap_or_else(|| push_entry(root, "samplers", sampler));
+            root["textures"][index]["sampler"] = json!(at);
+        }
     }
 
     /// How many different images the materials use.
@@ -539,6 +626,7 @@ impl ModelDoc {
     pub fn render(&self, edit: &ModelEdit, nearest: bool) -> Result<(Vec<u8>, Vec<Arc<Image>>), String> {
         let mut root = self.root.clone();
         self.apply_values(&mut root, edit);
+        Self::apply_filters(&mut root, edit);
         let mut bin: Vec<u8> = Vec::with_capacity(self.buffer.len());
 
         // Geometry first. A view keeps its alignment, because accessors inside it rely on that.
@@ -631,7 +719,7 @@ mod tests {
     }
 
     fn resize_all(max: u32) -> ModelEdit {
-        ModelEdit { materials: [(0, MaterialEdit { max_texture: Some(max), ..MaterialEdit::default() })].into() }
+        ModelEdit::single(0, MaterialEdit { max_texture: Some(max), ..MaterialEdit::default() })
     }
 
     #[test]
@@ -643,7 +731,7 @@ mod tests {
         assert_eq!(doc.materials[0].name, "shiny");
         assert_eq!(doc.materials[0].map(Slot::Base), Some(0));
 
-        let edit = ModelEdit { materials: [(0, MaterialEdit { roughness: Some(0.25), ..MaterialEdit::default() })].into() };
+        let edit = ModelEdit::single(0, MaterialEdit { roughness: Some(0.25), ..MaterialEdit::default() });
         let (bytes, _) = doc.render(&edit, false).unwrap();
         let out = dir.0.join("out.glb");
         std::fs::write(&out, &bytes).unwrap();
@@ -686,7 +774,7 @@ mod tests {
         std::fs::write(&source, pack_glb(&serde_json::to_vec(&json).unwrap(), &glb.bin.clone().unwrap())).unwrap();
 
         let source_doc = open(&source, &dir.0).unwrap();
-        let edit = ModelEdit { materials: [(0, MaterialEdit { metallic: Some(0.5), ..MaterialEdit::default() })].into() };
+        let edit = ModelEdit::single(0, MaterialEdit { metallic: Some(0.5), ..MaterialEdit::default() });
         let (bytes, _) = source_doc.render(&edit, false).unwrap();
         let out = gltf::binary::Glb::from_slice(&bytes).unwrap();
         let written: Value = serde_json::from_slice(&out.json).unwrap();
@@ -722,8 +810,61 @@ mod tests {
         second.name = "other".into();
         doc.materials.push(second);
         assert_eq!(doc.image_limit(0, &resize_all(2)), None, "the second material still wants it whole");
-        let both = ModelEdit { materials: [(0, MaterialEdit { max_texture: Some(2), ..MaterialEdit::default() }), (1, MaterialEdit { max_texture: Some(3), ..MaterialEdit::default() })].into() };
+        let both = ModelEdit { materials: [(0, MaterialEdit { max_texture: Some(2), ..MaterialEdit::default() }), (1, MaterialEdit { max_texture: Some(3), ..MaterialEdit::default() })].into(), ..ModelEdit::default() };
         assert_eq!(doc.image_limit(0, &both), Some(3), "the larger request wins");
+    }
+
+    /// Two textures sharing a clamped sampler, one of which also uses the second image.
+    fn sampled_glb(dir: &Dir) -> ModelDoc {
+        let doc = textured_obj(dir);
+        let (flat, _) = doc.render(&ModelEdit::default(), false).unwrap();
+        let glb = gltf::binary::Glb::from_slice(&flat).unwrap();
+        let mut json: Value = serde_json::from_slice(&glb.json).unwrap();
+        json["samplers"] = json!([{ "magFilter": 9729, "wrapS": 33071, "wrapT": 33071 }]);
+        json["textures"] = json!([{ "source": 0, "sampler": 0 }, { "source": 0, "sampler": 0 }]);
+        let source = dir.0.join("sampled.glb");
+        std::fs::write(&source, pack_glb(&serde_json::to_vec(&json).unwrap(), &glb.bin.clone().unwrap())).unwrap();
+        open(&source, &dir.0).unwrap()
+    }
+
+    fn written(doc: &ModelDoc, edit: &ModelEdit) -> Value {
+        let (bytes, _) = doc.render(edit, false).unwrap();
+        serde_json::from_slice(&gltf::binary::Glb::from_slice(&bytes).unwrap().json).unwrap()
+    }
+
+    #[test]
+    fn a_filter_is_written_to_a_new_sampler_that_keeps_the_wrap_modes() {
+        let dir = Dir::new("sampler");
+        let doc = sampled_glb(&dir);
+        assert_eq!(doc.file_filter(0), Some(TextureFilter::Smooth));
+        let json = written(&doc, &ModelEdit { filter: Some(TextureFilter::Pixels), ..ModelEdit::default() });
+        let at = json["textures"][0]["sampler"].as_u64().unwrap() as usize;
+        assert_eq!(json["samplers"][at], json!({ "magFilter": 9728, "minFilter": 9984, "wrapS": 33071, "wrapT": 33071 }));
+        assert_eq!(json["samplers"][0]["magFilter"], json!(9729), "the file's own sampler is left alone");
+        assert_eq!(json["samplers"].as_array().unwrap().len(), 2, "both textures share the one new sampler");
+    }
+
+    #[test]
+    fn a_textures_own_filter_beats_the_models_and_the_files_is_the_fallback() {
+        let dir = Dir::new("precedence");
+        let doc = sampled_glb(&dir);
+        assert_eq!(doc.filter_of(0, &ModelEdit::default()), Some(TextureFilter::Smooth));
+        let whole = ModelEdit { filter: Some(TextureFilter::Pixels), ..ModelEdit::default() };
+        assert_eq!(doc.filter_of(0, &whole), Some(TextureFilter::Pixels));
+        let own = ModelEdit { textures: [(0, TextureFilter::Smooth)].into(), ..whole };
+        assert_eq!(doc.filter_of(0, &own), Some(TextureFilter::Smooth));
+        assert!(!own.is_unchanged());
+        assert_eq!(doc.material_surface(0, &own).filters[0], Some(TextureFilter::Smooth));
+    }
+
+    #[test]
+    fn a_flat_model_with_no_samplers_gets_one_when_asked() {
+        let dir = Dir::new("flatfilter");
+        let doc = textured_obj(&dir);
+        assert_eq!(doc.file_filter(0), None);
+        let json = written(&doc, &ModelEdit { textures: [(0, TextureFilter::Pixels)].into(), ..ModelEdit::default() });
+        assert_eq!(json["samplers"][0]["magFilter"], json!(9728));
+        assert_eq!(json["textures"][0]["sampler"], json!(0));
     }
 
     #[test]

@@ -133,7 +133,7 @@ mod tests {
     use super::*;
 
     fn material(roughness: f32, metallic: f32) -> SurfaceMaterial {
-        SurfaceMaterial { color: [0.6, 0.3, 0.2, 1.0], roughness, metallic, emissive: [0.0; 3], image: None, surface_image: None, normal_image: None, emissive_image: None, normal_scale: 1.0, doc: Some(0) }
+        SurfaceMaterial { color: [0.6, 0.3, 0.2, 1.0], roughness, metallic, emissive: [0.0; 3], image: None, surface_image: None, normal_image: None, emissive_image: None, normal_scale: 1.0, doc: Some(0), filters: [None; 4] }
     }
 
     fn pixel(px: &[u8], x: usize, y: usize, size: usize) -> [u8; 4] {

@@ -11,6 +11,7 @@ use wgpu::util::DeviceExt;
 
 use crate::app::App;
 use crate::edit::Surface;
+use crate::edit::mesh::TextureFilter;
 use crate::model::{self, Image, Model};
 use crate::raster::LIGHT;
 
@@ -189,6 +190,10 @@ struct M { tint: vec4f, pbr: vec4f, emissive: vec4f }
 @group(1) @binding(3) var surface_map: texture_2d<f32>;
 @group(1) @binding(4) var normal_map: texture_2d<f32>;
 @group(1) @binding(5) var emissive_map: texture_2d<f32>;
+// Each map has its own sampler, because each can have its own filter.
+@group(1) @binding(6) var surface_smp: sampler;
+@group(1) @binding(7) var normal_smp: sampler;
+@group(1) @binding(8) var emissive_smp: sampler;
 // Bends `n` by a tangent-space sample, finding the tangent frame from screen derivatives so the
 // mesh needs no tangents of its own. A glTF normal map's +Y points against increasing v.
 fn bent(n: vec3f, world: vec3f, uv: vec2f, texel: vec3f, scale: f32) -> vec3f {
@@ -215,9 +220,9 @@ struct V { @builtin(position) p: vec4f, @location(0) n: vec3f, @location(1) uv: 
     if (albedo.a < 0.5) { discard; }
     var n = normalize(v.n);
     let flat_lit = 0.64 + 0.74 * abs(dot(n, g.light.xyz));
-    let map = textureSample(surface_map, smp, v.uv);
-    let normal_texel = textureSample(normal_map, smp, v.uv).xyz;
-    let glow = textureSample(emissive_map, smp, v.uv).rgb;
+    let map = textureSample(surface_map, surface_smp, v.uv);
+    let normal_texel = textureSample(normal_map, normal_smp, v.uv).xyz;
+    let glow = textureSample(emissive_map, emissive_smp, v.uv).rgb;
     if (m.pbr.z < 0.5) { return vec4f(albedo.rgb * flat_lit, 1.0); }
     let rough = clamp(m.pbr.x * map.g, 0.045, 1.0);
     let metal = clamp(m.pbr.y * map.b, 0.0, 1.0);
@@ -342,6 +347,8 @@ struct Pipes {
     linear: wgpu::Sampler,
     repeat_nearest: wgpu::Sampler,
     repeat_linear: wgpu::Sampler,
+    /// Nearest at every step, as a model's Pixels filter asks for.
+    repeat_point: wgpu::Sampler,
 }
 
 fn sampler(device: &wgpu::Device, mag: wgpu::FilterMode, address: wgpu::AddressMode) -> wgpu::Sampler {
@@ -401,7 +408,7 @@ impl Pipes {
         let texture_uniform = uniform(std::mem::size_of::<TextureUniform>());
 
         let global_layout = bgl(&[uniform_entry(0, frag_vert)]);
-        let part_layout = bgl(&[tex_entry(0), sampler_entry(1), uniform_entry(2, wgpu::ShaderStages::FRAGMENT), tex_entry(3), tex_entry(4), tex_entry(5)]);
+        let part_layout = bgl(&[tex_entry(0), sampler_entry(1), uniform_entry(2, wgpu::ShaderStages::FRAGMENT), tex_entry(3), tex_entry(4), tex_entry(5), sampler_entry(6), sampler_entry(7), sampler_entry(8)]);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&global_layout), Some(&part_layout)], immediate_size: 0 });
         let m = module("model", MODEL_WGSL);
         let attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
@@ -445,6 +452,14 @@ impl Pipes {
             linear: sampler(device, wgpu::FilterMode::Linear, wgpu::AddressMode::ClampToEdge),
             repeat_nearest: sampler(device, wgpu::FilterMode::Nearest, wgpu::AddressMode::Repeat),
             repeat_linear: sampler(device, wgpu::FilterMode::Linear, wgpu::AddressMode::Repeat),
+            repeat_point: device.create_sampler(&wgpu::SamplerDescriptor {
+                address_mode_u: wgpu::AddressMode::Repeat,
+                address_mode_v: wgpu::AddressMode::Repeat,
+                mag_filter: wgpu::FilterMode::Nearest,
+                min_filter: wgpu::FilterMode::Nearest,
+                mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+                ..Default::default()
+            }),
         }
     }
 
@@ -538,6 +553,15 @@ impl ModelImages {
     }
 }
 
+/// The sampler for a texture filter. A file that doesn't say draws as models do while browsing.
+fn model_sampler(pipes: &Pipes, filter: Option<TextureFilter>) -> &wgpu::Sampler {
+    match filter {
+        None => &pipes.repeat_nearest,
+        Some(TextureFilter::Smooth) => &pipes.repeat_linear,
+        Some(TextureFilter::Pixels) => &pipes.repeat_point,
+    }
+}
+
 /// Binds each part to its current colour, surface and textures. Runs when a model appears and
 /// when its materials change, so a slider costs a uniform write and not a re-upload.
 fn bind_parts(device: &wgpu::Device, queue: &wgpu::Queue, pipes: &Pipes, parts: &mut [GpuPart], images: &mut ModelImages, model: &Model, surface: Option<&Surface>) {
@@ -567,12 +591,16 @@ fn bind_parts(device: &wgpu::Device, queue: &wgpu::Queue, pipes: &Pipes, parts: 
         queue.write_buffer(&part.uniform, 0, bytemuck::bytes_of(&uniform));
         let white = images.white.clone();
         let flat = images.flat.clone();
+        let filters = shaded.map_or([None; 4], |(_, m)| m.filters);
         part.group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &pipes.part_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(base.as_ref().unwrap_or(&white)) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&pipes.repeat_nearest) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(model_sampler(pipes, filters[0])) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(model_sampler(pipes, filters[1])) },
+                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(model_sampler(pipes, filters[2])) },
+                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(model_sampler(pipes, filters[3])) },
                 wgpu::BindGroupEntry { binding: 2, resource: part.uniform.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(map.as_ref().unwrap_or(&white)) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(normal.as_ref().unwrap_or(&flat)) },
@@ -616,6 +644,9 @@ fn prepare_scene(device: &wgpu::Device, queue: &wgpu::Queue, pipes: &Pipes, scen
                     entries: &[
                         wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&white) },
                         wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&pipes.repeat_nearest) },
+                        wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&pipes.repeat_nearest) },
+                        wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&pipes.repeat_nearest) },
+                        wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&pipes.repeat_nearest) },
                         wgpu::BindGroupEntry { binding: 2, resource: uniform.as_entire_binding() },
                         wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&white) },
                         wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&flat) },

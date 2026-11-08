@@ -785,6 +785,46 @@ fn material_rows_show_a_ball_presets_and_their_maps() {
 }
 
 #[test]
+fn texture_filters_reach_the_stage_and_the_exported_file() {
+    use crate::edit::mesh::TextureFilter::{Pixels, Smooth};
+    let root = edit_fixture();
+    let mut rt = app_on(&root);
+    open_editor(&mut rt, "tri.obj");
+    let base_filter = |rt: &Runtime<App>| rt.state.stage.surface.as_ref().unwrap().materials[0].filters[0];
+    assert_eq!(base_filter(&rt), None, "an OBJ doesn't say");
+
+    // The whole model, in one click.
+    click(&mut rt, "model-filter/Pixels");
+    wait_for_edit(&mut rt);
+    assert_eq!(base_filter(&rt), Some(Pixels));
+
+    // One texture can differ, from the thumbnail that shows it.
+    click(&mut rt, "material-0");
+    for _ in 0..40 { rt.frame(1.0 / 60.0); }
+    click(&mut rt, "map-0-Base");
+    assert!(rt.popup_menu().is_some(), "the thumbnail opens a menu");
+    rt.resolve_popup(Some("smooth")).unwrap();
+    wait_for_edit(&mut rt);
+    assert_eq!(base_filter(&rt), Some(Smooth), "a texture's own filter wins");
+
+    // The file carries what's on screen.
+    let tile = tile_key(&rt, "tri.obj");
+    let staged = drag_out(&mut rt, &tile);
+    let doc = crate::edit::mesh::open(&staged[0], &root).unwrap();
+    assert_eq!(doc.file_filter(0), Some(Smooth));
+
+    // Choosing for the whole model again takes over, and Original shows the file's.
+    click(&mut rt, "model-filter/Smooth");
+    wait_for_edit(&mut rt);
+    assert!(rt.state.model_edit().textures.is_empty());
+    click(&mut rt, "compare/Original");
+    wait_for_edit(&mut rt);
+    assert_eq!(base_filter(&rt), None);
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn a_material_row_springs_open_and_closed_inside_a_fixed_panel() {
     let root = edit_fixture();
     let mut rt = app_on(&root);

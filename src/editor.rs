@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use rune::{Latest, Pixels, Spring, Tx, Waker};
 
 use crate::app::{App, Preview};
-use crate::edit::mesh::SurfaceMaterial;
+use crate::edit::mesh::{SurfaceMaterial, TextureFilter};
 use crate::edit::{self, AudioEdit, Decoded, Edit, ImageEdit, MaterialEdit, ModelDoc, ModelEdit, Pcm, Rendered, Shown, ball, sound};
 use crate::export::{self, Options};
 use crate::library::{Asset, Kind};
@@ -616,6 +616,27 @@ impl App {
             if let Some(pixels) = self.edit.map_thumbs.get(index) { pixels.set(shown.width, shown.height, shown.rgba.clone()); }
             if let Some(slot) = self.edit.thumb_seen.get_mut(index) { *slot = address; }
         }
+    }
+
+    /// Sets the filter for the whole model, clearing any set on single textures, so the choice
+    /// made last is the one that shows. They can be set again afterwards.
+    pub fn set_model_filter(&mut self, filter: Option<TextureFilter>) {
+        let mut edit = self.model_edit();
+        edit.filter = filter;
+        edit.textures.clear();
+        self.store_recipe(Edit::Model(edit));
+        self.edit_changed();
+    }
+
+    /// Sets one image's filter, or with `None` returns it to the model's.
+    pub fn set_texture_filter(&mut self, image: usize, filter: Option<TextureFilter>) {
+        let mut edit = self.model_edit();
+        match filter {
+            Some(filter) => edit.textures.insert(image, filter),
+            None => edit.textures.remove(&image),
+        };
+        self.store_recipe(Edit::Model(edit));
+        self.edit_changed();
     }
 
     /// Applies a look to a material in one step.

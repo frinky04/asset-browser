@@ -4,11 +4,11 @@
 //! nothing around them moves.
 
 use rune::tok::motion;
-use rune::{Color, Cursor, El, Phase, ScrollSpec, SurfaceFit, Tx, col, el, icon, row, text};
+use rune::{Color, Cursor, El, Phase, PopupItem, PopupMenu, ScrollSpec, SurfaceFit, Tx, col, el, icon, row, text};
 use rune_kit::ScrollBar;
 
 use crate::app::{App, bytes, ladder};
-use crate::edit::mesh::{MaterialInfo, ModelDoc, Slot};
+use crate::edit::mesh::{MaterialInfo, ModelDoc, Slot, TextureFilter};
 use crate::edit::{Decoded, Effort, ImageEdit, MaterialEdit, ModelEdit};
 use crate::editor::{AudioTab, Marker};
 use crate::library::{Asset, Kind};
@@ -200,7 +200,7 @@ const PRESETS: [(&str, f32, f32); 4] = [("Matte", 0.9, 0.0), ("Satin", 0.5, 0.0)
 
 /// A material's row: its ball, name and, when open, a bigger ball and quick looks.
 fn material_head(s: &App, doc: &ModelDoc, index: usize, info: &MaterialInfo, change: &MaterialEdit, open: bool) -> El {
-    let (_, roughness, metallic, _) = doc.values(index, &ModelEdit { materials: [(index, *change)].into() });
+    let (_, roughness, metallic, _) = doc.values(index, &ModelEdit::single(index, *change));
     let edited = *change != MaterialEdit::default();
     let height = if open { MATERIAL_HEAD_OPEN } else { MATERIAL_HEAD_CLOSED };
     let size = if open { MATERIAL_BALL_OPEN } else { MATERIAL_BALL_CLOSED };
@@ -237,14 +237,49 @@ fn material_head(s: &App, doc: &ModelDoc, index: usize, info: &MaterialInfo, cha
         .child(words)
 }
 
-/// A thumbnail of every map the material uses.
-fn map_strip(s: &App, doc: &ModelDoc, info: &MaterialInfo) -> El {
+/// What a map falls back to when it has no filter of its own.
+fn inherited_filter_name(s: &App) -> &'static str {
+    if s.model_edit().filter.is_some() { "Same as model" } else { "As in file" }
+}
+
+/// Asks which filter one texture should use.
+fn pick_texture_filter(s: &App, image: usize, anchor: String, tx: &mut Tx) {
+    let own = s.model_edit().textures.get(&image).copied();
+    let item = |id: &str, title: &str, on: bool| PopupItem::new(id, title).checked(on);
+    let menu = PopupMenu::new()
+        .item(item("inherit", inherited_filter_name(s), own.is_none()))
+        .item(item("smooth", "Smooth", own == Some(TextureFilter::Smooth)))
+        .item(item("pixels", "Pixels", own == Some(TextureFilter::Pixels)));
+    tx.popup_menu(menu, anchor, move |s: &mut App, picked, _| {
+        match picked.map(|p| p.to_string()).as_deref() {
+            Some("inherit") => s.set_texture_filter(image, None),
+            Some("smooth") => s.set_texture_filter(image, Some(TextureFilter::Smooth)),
+            Some("pixels") => s.set_texture_filter(image, Some(TextureFilter::Pixels)),
+            _ => {}
+        }
+    });
+}
+
+/// A thumbnail of every map the material uses. Pressing one sets that texture's filter.
+fn map_strip(s: &App, doc: &ModelDoc, material: usize, info: &MaterialInfo) -> El {
+    let edit = s.model_edit();
     let mut strip = row().w_full().gap(6.0).mt(2.0);
     for (slot, image) in &info.maps {
-        let size = doc.image_size(*image).map_or_else(|| "can't be resized".to_owned(), |(w, h)| format!("{w}×{h}"));
-        let mut picture = el().size(MAP_THUMB, MAP_THUMB).radius(5.0).fill(T.bg).border(1.0, T.line).clip_rounded(5.0);
-        if let Some(pixels) = s.edit.map_thumbs.get(*image) { picture = picture.pixels_fit(pixels, SurfaceFit::Fill); }
-        strip = strip.child(col().w(MAP_THUMB + 4.0).gap(2.0).items_center().help(format!("{} {size}", slot.title()))
+        let image = *image;
+        let size = doc.image_size(image).map_or_else(|| "can't be resized".to_owned(), |(w, h)| format!("{w}×{h}"));
+        let filter = doc.filter_of(image, &edit).map_or("unspecified", TextureFilter::title);
+        let key = format!("map-{material}-{}", slot.short());
+        let anchor = key.clone();
+        let mut picture = el().key(key).role("button").focusable(true).label(format!("{} filtering", slot.title())).size(MAP_THUMB, MAP_THUMB).radius(5.0).fill(T.bg).border(1.0, T.line).clip_rounded(5.0)
+            .press_scale(0.95).cursor(Cursor::Pointer)
+            .on_press_tx(move |s: &mut App, tx| pick_texture_filter(s, image, anchor.clone(), tx));
+        if let Some(pixels) = s.edit.map_thumbs.get(image) { picture = picture.pixels_fit(pixels, SurfaceFit::Fill); }
+        // Only a texture set apart from the rest needs marking.
+        if let Some(own) = edit.textures.get(&image) {
+            picture = picture.child(el().pin(None, None, Some(2.0), Some(2.0)).px(3.0).radius(3.0).fill(T.accent).inert()
+                .child(label(if *own == TextureFilter::Pixels { "Px" } else { "Sm" }, SMALL, T.on_accent)));
+        }
+        strip = strip.child(col().w(MAP_THUMB + 4.0).gap(2.0).items_center().help(format!("{} {size}, {filter} filtering. Click to change.", slot.title()))
             .child(picture)
             .child(label(slot.short(), SMALL, T.faint)));
     }
@@ -266,7 +301,7 @@ fn material_body_height(doc: &ModelDoc, index: usize, info: &MaterialInfo) -> f3
 }
 
 fn material_body(s: &App, doc: &ModelDoc, index: usize, info: &MaterialInfo, change: &MaterialEdit) -> El {
-    let edit = ModelEdit { materials: [(index, *change)].into() };
+    let edit = ModelEdit::single(index, *change);
     let (shade, roughness, metallic, emissive) = doc.values(index, &edit);
     let mut body = col().w_full().px(CARD_PAD).pb(CARD_PAD).gap(MATERIAL_ROW_GAP)
         .child(slider(&format!("m{index}-rough"), "Roughness", roughness, format!("{roughness:.2}"), move |s, v, done| s.set_material(index, done, |m| m.roughness = Some(v))))
@@ -295,7 +330,7 @@ fn material_body(s: &App, doc: &ModelDoc, index: usize, info: &MaterialInfo, cha
         let items = std::iter::once(plain("Full", None)).chain(ladder(longest).into_iter().map(|n| plain(n.to_string(), Some(n)))).collect();
         body = body.child(labelled("Textures", segments_inset(&format!("m{index}-size"), items, change.max_texture, move |s, v, _| s.set_material(index, true, |m| m.max_texture = v), 1.0).w_full()));
     }
-    if !info.maps.is_empty() { body = body.child(map_strip(s, doc, info)); }
+    if !info.maps.is_empty() { body = body.child(map_strip(s, doc, index, info)); }
     body
 }
 
@@ -314,6 +349,10 @@ fn model_controls(s: &App, doc: &ModelDoc) -> El {
             let count = doc.texture_count();
             list = list.child(labelled(&format!("{count} texture{}", if count == 1 { "" } else { "s" }), segments_inset("all-textures", items, current, |s, v, _| s.set_all_texture_sizes(v), 1.0).w_full()).mb(MATERIAL_ROW_GAP));
         }
+    }
+    if doc.texture_count() > 0 {
+        let filters = vec![plain("As in file", None), plain("Smooth", Some(TextureFilter::Smooth)), plain("Pixels", Some(TextureFilter::Pixels))];
+        list = list.child(labelled("Filtering", segments_inset("model-filter", filters, edit.filter, |s, v, _| s.set_model_filter(v), 2.0).w_full()).mb(MATERIAL_ROW_GAP));
     }
     for (index, info) in doc.materials.iter().enumerate() {
         let change = edit.materials.get(&index).copied().unwrap_or_default();
