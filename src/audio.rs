@@ -9,10 +9,56 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rodio::{Decoder, OutputStream, Sink};
+use rodio::source::SeekError;
+use rodio::{Decoder, OutputStream, Sink, Source};
+
+use crate::edit::Pcm;
 
 enum Command {
     Play(PathBuf),
+    /// Audio already in memory, starting `at` seconds in.
+    Clip { pcm: Arc<Pcm>, looped: bool, at: f32 },
+}
+
+/// Plays samples held in memory, optionally forever.
+struct Clip {
+    pcm: Arc<Pcm>,
+    next: usize,
+    looped: bool,
+}
+
+impl Clip {
+    fn sample_index(pcm: &Pcm, seconds: f32) -> usize {
+        let frame = (f64::from(seconds.max(0.0)) * f64::from(pcm.rate)) as u64;
+        (frame.min(pcm.frames()) * u64::from(pcm.channels)) as usize
+    }
+}
+
+impl Iterator for Clip {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        if self.next >= self.pcm.samples.len() {
+            if !self.looped || self.pcm.samples.is_empty() { return None }
+            self.next = 0;
+        }
+        let sample = self.pcm.samples[self.next];
+        self.next += 1;
+        Some(sample)
+    }
+}
+
+impl Source for Clip {
+    fn current_frame_len(&self) -> Option<usize> { None }
+    fn channels(&self) -> u16 { self.pcm.channels }
+    fn sample_rate(&self) -> u32 { self.pcm.rate }
+    fn total_duration(&self) -> Option<Duration> {
+        (!self.looped).then(|| Duration::from_secs_f32(self.pcm.seconds()))
+    }
+    fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
+        self.next = Clip::sample_index(&self.pcm, pos.as_secs_f32());
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -34,14 +80,21 @@ impl Audio {
             // Opened on first use, so a machine with no output only loses sound.
             let mut output = None;
             while let Ok(command) = inbox.recv() {
-                let Command::Play(path) = command;
                 if output.is_none() { output = OutputStream::try_default().ok(); }
                 let Some((_, handle)) = &output else { continue };
                 let Ok(next) = Sink::try_new(handle) else { continue };
                 next.set_volume(f32::from_bits(level.load(Ordering::Relaxed)));
-                let opened = File::open(&path).ok().and_then(|f| Decoder::new(BufReader::new(f)).ok());
-                let Some(source) = opened else { continue };
-                next.append(source);
+                match command {
+                    Command::Play(path) => {
+                        let opened = File::open(&path).ok().and_then(|f| Decoder::new(BufReader::new(f)).ok());
+                        let Some(source) = opened else { continue };
+                        next.append(source);
+                    }
+                    Command::Clip { pcm, looped, at } => {
+                        let start = Clip::sample_index(&pcm, at);
+                        next.append(Clip { pcm, next: start, looped });
+                    }
+                }
                 if let Ok(mut slot) = shared.lock() { *slot = Some(next); }
             }
         });
@@ -56,6 +109,12 @@ impl Audio {
     pub fn play(&self, path: PathBuf) {
         self.stop();
         let _ = self.commands.send(Command::Play(path));
+    }
+
+    /// Plays `pcm` from `at` seconds, replacing whatever is playing.
+    pub fn play_clip(&self, pcm: Arc<Pcm>, looped: bool, at: f32) {
+        self.stop();
+        let _ = self.commands.send(Command::Clip { pcm, looped, at });
     }
 
     pub fn stop(&self) {

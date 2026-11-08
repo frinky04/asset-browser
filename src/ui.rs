@@ -11,6 +11,7 @@ use rune::{Color, Cursor, Cx, El, GrowthSpec, Icon, Phase, PointerButton, Scroll
 use rune_kit::{Kit, PaletteSeed, ScrollBar, ScrollBarStyle, TextInput};
 
 use crate::app::{App, GRID_GAP, GRID_INSET, GRID_PAD, INSPECTOR_DEFAULT, Motion, TILE_PAD, Preview, Theme, bytes, clock, commas, ladder};
+use crate::edit_ui;
 use crate::library::{Asset, Kind, Sort};
 use crate::settings;
 use crate::stage::{FOV_DEGREES, STAGE_KEY, STAGE_MARK, actual_size_zoom, zoom_about};
@@ -21,12 +22,12 @@ pub struct Tokens {
     pub(crate) panel: Color,
     /// Over the app behind a modal sheet.
     pub(crate) scrim: Color,
-    well: Color,
+    pub(crate) well: Color,
     raised: Color,
     pub(crate) line: Color,
     pub(crate) text: Color,
     pub(crate) muted: Color,
-    faint: Color,
+    pub(crate) faint: Color,
     pub(crate) accent: Color,
     on_accent: Color,
     pub(crate) hover: Color,
@@ -37,7 +38,7 @@ pub struct Tokens {
     scroll_thumb_hover: Color,
 }
 
-fn color(s: &str) -> Color {
+pub(crate) fn color(s: &str) -> Color {
     hex(s).unwrap_or(Color::WHITE)
 }
 
@@ -131,6 +132,11 @@ const PACK_RIGHT: f32 = 12.0;
 const THUMB_FADE_SECONDS: f32 = 0.16;
 /// Below this the inspector gives its details' room to the preview.
 const SHORT_WINDOW: f32 = 740.0;
+/// Below this the open Edit panel and the preview can't both fit, so the inspector scrolls.
+const EDIT_SCROLL_WINDOW: f32 = 810.0;
+/// What an audio inspector needs besides the waveform, with the Edit panel open.
+const AUDIO_EDIT_CHROME: f32 = 644.0;
+const SCROLLING_WELL_H: f32 = 190.0;
 
 fn kit_for(t: &Tokens) -> KitCell {
     let mut k = Kit::from_palette(PaletteSeed { bg: t.panel, fg: t.text, accent: t.accent });
@@ -165,7 +171,7 @@ const IMAGE: Icon = Icon { name: "ab-image", view: 16.0, body: r#"<rect x="2" y=
 const CUBE: Icon = Icon { name: "ab-cube", view: 16.0, body: r#"<path d="M8 1.8l5.4 3v6.4L8 14.2l-5.4-3V4.8L8 1.8zM2.8 4.9L8 8l5.2-3.1M8 8v6" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linejoin="round"/>"# };
 const SOUND: Icon = Icon { name: "ab-sound", view: 16.0, body: r#"<path d="M2.5 6.5v3M5.25 4v8M8 2v12M10.75 4.5v7M13.5 6.5v3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"# };
 const GRID: Icon = Icon { name: "ab-grid", view: 16.0, body: r#"<rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1" stroke="currentColor" stroke-width="1.3" fill="none"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1" stroke="currentColor" stroke-width="1.3" fill="none"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1" stroke="currentColor" stroke-width="1.3" fill="none"/><rect x="9" y="9" width="4.5" height="4.5" rx="1" stroke="currentColor" stroke-width="1.3" fill="none"/>"# };
-const PLAY: Icon = Icon { name: "ab-play", view: 16.0, body: r#"<path d="M5 3.2v9.6L13 8 5 3.2z" fill="currentColor"/>"# };
+pub(crate) const PLAY: Icon = Icon { name: "ab-play", view: 16.0, body: r#"<path d="M5 3.2v9.6L13 8 5 3.2z" fill="currentColor"/>"# };
 const PAUSE: Icon = Icon { name: "ab-pause", view: 16.0, body: r#"<path d="M4.5 3h2.5v10H4.5zM9 3h2.5v10H9z" fill="currentColor"/>"# };
 pub(crate) const REFRESH: Icon = Icon { name: "ab-refresh", view: 16.0, body: r#"<path d="M13.2 7A5.3 5.3 0 003.4 5.2M2.8 9a5.3 5.3 0 009.8 1.8M3.2 2.6v2.9h2.9M12.8 13.4v-2.9H9.9" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>"# };
 pub(crate) const TRASH: Icon = Icon { name: "ab-trash", view: 16.0, body: r#"<path d="M2.8 4.3h10.4M6.2 4.1V2.9h3.6v1.2M4 4.5l.6 8.2c0 .5.5.9 1 .9h4.8c.5 0 1-.4 1-.9l.6-8.2" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>"# };
@@ -195,6 +201,19 @@ pub(crate) fn hairline() -> El {
 fn swap(off: El, on: El, showing: bool) -> El {
     let shown = |e: El, visible: bool| e.grid_cell(0).opacity(if visible { 1.0 } else { 0.0 }).scale(if visible { 1.0 } else { 0.86 }).motion(motion::SNAPPY).center_y();
     el().equal_columns(1).child(shown(off, !showing)).child(shown(on, showing))
+}
+
+/// One of several things sharing a grid cell, whose size is the largest of them: swapping which
+/// one shows fades, and can't move anything around the cell.
+pub(crate) fn layer(e: El, showing: bool) -> El {
+    let e = e.grid_cell(0).opacity(if showing { 1.0 } else { 0.0 }).motion(motion::SNAPPY);
+    if showing { e } else { e.inert() }
+}
+
+/// A control that isn't available right now: still there, so nothing moves when it becomes so.
+pub(crate) fn dim(e: El, available: bool) -> El {
+    let e = e.opacity(if available { 1.0 } else { 0.38 }).motion(motion::SNAPPY);
+    if available { e } else { e.inert() }
 }
 
 /// A quiet outlined button with an icon, which says so when its action has happened.
@@ -228,7 +247,7 @@ pub(crate) fn segments<V: Copy + PartialEq + 'static>(key: &str, items: Vec<Segm
 }
 
 /// [`segments`] with `inset` beside each label, for many choices in a narrow place.
-fn segments_inset<V: Copy + PartialEq + 'static>(key: &str, items: Vec<Segment<V>>, current: V, on: impl Fn(&mut App, V, &mut Tx) + Clone + 'static, inset: f32) -> El {
+pub(crate) fn segments_inset<V: Copy + PartialEq + 'static>(key: &str, items: Vec<Segment<V>>, current: V, on: impl Fn(&mut App, V, &mut Tx) + Clone + 'static, inset: f32) -> El {
     let mut bar = row().key(key.to_owned()).role("radiogroup").h(CONTROL_H).radius(GROUP_RADIUS).border(1.0, T.line).padding(GROUP_PAD).equal_columns(items.len());
     // The indicator shares the chosen segment's cell, so it slides when the choice moves.
     if let Some(at) = items.iter().position(|i| i.value == current) {
@@ -396,7 +415,7 @@ fn chip(key: String, name: String, count: Option<String>, on: bool, f: impl Fn(&
 }
 
 /// An on/off control, drawn so its state reads without comparing it to its neighbours.
-fn toggle(name: &str, on: bool, f: impl Fn(&mut App, &mut Tx) + 'static) -> El {
+pub(crate) fn toggle(name: &str, on: bool, f: impl Fn(&mut App, &mut Tx) + 'static) -> El {
     row().key(name.to_owned()).role("switch").checked(on).focusable(true).label(name.to_owned()).px(10.0).h(CONTROL_H).gap(7.0).radius(CONTROL_RADIUS).items_center()
         .border(1.0, T.line)
         .hover(T.hover)
@@ -543,6 +562,10 @@ fn tile(s: &App, id: u32, width: f32, selected: bool) -> El {
     };
     let mut picture = el().w(inner).h(s.picture_height()).radius(WELL_RADIUS).fill(T.well).center().child(image);
     if failed { picture = picture.child(icon(kind_icon(asset.kind), 22.0).color(T.faint)); }
+    if s.edit.is_edited(asset.key) {
+        picture = picture.child(el().key("edited").pin(None, Some(6.0), Some(6.0), None).size(16.0, 16.0).radius(8.0).center().fill(T.accent).inert()
+            .child(icon(&SLIDERS, 10.0).color(T.on_accent)));
+    }
     // Lifts the well under the pointer too, without the view running for every tile crossed.
     picture = picture.child(el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).radius(WELL_RADIUS).fill(T.well_hover).border(1.0, T.well_edge).inert().group_opacity(0.0, 1.0));
     let max = s.drag_max;
@@ -597,6 +620,11 @@ impl App {
         else if view.zoom == 1.0 { 0 }
         else if (view.zoom - actual_size_zoom(self.stage_size, size, self.scale)).abs() < 1e-3 { 1 }
         else { 2 }
+    }
+
+    /// Whether the open Edit panel needs the whole inspector to scroll.
+    pub(crate) fn inspector_scrolls(&self) -> bool {
+        self.edit.open && self.window_height < EDIT_SCROLL_WINDOW
     }
 
     /// A narrow grid drops the counts and captions its controls can live without.
@@ -803,7 +831,7 @@ fn pane(s: &App, id: u32, asset: &Asset) -> Pane {
                 .child(segments("sampling", vec![plain("Pixels", false), plain("Smooth", true)], view.smooth, |s, v, _| s.stage.view.smooth = v));
             let current = s.texture_size.filter(|m| *m < longest);
             let mut actions: Vec<El> = texture_sizes(s, longest, current).into_iter().collect();
-            actions.push(drag_bar(id, current, "Drag texture out", format!("{}×{}", size.0, size.1)));
+            actions.push(drag_bar(id, current, "Drag texture out", s.drag_detail(asset, format!("{}×{}", size.0, size.1))));
             Pane { tools: Some(tools), stage: texture_stage_handlers(stage_el()), hint: None, corner: None, dock: None, actions }
         }
         Preview::Model(m) => {
@@ -812,23 +840,33 @@ fn pane(s: &App, id: u32, asset: &Asset) -> Pane {
                 1 => "1 texture".to_owned(),
                 n => format!("{n} textures"),
             };
-            let mut actions = vec![drag_bar(id, None, "Drag model out", format!("{} tris, {images}", commas(m.triangles())))];
+            let mut actions = vec![drag_bar(id, None, "Drag model out", s.drag_detail(asset, format!("{} tris, {images}", commas(m.triangles()))))];
             if matches!(asset.ext, "obj" | "dae" | "fbx") {
-                actions.push(row().w_full().justify_between().items_center()
+                // An edited model is one GLB with everything inside, so this stops applying.
+                actions.push(dim(row().w_full().justify_between().items_center()
                     .child(label("Material and texture files", SMALL, T.muted))
-                    .child(segments("companions", vec![plain("Include", true), plain("Leave out", false)], s.companions, |s, v, _| s.companions = v)));
+                    .child(segments("companions", vec![plain("Include", true), plain("Leave out", false)], s.companions, |s, v, _| s.companions = v)), !s.edit.is_edited(asset.key)));
             }
             Pane { tools: None, stage: model_stage_handlers(stage_el()), hint: Some("Drag to orbit, right-drag to pan, scroll to zoom"), corner: Some(tool("Reset view", false, |s, _| s.reset_view())), dock: None, actions }
         }
         Preview::Audio { seconds, rate, channels } => {
             let playing = s.showing_playing;
-            let wave = el().key("waveform").w_full().h(200.0).cursor(Cursor::Pointer)
+            // The rest of the well is the transport row under the waveform.
+            let wave_h = if s.inspector_scrolls() {
+                SCROLLING_WELL_H - 44.0
+            } else if s.edit.open {
+                (s.window_height - AUDIO_EDIT_CHROME).clamp(100.0, 200.0)
+            } else {
+                200.0
+            };
+            let wave = el().key("waveform").w_full().h(wave_h).cursor(Cursor::Pointer)
                 .pixels(&s.wave)
                 .on_layout(|s: &mut App, r: [f32; 4]| s.stage_size = [r[2], r[3]])
                 .on_drag(|s: &mut App, drag, tx| {
                     if drag.phase != Phase::Up { s.seek_fraction(drag.x / drag.w.max(1.0), tx); }
                 })
                 .child(el().key("playhead").w(1.5).h_full().fill(T.accent).absolute(0.0, 0.0).live_offset(&s.playhead));
+            let wave = edit_ui::markers(s, wave);
             let dock = row().key("tools").w_full().gap(10.0).items_center()
                 .child(el().key("play").role("button").label(if playing { "Pause" } else { "Play" }).focusable(true).size(30.0, 30.0).radius(15.0).center().fill(T.accent).press_scale(0.9).cursor(Cursor::Pointer)
                     .on_press_tx(|s: &mut App, tx| s.toggle_playback(tx))
@@ -836,6 +874,7 @@ fn pane(s: &App, id: u32, asset: &Asset) -> Pane {
                 .child(text("0:00.0 / 0:00.0").live_text(&s.clock).font(LABEL).color(T.muted).grow(1.0))
                 .child(toggle("Play on select", s.autoplay, |s, _| s.autoplay = !s.autoplay));
             let detail = format!("{}, {} Hz, {} ch", clock(*seconds), commas(*rate as usize), channels);
+            let detail = s.drag_detail(asset, detail);
             Pane { tools: None, stage: col().w_full().px(16.0).pb(36.0).child(wave), hint: None, corner: None, dock: Some(dock), actions: vec![drag_bar(id, None, "Drag sound out", detail)] }
         }
         Preview::Failed(reason) => Pane {
@@ -861,13 +900,26 @@ fn inspector(s: &App) -> El {
     let Pane { tools, stage, hint, corner, dock, actions } = pane(s, id, asset);
     // Selecting within a kind swaps at once; arriving at a different kind fades the new layout in.
     let kind_key = match asset.kind { Kind::Texture => "texture-pane", Kind::Model => "model-pane", Kind::Audio => "audio-pane" };
-    let mut body = col().key(kind_key).w_full().padding(14.0).gap(12.0).min_h(0.0).grow(1.0).instant_changes()
+    let mut body = col().key(kind_key).w_full().padding(14.0).gap(12.0).min_h(0.0).grow(1.0)
         .transition(Transition::asymmetric(Transition::opacity(), Transition::none()));
-    body = body.child(col().w_full().gap(2.0)
-        .child(text(asset.name().to_owned()).key("name").font(HEADING).color(T.text).wrap_anywhere().max_lines(2))
-        .child(text(asset.folder().to_owned()).font(SMALL).color(T.muted).truncate_head().w_full()));
+    // Browsing swaps assets at once, but the Edit panel's own changes should move.
+    if !s.edit.open && !s.edit.settling() { body = body.instant_changes(); }
+    // Everything the Edit panel adds doesn't fit a short window, so the inspector scrolls instead.
+    let scrolling = s.inspector_scrolls();
+    if scrolling { body = body.scroll(ScrollSpec { stick_bottom: false }); }
+    let edited = s.edit.is_edited(asset.key);
+    // The dot sits over the button's corner, so gaining one can't change its width.
+    let edit_button = chip("edit-toggle".to_owned(), "Edit".to_owned(), None, s.edit.open, |s, tx| s.toggle_editor(tx))
+        .help(if edited { "This asset has edits. Dragging it out uses them." } else { "Trim, compress or adjust what gets dragged out. The source file is never changed." })
+        .child(el().key("edited-dot").pin(None, Some(3.0), Some(3.0), None).size(5.0, 5.0).radius(2.5).fill(T.accent).opacity(if edited { 1.0 } else { 0.0 }).scale(if edited { 1.0 } else { 0.4 }).motion(motion::SNAPPY).inert());
+    body = body.child(row().w_full().gap(8.0).items_start()
+        .child(col().grow(1.0).min_w(0.0).gap(2.0)
+            .child(text(asset.name().to_owned()).key("name").font(HEADING).color(T.text).wrap_anywhere().max_lines(2))
+            .child(text(asset.folder().to_owned()).font(SMALL).color(T.muted).truncate_head().w_full()))
+        .child(el().border(1.0, T.line).radius(GROUP_RADIUS).padding(GROUP_PAD).child(edit_button)));
     if let Some(t) = tools { body = body.child(t); }
-    let mut well = col().w_full().grow(1.0).min_h(120.0).justify_center().radius(WELL_RADIUS).fill(T.well).child(stage);
+    let well_base = if scrolling { col().w_full().h(SCROLLING_WELL_H) } else { col().w_full().grow(1.0).min_h(120.0) };
+    let mut well = well_base.justify_center().radius(WELL_RADIUS).fill(T.well).child(stage);
     if let Some(h) = hint {
         well = well.child(el().pin(Some(12.0), None, None, Some(10.0)).inert().child(label(h, SMALL, T.faint)));
     }
@@ -877,7 +929,9 @@ fn inspector(s: &App) -> El {
     if let Some(d) = dock {
         well = well.child(el().pin(Some(12.0), None, Some(12.0), Some(10.0)).child(d));
     }
-    body = body.child(well).children(actions);
+    // The panel takes its room from the preview, so everything under it stays exactly where it is.
+    let area = if scrolling { col().w_full() } else { col().w_full().grow(1.0).min_h(0.0) };
+    body = body.child(area.key("preview-area").child(well).child(edit_ui::slot(s, asset))).children(actions);
 
     let mut facts = vec![("Size on disk", bytes(asset.size)), ("Format", asset.ext.to_owned())];
     if asset.kind == Kind::Texture {
@@ -890,16 +944,17 @@ fn inspector(s: &App) -> El {
         facts.push(("Texture guessed", if more > 0 { format!("{name} +{more}") } else { name }));
     }
     facts.push(("Pack", s.lib.packs[asset.pack as usize].name.clone()));
-    if s.window_height >= SHORT_WINDOW {
-        body = body.child(facts_card(facts));
+    let tall = s.window_height >= SHORT_WINDOW;
+    let facts_view = if tall {
+        facts_card(facts)
     } else {
         // Short windows keep the facts on one line, so the preview keeps its height.
         let line = facts.into_iter().map(|(_, value)| value).collect::<Vec<_>>().join(", ");
-        body = body.child(text(line).key("facts-line").font(SMALL).color(T.muted).truncate().w_full());
-    }
+        text(line).key("facts-line").font(SMALL).color(T.muted).truncate().w_full()
+    };
 
     let path = s.asset_path(id).map(|p| p.display().to_string()).unwrap_or_default();
-    body = body.child(row().w_full().gap(8.0)
+    let details = col().key("file-details").w_full().gap(12.0).child(facts_view).child(row().w_full().gap(8.0)
         .child(outlined("Show in Explorer", "Opened", s.is_confirmed("reveal"), &FOLDER, move |s, tx| {
             s.reveal(id);
             s.confirm("reveal", tx);
@@ -908,6 +963,17 @@ fn inspector(s: &App) -> El {
             tx.copy(path.clone());
             s.confirm("copy", tx);
         })));
+    // The readout takes over the details' place. Sharing a cell means opening the panel can't
+    // shift the drag bar above them.
+    let open = s.edit.open;
+    body = if tall {
+        body.child(el().key("details").w_full().equal_columns(1).child(layer(details, !open)).child(layer(edit_ui::foot(s, asset), open)))
+    } else if open {
+        body.child(edit_ui::foot(s, asset))
+    } else {
+        body.child(details)
+    };
+    if scrolling { body = body.scroll_bar_styled(scroll_style()); }
     shell.child(body)
 }
 
@@ -977,6 +1043,9 @@ pub fn on_key(s: &mut App, event: &rune::KeyEvent, tx: &mut Tx) -> bool {
     }
     if tx.focused().is_some_and(|f| f.contains("search")) { return false }
     let cols = s.columns.max(1) as isize;
+    // A focused slider in the Edit panel uses the arrow keys itself.
+    let on_edit_control = tx.focused().is_some_and(|f| f.contains("edit-panel") || f.contains("mark-"));
+    if on_edit_control && matches!(event.key, Key::Left | Key::Right | Key::Up | Key::Down) { return false }
     match &event.key {
         Key::Left => s.step_selection(-1, tx),
         Key::Right => s.step_selection(1, tx),

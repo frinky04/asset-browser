@@ -9,6 +9,7 @@ A fast browser for a folder of game assets on Windows, built with [Rune](https:/
 - Orbit, pan and zoom models. Pan, zoom and tile textures. Scrub audio.
 - Drag anything out to a folder or another program. Drags hand over a staged copy, so the library file is never touched.
 - Pick a smaller size for a texture to preview it and drag it out at that size, or set a size for all grid drags.
+- Press **Edit** to change what gets dragged out. See [Editing](#editing).
 
 ```sh
 cargo run --release
@@ -42,6 +43,18 @@ Pixels, triangles and length come from thumbnailing, so those filters fill in as
 
 The list under the search box completes these: arrows pick a row, Tab or Enter takes it.
 
+## Editing
+
+**Edit** in the inspector opens controls for the selected asset. Edits never touch the library file: the preview and the drag both use a rendered copy, and each asset remembers its edits until the app closes. A badge on the tile shows which assets have some, and grid drags use them too. **Original** flips the preview back to compare.
+
+| Asset | Controls | Leaves as |
+| --- | --- | --- |
+| Audio | Drag the waveform's markers to trim. Under Loop, slide the join in the seam view, crossfade it, or let **Find best join** line it up. Under Compress, set quality, sample rate and channels | Ogg Vorbis |
+| Textures | Palette size, dithering and encoder effort, on top of the size ladder | PNG |
+| Models | Every material's roughness, metallic, emissive, tint and texture size | GLB |
+
+Editing a GLB or glTF keeps its nodes, skins and animation. Other model formats leave as one static mesh. Normal maps are resized and exported but the preview doesn't draw them.
+
 ## Keys
 
 Arrows move the selection. Space plays or pauses audio. `/` focuses search and Escape clears it.
@@ -53,4 +66,4 @@ cargo test
 target/release/asset-browser --snap out.png --scene model --size 1520x900
 ```
 
-Scenes: `textures`, `models`, `audio`, `search`, `small`, `texture`, `tile`, `tile-seams`, `big-texture`, `model`, `sound`. Set `AB_FRAME_MS=16` with a `--script` to scroll against the real thumbnail workers at 60 fps.
+Scenes: `textures`, `models`, `audio`, `search`, `small`, `texture`, `tile`, `tile-seams`, `big-texture`, `model`, `sound`, `edit-trim`, `edit-loop`, `edit-compress`, `edit-texture`, `edit-model`. Set `AB_FRAME_MS=16` with a `--script` to scroll against the real thumbnail workers at 60 fps.

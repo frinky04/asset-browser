@@ -406,6 +406,321 @@ fn browsing_previewing_and_dragging_out_end_to_end() {
     let _ = std::fs::remove_dir_all(root.parent().unwrap());
 }
 
+/// A library with a two-second tone, a noisy JPEG and a textured OBJ.
+fn edit_fixture() -> PathBuf {
+    isolate();
+    static COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!("ab-edit-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("Pack")).unwrap();
+    let samples: Vec<i16> = (0..88_200).map(|i| ((i as f32 * 0.04).sin() * 12_000.0) as i16).collect();
+    let mut wav = Vec::new();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + samples.len() as u32 * 2).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&44_100u32.to_le_bytes());
+    wav.extend_from_slice(&88_200u32.to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(samples.len() as u32 * 2).to_le_bytes());
+    for s in &samples { wav.extend_from_slice(&s.to_le_bytes()); }
+    std::fs::write(root.join("Pack/tone.wav"), wav).unwrap();
+    let noise = image::RgbImage::from_fn(64, 64, |x, y| image::Rgb([(x * 4) as u8, (y * 4) as u8, ((x * y) % 256) as u8]));
+    noise.save(root.join("Pack/noise.jpg")).unwrap();
+    image::RgbaImage::from_pixel(128, 128, image::Rgba([120, 80, 40, 255])).save(root.join("Pack/skin.png")).unwrap();
+    std::fs::write(root.join("Pack/tri.mtl"), "newmtl hull\nmap_Kd skin.png\n").unwrap();
+    std::fs::write(root.join("Pack/tri.obj"), "mtllib tri.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nvn 0 0 1\nusemtl hull\nf 1/1/1 2/2/1 3/3/1\n").unwrap();
+    root
+}
+
+fn wait_for_edit(rt: &mut Runtime<App>) {
+    // A pointer event's handler can start the work on the next frame.
+    settle(rt);
+    let start = Instant::now();
+    while rt.state.edit.busy() && start.elapsed() < Duration::from_secs(30) {
+        rt.update(|s, tx| { s.poll(tx); });
+        rt.frame(1.0 / 60.0);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    rt.update(|s, tx| { s.poll(tx); });
+    settle(rt);
+}
+
+/// Selects `name` and opens the Edit panel on it, ready to use.
+fn open_editor(rt: &mut Runtime<App>, name: &str) {
+    let tile = tile_key(rt, name);
+    click(rt, &tile);
+    wait_for_preview(rt);
+    if !rt.state.edit.open { click(rt, "edit-toggle"); }
+    wait_for_edit(rt);
+    assert!(rt.find("edit-panel").is_some());
+}
+
+/// Drags the white bar out and returns what got staged.
+fn drag_out(rt: &mut Runtime<App>, key: &str) -> Vec<PathBuf> {
+    let (x, y) = rt.find(key).unwrap();
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_move(x + 30.0, y + 10.0);
+    pump_drag(rt);
+    rt.pointer_up(x + 30.0, y + 10.0);
+    settle(rt);
+    rt.state.last_staged.clone()
+}
+
+fn snapshot_tree(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut files: Vec<_> = walkdir::WalkDir::new(root).into_iter().flatten().filter(|e| e.file_type().is_file())
+        .map(|e| (e.path().to_owned(), std::fs::read(e.path()).unwrap())).collect();
+    files.sort();
+    files
+}
+
+#[test]
+fn trimming_audio_changes_the_preview_and_the_drag_but_never_the_library() {
+    let root = edit_fixture();
+    let before = snapshot_tree(&root);
+    let mut rt = app_on(&root);
+
+    // Nothing about editing shows until it's asked for.
+    let tile = tile_key(&rt, "tone.wav");
+    click(&mut rt, &tile);
+    wait_for_preview(&mut rt);
+    assert!(rt.find("edit-panel").is_none() && rt.find("mark-end").is_none());
+
+    open_editor(&mut rt, "tone.wav");
+    assert_eq!(rt.state.edit.output_bytes(), None, "an untouched asset renders nothing");
+
+    // Dragging the end marker back keeps the first part.
+    let (x, y) = rt.find("mark-end").unwrap();
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    settle(&mut rt);
+    rt.pointer_move(x - 150.0, y);
+    settle(&mut rt);
+    rt.pointer_up(x - 150.0, y);
+    wait_for_edit(&mut rt);
+    let (start, end, frames) = rt.state.audio_section().unwrap();
+    assert!(start == 0 && end < frames * 3 / 4, "{start}..{end} of {frames}");
+    assert!(rt.state.edit.output_bytes().is_some(), "the edit rendered");
+
+    // The dragged file is that section, as Ogg.
+    let staged = drag_out(&mut rt, "drag-card");
+    assert_eq!(staged[0].file_name().unwrap(), "tone.ogg");
+    // Counted by libvorbis, which is what most game engines read Ogg with.
+    let mut decoder = vorbis_rs::VorbisDecoder::new(std::fs::File::open(&staged[0]).unwrap()).unwrap();
+    let mut heard = 0u64;
+    while let Some(block) = decoder.decode_audio_block().unwrap() { heard += block.samples()[0].len() as u64; }
+    assert_eq!(heard, end);
+
+    // Quality changes the file's size, and Reset puts it all back.
+    click(&mut rt, "audio-tab/Compress");
+    rt.update(|s, _| s.set_quality(0, true));
+    wait_for_edit(&mut rt);
+    let lowest = rt.state.edit.output_bytes().unwrap();
+    rt.update(|s, _| s.set_quality(10, true));
+    wait_for_edit(&mut rt);
+    assert!(rt.state.edit.output_bytes().unwrap() > lowest);
+    click(&mut rt, "edit-foot/Reset");
+    wait_for_edit(&mut rt);
+    assert_eq!(rt.state.edit.output_bytes(), None);
+    assert_eq!(rt.state.audio_edit(), crate::edit::AudioEdit::default());
+    assert_eq!(drag_out(&mut rt, "drag-card")[0].file_name().unwrap(), "tone.wav", "back to a plain copy");
+
+    assert_eq!(snapshot_tree(&root), before, "the library is byte for byte what it was");
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn compressing_a_texture_previews_the_output_and_drags_a_png() {
+    let root = edit_fixture();
+    let before = snapshot_tree(&root);
+    let mut rt = app_on(&root);
+    open_editor(&mut rt, "noise.jpg");
+    click(&mut rt, "colours/16");
+    wait_for_edit(&mut rt);
+    let distinct = |rt: &Runtime<App>| match &rt.state.stage.scene {
+        crate::stage::Scene::Texture(image) => image.rgba.chunks_exact(4).map(|p| [p[0], p[1], p[2]]).collect::<std::collections::HashSet<_>>().len(),
+        _ => panic!("no texture on stage"),
+    };
+    assert!(distinct(&rt) <= 16, "the preview shows the compressed pixels: {}", distinct(&rt));
+
+    // Original flips back without forgetting the edit.
+    click(&mut rt, "compare/Original");
+    wait_for_preview(&mut rt);
+    assert!(distinct(&rt) > 16);
+    click(&mut rt, "compare/Edited");
+    wait_for_edit(&mut rt);
+    assert!(distinct(&rt) <= 16);
+
+    let staged = drag_out(&mut rt, "drag-card");
+    assert_eq!(staged[0].file_name().unwrap(), "noise.png");
+    assert_eq!(std::fs::metadata(&staged[0]).unwrap().len(), rt.state.edit.output_bytes().unwrap(), "the drag is the file the panel measured");
+    assert_eq!(snapshot_tree(&root), before);
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn material_edits_show_on_the_stage_and_leave_as_a_glb() {
+    let root = edit_fixture();
+    let before = snapshot_tree(&root);
+    let mut rt = app_on(&root);
+    open_editor(&mut rt, "tri.obj");
+    assert!(rt.state.stage.surface.is_some(), "the editor shades the model's materials");
+    assert_eq!(rt.state.edit.expanded, Some(0), "the first material starts open");
+
+    // A slider moves the stage straight away, before any render.
+    let (x, y) = rt.find("m0-rough").unwrap();
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    settle(&mut rt);
+    let roughness = rt.state.stage.surface.as_ref().unwrap().materials[0].roughness;
+    assert!((roughness - 0.5).abs() < 0.03, "{roughness}");
+    rt.pointer_up(x, y);
+    wait_for_edit(&mut rt);
+
+    // Shrinking textures reaches the stage too.
+    click(&mut rt, "all-textures/64");
+    wait_for_edit(&mut rt);
+    assert_eq!(rt.state.stage.surface.as_ref().unwrap().images[0].width, 64);
+
+    // It leaves as one self-contained GLB, even dragged from the grid.
+    let tile = tile_key(&rt, "tri.obj");
+    assert!(rt.elements().iter().any(|e| e.path.contains(&tile) && e.path.ends_with("edited")), "the tile says it's edited");
+    let staged = drag_out(&mut rt, &tile);
+    assert_eq!(staged.len(), 1);
+    assert_eq!(staged[0].file_name().unwrap(), "tri.glb");
+    let doc = crate::edit::mesh::open(&staged[0], &root).unwrap();
+    assert!((doc.materials[0].roughness - 0.5).abs() < 0.03);
+    assert_eq!(doc.image_size(0), Some((64, 64)));
+
+    assert_eq!(snapshot_tree(&root), before);
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+fn rect(rt: &Runtime<App>, key: &str) -> [f32; 4] {
+    rt.presented(key).unwrap_or_else(|| panic!("no {key}")).0
+}
+
+/// Presses without letting the frames pass, so the animation that follows can be watched.
+fn press(rt: &mut Runtime<App>, key: &str) {
+    let (x, y) = rt.find(key).unwrap_or_else(|| panic!("no element {key}"));
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+}
+
+/// Runs `frames` frames, returning the height of `key` after each.
+fn heights(rt: &mut Runtime<App>, key: &str, frames: usize, mut check: impl FnMut(&Runtime<App>)) -> Vec<f32> {
+    (0..frames).map(|_| {
+        rt.frame(1.0 / 60.0);
+        check(rt);
+        rect(rt, key)[3]
+    }).collect()
+}
+
+fn eases_between(seen: &[f32], from: f32, to: f32) -> bool {
+    let (low, high) = (from.min(to) + 1.0, from.max(to) - 1.0);
+    seen.iter().any(|h| (low..high).contains(h))
+}
+
+#[test]
+fn opening_edit_moves_only_the_preview_and_it_eases() {
+    let root = edit_fixture();
+    let mut rt = app_on(&root);
+    let tile = tile_key(&rt, "noise.jpg");
+    click(&mut rt, &tile);
+    wait_for_preview(&mut rt);
+    for _ in 0..30 { rt.frame(1.0 / 60.0); }
+    let drag_bar = rect(&rt, "drag-card");
+    let details = rect(&rt, "details");
+    let closed = rect(&rt, "stage")[3];
+
+    // Nothing below the preview moves on any frame; the preview shrinks through the steps between.
+    press(&mut rt, "edit-toggle");
+    let steps = heights(&mut rt, "stage", 40, |rt| {
+        assert_eq!(rect(rt, "drag-card"), drag_bar, "the drag bar stays put");
+        assert_eq!(rect(rt, "details"), details, "the details and readout share a place");
+    });
+    wait_for_edit(&mut rt);
+    let open = rect(&rt, "stage")[3];
+    assert!(open < closed - 100.0, "{open} from {closed}");
+    assert!(eases_between(&steps, closed, open), "{steps:?} from {closed} to {open}");
+
+    // Rendering leaves every rectangle where it was, and the readout keeps its bars up.
+    let panel = rect(&rt, "edit-panel");
+    let foot = rect(&rt, "edit-foot");
+    click(&mut rt, "colours/16");
+    assert!(rt.find("output-bar").is_some());
+    let start = Instant::now();
+    while rt.state.edit.busy() && start.elapsed() < Duration::from_secs(10) {
+        rt.update(|s, tx| { s.poll(tx); });
+        rt.frame(1.0 / 60.0);
+        assert_eq!((rect(&rt, "edit-panel"), rect(&rt, "edit-foot"), rect(&rt, "stage")[3]), (panel, foot, open));
+        assert!(rt.find("output-bar").is_some(), "the bars stay while rendering");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    wait_for_edit(&mut rt);
+    let first_size = rt.state.edit.output_bytes().unwrap();
+    click(&mut rt, "colours/64");
+    assert_eq!(rt.state.edit.output_bytes(), Some(first_size), "the last size stays up until the next is ready");
+    wait_for_edit(&mut rt);
+    for key in ["Dither", "edit-foot/Reset"] { assert!(rt.find(key).is_some(), "{key} is always there"); }
+    assert_eq!((rect(&rt, "edit-panel"), rect(&rt, "stage")[3]), (panel, open));
+
+    // Closing gives the room back the same way.
+    press(&mut rt, "edit-toggle");
+    let steps = heights(&mut rt, "stage", 40, |rt| assert_eq!(rect(rt, "drag-card"), drag_bar));
+    assert!(eases_between(&steps, open, closed), "{steps:?}");
+    assert_eq!(rect(&rt, "stage")[3], closed);
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn audio_tabs_and_the_loop_switch_never_resize_the_panel() {
+    let root = edit_fixture();
+    let mut rt = app_on(&root);
+    open_editor(&mut rt, "tone.wav");
+    for _ in 0..40 { rt.frame(1.0 / 60.0); }
+    let stage = rect(&rt, "waveform");
+    let panel = rect(&rt, "edit-panel");
+    let holds = |rt: &Runtime<App>| assert_eq!((rect(rt, "waveform"), rect(rt, "edit-panel")), (stage, panel));
+    for key in ["audio-tab/Loop", "Loop", "audio-tab/Compress", "audio-tab/Trim", "audio-tab/Loop", "Loop"] {
+        press(&mut rt, key);
+        for _ in 0..30 { rt.frame(1.0 / 60.0); holds(&rt); }
+        wait_for_edit(&mut rt);
+        holds(&rt);
+    }
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_material_row_springs_open_and_closed_inside_a_fixed_panel() {
+    let root = edit_fixture();
+    let mut rt = app_on(&root);
+    open_editor(&mut rt, "tri.obj");
+    for _ in 0..40 { rt.frame(1.0 / 60.0); }
+    let panel = rect(&rt, "edit-panel");
+    let stage = rect(&rt, "stage")[3];
+    let open = rect(&rt, "fold-0")[3];
+    assert!(open > 100.0, "{open}");
+    press(&mut rt, "material-0");
+    let steps = heights(&mut rt, "fold-0", 40, |rt| assert_eq!((rect(rt, "edit-panel"), rect(rt, "stage")[3]), (panel, stage)));
+    assert!(eases_between(&steps, open, 0.0), "{steps:?}");
+    assert_eq!(rect(&rt, "fold-0")[3], 0.0);
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn the_list_under_the_search_box_completes_a_query() {
     let files = ["Bricks/brick.png", "Bricks/brick_normal.png", "Props/crate.glb", "Sfx/hit.wav"]

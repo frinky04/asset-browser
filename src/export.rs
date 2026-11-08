@@ -2,10 +2,12 @@
 //! copy staged here, so nothing a target does can reach the file in the library.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use crate::edit::{self, Edit};
 use crate::library::{Asset, FNV_SEED, Kind, fnv};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Options {
     /// The largest side a texture leaves at; `None` keeps its size.
     pub max_size: Option<u32>,
@@ -13,11 +15,13 @@ pub struct Options {
     pub nearest: bool,
     /// Bring a model's material and texture files along.
     pub companions: bool,
+    /// What to change on the way out. Only set when it changes something.
+    pub edit: Option<Arc<Edit>>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { max_size: None, nearest: false, companions: true }
+        Options { max_size: None, nearest: false, companions: true, edit: None }
     }
 }
 
@@ -31,25 +35,41 @@ fn stage_root() -> PathBuf {
     app_dir().join("drag")
 }
 
-fn stage_id(asset: &Asset, options: Options) -> String {
+fn stage_id(asset: &Asset, options: &Options) -> String {
     let flags = [u8::from(options.nearest), u8::from(options.companions)];
     let h = fnv(fnv(FNV_SEED, &asset.key.to_le_bytes()), &options.max_size.unwrap_or(0).to_le_bytes());
-    format!("{:016x}", fnv(h, &flags))
+    let h = fnv(h, &flags);
+    let h = options.edit.as_ref().map_or(h, |edit| fnv(h, edit.fingerprint().as_bytes()));
+    format!("{h:016x}")
 }
 
 /// Stages `asset`, returning the files to hand over: the asset first. Repeating a drag reuses
 /// the copy already made.
-pub fn stage(source: &Path, asset: &Asset, options: Options) -> Result<Vec<PathBuf>, String> {
+pub fn stage(source: &Path, asset: &Asset, options: &Options) -> Result<Vec<PathBuf>, String> {
     stage_in(&stage_root(), source, asset, options)
 }
 
-fn stage_in(root: &Path, source: &Path, asset: &Asset, options: Options) -> Result<Vec<PathBuf>, String> {
+/// Keeps a finished render as the staged copy of that edit, so dragging it costs nothing.
+pub fn stage_rendered(asset: &Asset, options: &Options, name: &str, bytes: &[u8]) -> Result<Vec<PathBuf>, String> {
+    build_stage(&stage_root(), asset, options, |dir| {
+        std::fs::write(dir.join(name), bytes).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join(MANIFEST), name).map_err(|e| e.to_string())
+    })
+}
+
+fn stage_in(root: &Path, source: &Path, asset: &Asset, options: &Options) -> Result<Vec<PathBuf>, String> {
+    build_stage(root, asset, options, |dir| fill(dir, source, asset, options))
+}
+
+/// Runs `make` in a scratch folder and moves the result into place in one step, unless that
+/// export was already staged.
+fn build_stage(root: &Path, asset: &Asset, options: &Options, make: impl FnOnce(&Path) -> Result<(), String>) -> Result<Vec<PathBuf>, String> {
     let dir = root.join(stage_id(asset, options));
     if let Some(files) = existing(&dir) { return Ok(files); }
     let building = root.join(format!("{}.{:?}", stage_id(asset, options), std::thread::current().id()).replace(['(', ')'], ""));
     let _ = std::fs::remove_dir_all(&building);
     std::fs::create_dir_all(&building).map_err(|e| e.to_string())?;
-    let result = fill(&building, source, asset, options);
+    let result = make(&building);
     if let Err(e) = result {
         let _ = std::fs::remove_dir_all(&building);
         return Err(e);
@@ -70,7 +90,18 @@ fn existing(dir: &Path) -> Option<Vec<PathBuf>> {
 
 const MANIFEST: &str = ".files";
 
-fn fill(dir: &Path, source: &Path, asset: &Asset, options: Options) -> Result<(), String> {
+/// The folder that holds the whole library, worked out from where `asset` sits.
+fn library_of<'a>(source: &'a Path, asset: &Asset) -> &'a Path {
+    source.ancestors().nth(asset.rel.split('/').count()).unwrap_or(source.parent().unwrap_or(Path::new(".")))
+}
+
+fn fill(dir: &Path, source: &Path, asset: &Asset, options: &Options) -> Result<(), String> {
+    if options.edit.is_some() {
+        let decoded = edit::open(source, asset.kind, library_of(source, asset))?;
+        let rendered = edit::render(&decoded, asset.name(), options)?;
+        std::fs::write(dir.join(&rendered.name), &rendered.bytes).map_err(|e| e.to_string())?;
+        return std::fs::write(dir.join(MANIFEST), &rendered.name).map_err(|e| e.to_string());
+    }
     let mut names = Vec::new();
     match asset.kind {
         Kind::Texture => match options.max_size {
@@ -191,7 +222,7 @@ fn companions(dir: &Path, source: &Path, asset: &Asset, names: &mut Vec<String>)
         _ => {}
     }
     // What the preview found by guessing travels with the model too, so a drop looks the same.
-    let library = source.ancestors().nth(asset.rel.split('/').count()).unwrap_or(base);
+    let library = library_of(source, asset);
     if matches!(ext, "obj" | "dae" | "fbx" | "glb" | "gltf") && let Ok(model) = crate::model::load(source, library) {
         for file in &model.guessed { bring(&file.to_string_lossy(), names); }
     }
@@ -272,7 +303,7 @@ mod tests {
         image::RgbaImage::from_pixel(400, 200, image::Rgba([9, 8, 7, 255])).save(&src).unwrap();
         let before = snapshot(&src);
         let a = asset(&f.root(), "Pack/brick.png");
-        let files = stage_in(&f.stage(), &src, &a, Options { max_size: Some(100), ..Options::default() }).unwrap();
+        let files = stage_in(&f.stage(), &src, &a, &Options { max_size: Some(100), ..Options::default() }).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].file_name().unwrap(), "brick_100.png");
         assert_eq!(image::image_dimensions(&files[0]).unwrap(), (100, 50));
@@ -286,7 +317,7 @@ mod tests {
         let src = f.root().join("Pack/small.png");
         image::RgbaImage::new(16, 16).save(&src).unwrap();
         let a = asset(&f.root(), "Pack/small.png");
-        let files = stage_in(&f.stage(), &src, &a, Options { max_size: Some(512), ..Options::default() }).unwrap();
+        let files = stage_in(&f.stage(), &src, &a, &Options { max_size: Some(512), ..Options::default() }).unwrap();
         assert_eq!(image::image_dimensions(&files[0]).unwrap(), (16, 16));
     }
 
@@ -298,7 +329,7 @@ mod tests {
         std::fs::write(root.join("Pack/crate.mtl"), "newmtl m\nmap_Kd tex/wood.png\n").unwrap();
         std::fs::write(root.join("Pack/crate.obj"), "mtllib crate.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl m\nf 1 2 3\n").unwrap();
         let a = asset(&root, "Pack/crate.obj");
-        let files = stage_in(&f.stage(), &root.join("Pack/crate.obj"), &a, Options::default()).unwrap();
+        let files = stage_in(&f.stage(), &root.join("Pack/crate.obj"), &a, &Options::default()).unwrap();
         let names: Vec<_> = files.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
         assert_eq!(names, ["crate.obj", "crate.mtl", "wood.png"]);
         assert!(std::fs::read_to_string(&files[1]).unwrap().contains("map_Kd wood.png"), "the staged material is repointed");
@@ -314,7 +345,7 @@ mod tests {
         std::fs::write(root.join("Pack/crate.obj"), "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").unwrap();
         image::RgbaImage::from_pixel(2, 2, image::Rgba([150, 90, 40, 255])).save(root.join("Pack/tex/crate_diffuse.png")).unwrap();
         let a = asset(&root, "Pack/crate.obj");
-        let files = stage_in(&f.stage(), &root.join("Pack/crate.obj"), &a, Options::default()).unwrap();
+        let files = stage_in(&f.stage(), &root.join("Pack/crate.obj"), &a, &Options::default()).unwrap();
         let names: Vec<_> = files.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
         assert_eq!(names, ["crate.obj", "crate_diffuse.png"]);
 
@@ -333,7 +364,7 @@ mod tests {
         image::RgbaImage::new(2, 2).save(root.join("Pack/tex/wood.png")).unwrap();
         std::fs::write(root.join("Pack/quad.fbx"), crate::model::FBX_QUAD).unwrap();
         let a = asset(&root, "Pack/quad.fbx");
-        let files = stage_in(&f.stage(), &root.join("Pack/quad.fbx"), &a, Options::default()).unwrap();
+        let files = stage_in(&f.stage(), &root.join("Pack/quad.fbx"), &a, &Options::default()).unwrap();
         let names: Vec<_> = files.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
         assert_eq!(names, ["quad.fbx", "wood.png"]);
         assert_eq!(std::fs::read_to_string(&files[0]).unwrap(), crate::model::FBX_QUAD, "the staged FBX is a plain copy");
@@ -346,9 +377,9 @@ mod tests {
         let src = f.root().join("Pack/a.png");
         image::RgbaImage::new(2, 2).save(&src).unwrap();
         let a = asset(&f.root(), "Pack/a.png");
-        let one = stage_in(&f.stage(), &src, &a, Options::default()).unwrap();
+        let one = stage_in(&f.stage(), &src, &a, &Options::default()).unwrap();
         let when = std::fs::metadata(&one[0]).unwrap().modified().unwrap();
-        let two = stage_in(&f.stage(), &src, &a, Options::default()).unwrap();
+        let two = stage_in(&f.stage(), &src, &a, &Options::default()).unwrap();
         assert_eq!(one, two);
         assert_eq!(std::fs::metadata(&two[0]).unwrap().modified().unwrap(), when);
     }

@@ -10,6 +10,7 @@ use rune::{Compositor, Frame};
 use wgpu::util::DeviceExt;
 
 use crate::app::App;
+use crate::edit::Surface;
 use crate::model::{self, Image, Model};
 use crate::raster::LIGHT;
 
@@ -85,6 +86,10 @@ pub struct StageState {
     pub look: Look,
     /// How quickly the camera eases, relative to normal. 0 moves it at once.
     pub ease: f32,
+    /// The materials of a model being edited; `None` draws the model as it loaded.
+    pub surface: Option<Surface>,
+    /// Bumped when `surface` changes.
+    pub surface_revision: u64,
 }
 
 /// Colours the stage paints itself, sRGB-encoded, to match the UI's theme.
@@ -102,7 +107,7 @@ impl Look {
 
 impl Default for StageState {
     fn default() -> Self {
-        StageState { scene: Scene::Empty, revision: 0, view: View::default(), snap: 0, look: Look::DARK, ease: 1.0 }
+        StageState { scene: Scene::Empty, revision: 0, view: View::default(), snap: 0, look: Look::DARK, ease: 1.0, surface: None, surface_revision: 0 }
     }
 }
 
@@ -172,21 +177,43 @@ struct V { @builtin(position) p: vec4f, @location(0) px: vec2f }
 }
 "#;
 
+// `pbr` is roughness, metallic, and whether to shade the surface at all: browsing keeps the flat
+// studio look, and only a model being edited gets highlights and reflections.
 const MODEL_WGSL: &str = r#"
-struct G { clip: mat4x4f, light: vec4f }
+struct G { clip: mat4x4f, light: vec4f, eye: vec4f }
 @group(0) @binding(0) var<uniform> g: G;
 @group(1) @binding(0) var image: texture_2d<f32>;
 @group(1) @binding(1) var smp: sampler;
-@group(1) @binding(2) var<uniform> tint: vec4f;
-struct V { @builtin(position) p: vec4f, @location(0) n: vec3f, @location(1) uv: vec2f }
+struct M { tint: vec4f, pbr: vec4f, emissive: vec4f }
+@group(1) @binding(2) var<uniform> m: M;
+@group(1) @binding(3) var surface_map: texture_2d<f32>;
+struct V { @builtin(position) p: vec4f, @location(0) n: vec3f, @location(1) uv: vec2f, @location(2) world: vec3f }
 @vertex fn vs(@location(0) pos: vec3f, @location(1) n: vec3f, @location(2) uv: vec2f) -> V {
-    return V(g.clip * vec4f(pos, 1.0), n, uv);
+    return V(g.clip * vec4f(pos, 1.0), n, uv, pos);
 }
 @fragment fn fs(v: V) -> @location(0) vec4f {
-    let albedo = textureSample(image, smp, v.uv) * tint;
+    let albedo = textureSample(image, smp, v.uv) * m.tint;
     if (albedo.a < 0.5) { discard; }
-    let lit = 0.64 + 0.74 * abs(dot(normalize(v.n), g.light.xyz));
-    return vec4f(albedo.rgb * lit, 1.0);
+    var n = normalize(v.n);
+    let lit = 0.64 + 0.74 * abs(dot(n, g.light.xyz));
+    if (m.pbr.z < 0.5) { return vec4f(albedo.rgb * lit, 1.0); }
+    let map = textureSample(surface_map, smp, v.uv);
+    let rough = clamp(m.pbr.x * map.g, 0.045, 1.0);
+    let metal = clamp(m.pbr.y * map.b, 0.0, 1.0);
+    let eye = normalize(g.eye.xyz - v.world);
+    if (dot(n, eye) < 0.0) { n = -n; }
+    let half = normalize(g.light.xyz + eye);
+    let a = rough * rough;
+    let a2 = a * a;
+    let d = max(dot(n, half), 0.0);
+    let spread = d * d * (a2 - 1.0) + 1.0;
+    let highlight = a2 / max(3.14159 * spread * spread, 1e-4);
+    let f0 = mix(vec3f(0.04), albedo.rgb, metal);
+    let toward = reflect(-eye, n);
+    let sky = mix(vec3f(0.22, 0.23, 0.26), vec3f(0.98, 0.99, 1.0), toward.y * 0.5 + 0.5);
+    let reflection = mix(sky, vec3f(0.55), rough) * (1.0 - rough * 0.7);
+    let shaded = albedo.rgb * lit * (1.0 - metal) + f0 * (highlight * abs(dot(n, g.light.xyz)) * 0.25 + reflection);
+    return vec4f(shaded + m.emissive.rgb, 1.0);
 }
 "#;
 
@@ -210,6 +237,15 @@ struct TextureUniform {
 struct ModelUniform {
     clip: [[f32; 4]; 4],
     light: [f32; 4],
+    eye: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct PartUniform {
+    tint: [f32; 4],
+    pbr: [f32; 4],
+    emissive: [f32; 4],
 }
 
 /// Box-filtered mip chain of straight-alpha RGBA, level 0 first and borrowed from the image.
@@ -339,7 +375,7 @@ impl Pipes {
         let texture_uniform = uniform(std::mem::size_of::<TextureUniform>());
 
         let global_layout = bgl(&[uniform_entry(0, frag_vert)]);
-        let part_layout = bgl(&[tex_entry(0), sampler_entry(1), uniform_entry(2, wgpu::ShaderStages::FRAGMENT)]);
+        let part_layout = bgl(&[tex_entry(0), sampler_entry(1), uniform_entry(2, wgpu::ShaderStages::FRAGMENT), tex_entry(3)]);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&global_layout), Some(&part_layout)], immediate_size: 0 });
         let m = module("model", MODEL_WGSL);
         let attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
@@ -449,10 +485,71 @@ impl Target {
 
 enum GpuScene {
     Texture { size: (u32, u32), groups: [[wgpu::BindGroup; 2]; 2] },
-    Model { vertices: wgpu::Buffer, indices: wgpu::Buffer, parts: Vec<(u32, u32, wgpu::BindGroup)>, center: Vec3, radius: f32 },
+    Model { vertices: wgpu::Buffer, indices: wgpu::Buffer, parts: Vec<GpuPart>, images: ModelImages, center: Vec3, radius: f32 },
 }
 
-fn prepare_scene(device: &wgpu::Device, queue: &wgpu::Queue, pipes: &Pipes, scene: &Scene) -> Option<GpuScene> {
+struct GpuPart {
+    start: u32,
+    count: u32,
+    material: u32,
+    uniform: wgpu::Buffer,
+    group: wgpu::BindGroup,
+}
+
+/// The textures a model is drawn with, uploaded once each however many times they're rebound.
+struct ModelImages {
+    white: wgpu::TextureView,
+    /// Keyed by the image's address, which the `Arc` or `Model` holding it keeps stable.
+    views: HashMap<usize, (wgpu::TextureView, Option<Arc<Image>>)>,
+}
+
+impl ModelImages {
+    fn view(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, image: &Image, keep: Option<&Arc<Image>>) -> wgpu::TextureView {
+        let (view, _) = self.views.entry(std::ptr::from_ref(image) as usize).or_insert_with(|| (upload_image(device, queue, image), keep.cloned()));
+        view.clone()
+    }
+}
+
+/// Binds each part to its current colour, surface and textures. Runs when a model appears and
+/// when its materials change, so a slider costs a uniform write and not a re-upload.
+fn bind_parts(device: &wgpu::Device, queue: &wgpu::Queue, pipes: &Pipes, parts: &mut [GpuPart], images: &mut ModelImages, model: &Model, surface: Option<&Surface>) {
+    let mut used = std::collections::HashSet::new();
+    for part in parts {
+        let shaded = surface.and_then(|s| s.materials.get(part.material as usize).map(|m| (s, *m)));
+        let (uniform, base, map) = if let Some((surface, m)) = shaded {
+            let view_of = |index: Option<u32>, images: &mut ModelImages, used: &mut std::collections::HashSet<usize>| {
+                let image = index.and_then(|i| surface.images.get(i as usize))?;
+                used.insert(Arc::as_ptr(image) as usize);
+                Some(images.view(device, queue, image, Some(image)))
+            };
+            let base = view_of(m.image, images, &mut used);
+            let map = view_of(m.surface_image, images, &mut used);
+            (PartUniform { tint: m.color, pbr: [m.roughness, m.metallic, 1.0, 0.0], emissive: [m.emissive[0], m.emissive[1], m.emissive[2], 0.0] }, base, map)
+        } else {
+            let material = model.materials[part.material as usize];
+            let base = material.image.and_then(|i| model.images.get(i as usize)).map(|image| {
+                used.insert(std::ptr::from_ref(image) as usize);
+                images.view(device, queue, image, None)
+            });
+            (PartUniform { tint: material.color, pbr: [1.0, 0.0, 0.0, 0.0], emissive: [0.0; 4] }, base, None)
+        };
+        queue.write_buffer(&part.uniform, 0, bytemuck::bytes_of(&uniform));
+        let white = images.white.clone();
+        part.group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipes.part_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(base.as_ref().unwrap_or(&white)) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&pipes.repeat_nearest) },
+                wgpu::BindGroupEntry { binding: 2, resource: part.uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(map.as_ref().unwrap_or(&white)) },
+            ],
+        });
+    }
+    images.views.retain(|address, _| used.contains(address));
+}
+
+fn prepare_scene(device: &wgpu::Device, queue: &wgpu::Queue, pipes: &Pipes, scene: &Scene, surface: Option<&Surface>) -> Option<GpuScene> {
     match scene {
         Scene::Empty => None,
         Scene::Texture(image) => {
@@ -475,24 +572,24 @@ fn prepare_scene(device: &wgpu::Device, queue: &wgpu::Queue, pipes: &Pipes, scen
             let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&m.vertices), usage: wgpu::BufferUsages::VERTEX });
             let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&m.indices), usage: wgpu::BufferUsages::INDEX });
             let white = upload_image(device, queue, &Image { width: 1, height: 1, rgba: vec![255; 4] });
-            let views: Vec<wgpu::TextureView> = m.images.iter().map(|i| upload_image(device, queue, i)).collect();
-            let parts = m.parts.iter().map(|p| {
-                let material = m.materials[p.material as usize];
-                let view = material.image.and_then(|i| views.get(i as usize)).unwrap_or(&white);
-                let tint = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&material.color), usage: wgpu::BufferUsages::UNIFORM });
+            let mut images = ModelImages { white: white.clone(), views: HashMap::new() };
+            let mut parts: Vec<GpuPart> = m.parts.iter().map(|p| {
+                let uniform = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: std::mem::size_of::<PartUniform>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
                 let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: None,
                     layout: &pipes.part_layout,
                     entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&white) },
                         wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&pipes.repeat_nearest) },
-                        wgpu::BindGroupEntry { binding: 2, resource: tint.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 2, resource: uniform.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&white) },
                     ],
                 });
-                (p.start, p.count, group)
+                GpuPart { start: p.start, count: p.count, material: p.material, uniform, group }
             }).collect();
+            bind_parts(device, queue, pipes, &mut parts, &mut images, m, surface);
             let (center, radius) = m.bounds();
-            Some(GpuScene::Model { vertices, indices, parts, center, radius })
+            Some(GpuScene::Model { vertices, indices, parts, images, center, radius })
         }
     }
 }
@@ -503,6 +600,7 @@ pub struct StageCompositor {
     target: Option<Target>,
     scene: Option<GpuScene>,
     seen_revision: u64,
+    seen_surface: u64,
     seen_snap: u64,
     current: Option<View>,
     moving: bool,
@@ -525,8 +623,14 @@ impl Compositor<App> for StageCompositor {
 
         let state = &f.rt.state.stage;
         if state.revision != self.seen_revision {
-            self.scene = prepare_scene(f.device, f.queue, pipes, &state.scene);
+            self.scene = prepare_scene(f.device, f.queue, pipes, &state.scene, state.surface.as_ref());
             self.seen_revision = state.revision;
+            self.seen_surface = state.surface_revision;
+        } else if state.surface_revision != self.seen_surface {
+            self.seen_surface = state.surface_revision;
+            if let (Some(GpuScene::Model { parts, images, .. }), Scene::Model(model)) = (&mut self.scene, &state.scene) {
+                bind_parts(f.device, f.queue, pipes, parts, images, model, state.surface.as_ref());
+            }
         }
         // Ease the camera; a headless run lands at once, so a snapshot is exact.
         let look = state.look;
@@ -612,7 +716,7 @@ fn draw_scene(queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, pipes: &P
             pass.set_bind_group(0, &groups[usize::from(view.tile)][usize::from(view.smooth)], &[]);
             pass.draw(0..3, 0..1);
         }
-        GpuScene::Model { vertices, indices, parts, center, radius } => {
+        GpuScene::Model { vertices, indices, parts, center, radius, .. } => {
             let turn = Mat4::from_rotation_x(view.pitch) * Mat4::from_rotation_y(view.yaw);
             let place = Mat4::from_translation(Vec3::new(view.pan[0] * radius, view.pan[1] * radius, -view.distance * radius));
             let aspect = target.size.0 as f32 / target.size.1.max(1) as f32;
@@ -620,7 +724,8 @@ fn draw_scene(queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, pipes: &P
             let proj = Mat4::perspective_rh(FOV_DEGREES.to_radians(), aspect, near, (view.distance + 2.0) * radius);
             let clip = proj * place * turn * Mat4::from_translation(-*center);
             let light = LIGHT.normalize();
-            let uniform = ModelUniform { clip: clip.to_cols_array_2d(), light: [light.x, light.y, light.z, 0.0] };
+            let eye = (place * turn * Mat4::from_translation(-*center)).inverse().transform_point3(Vec3::ZERO);
+            let uniform = ModelUniform { clip: clip.to_cols_array_2d(), light: [light.x, light.y, light.z, 0.0], eye: [eye.x, eye.y, eye.z, 0.0] };
             queue.write_buffer(&pipes.model_uniform, 0, bytemuck::bytes_of(&uniform));
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("model view"),
@@ -643,9 +748,9 @@ fn draw_scene(queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, pipes: &P
             pass.set_bind_group(0, &pipes.global_group, &[]);
             pass.set_vertex_buffer(0, vertices.slice(..));
             pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-            for (start, count, group) in parts {
-                pass.set_bind_group(1, group, &[]);
-                pass.draw_indexed(*start..start + count, 0, 0..1);
+            for part in parts {
+                pass.set_bind_group(1, &part.group, &[]);
+                pass.draw_indexed(part.start..part.start + part.count, 0, 0..1);
             }
         }
     }

@@ -1,0 +1,724 @@
+//! The editing state behind the inspector's Edit panel: one recipe per asset, and for the selected
+//! asset a decoded copy that recipes are rendered against. Rendering always goes through
+//! `edit::render` and lands in the staged-copy cache, so the preview is the file a drag hands over.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use rune::{Latest, Pixels, Spring, Tx, Waker};
+
+use crate::app::{App, Preview};
+use crate::edit::{self, AudioEdit, Decoded, Edit, ImageEdit, MaterialEdit, ModelEdit, Pcm, Rendered, Shown, sound};
+use crate::export::{self, Options};
+use crate::library::{Asset, Kind};
+use crate::model::Image;
+use crate::stage::Scene;
+
+/// Sliders move several times a second; renders wait for a brief pause.
+const RENDER_PAUSE: Duration = Duration::from_millis(140);
+pub const SEAM_W: u32 = 640;
+pub const SEAM_H: u32 = 120;
+const SEAM_MS_DEFAULT: f32 = 30.0;
+/// Shortest section that can be picked, in milliseconds.
+const MIN_SECTION_MS: u64 = 10;
+/// Long enough for the slowest animation setting to finish.
+const SETTLE_FOR: Duration = Duration::from_millis(900);
+/// How the panel and its rows open and close.
+pub const PANEL_SPRING: Spring = Spring::new(0.3, 0.0);
+/// How far before a loop's end "hear the seam" starts.
+const SEAM_LEAD_SECONDS: f32 = 2.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioTab {
+    Trim,
+    Loop,
+    Compress,
+}
+
+/// Which end of the audio section a control moves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Marker {
+    Start,
+    End,
+}
+
+struct Session {
+    key: u64,
+    decoded: Arc<Decoded>,
+}
+
+/// The finished output of the current recipe.
+pub struct Output {
+    pub name: String,
+    pub bytes: u64,
+}
+
+struct Finished {
+    name: String,
+    bytes: u64,
+    shown: Shown,
+}
+
+/// How a clip that's playing lines up with the source's own timeline.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Timeline {
+    start: f32,
+    length: f32,
+    looped: bool,
+}
+
+impl Timeline {
+    /// The place in the source that `position` seconds of playback has reached.
+    fn source_time(self, position: f32) -> f32 {
+        let into = if self.looped && self.length > 0.0 { position % self.length } else { position.min(self.length) };
+        self.start + into
+    }
+}
+
+pub struct Editor {
+    pub open: bool,
+    /// Only recipes that change something are kept here.
+    recipes: HashMap<u64, Edit>,
+    session: Option<Session>,
+    opening: Latest<(u64, Result<Arc<Decoded>, String>)>,
+    rendering: Latest<(u64, Result<Finished, String>)>,
+    cutting: Latest<(u64, Arc<Pcm>)>,
+    tuning: Latest<(u64, u64)>,
+    pub failure: Option<String>,
+    pub output: Option<Output>,
+    /// The preview is showing the unedited asset.
+    pub comparing: bool,
+    pub audio_tab: AudioTab,
+    /// The material whose controls are unfolded.
+    pub expanded: Option<usize>,
+    pub seam: Pixels,
+    seam_ms: f32,
+    seam_drag_end: u64,
+    /// The section, with the loop's seam blended, before it's compressed.
+    clean: Option<Arc<Pcm>>,
+    /// What the compressed file decodes to.
+    coded: Option<Arc<Pcm>>,
+    rendered_image: Option<Arc<Image>>,
+    pub timeline: Option<Timeline>,
+    autoplay_waiting: bool,
+    /// Until when the panel or a material row is still opening or closing.
+    settling_until: Option<Instant>,
+    /// The material row that just folded away, kept drawn while it closes.
+    pub folding: Option<usize>,
+}
+
+impl Default for Editor {
+    fn default() -> Self {
+        Editor {
+            open: false,
+            recipes: HashMap::new(),
+            session: None,
+            opening: Latest::default(),
+            rendering: Latest::default().debounce(RENDER_PAUSE),
+            cutting: Latest::default().debounce(RENDER_PAUSE),
+            tuning: Latest::default(),
+            failure: None,
+            output: None,
+            comparing: false,
+            audio_tab: AudioTab::Trim,
+            expanded: None,
+            seam: Pixels::new(),
+            seam_ms: SEAM_MS_DEFAULT,
+            seam_drag_end: 0,
+            clean: None,
+            coded: None,
+            rendered_image: None,
+            timeline: None,
+            autoplay_waiting: false,
+            settling_until: None,
+            folding: None,
+        }
+    }
+}
+
+impl Editor {
+    pub fn set_waker(&self, waker: &Waker) {
+        self.opening.set_waker(waker.clone());
+        self.rendering.set_waker(waker.clone());
+        self.cutting.set_waker(waker.clone());
+        self.tuning.set_waker(waker.clone());
+    }
+
+    pub fn busy(&self) -> bool {
+        self.opening.is_pending() || self.rendering.is_pending() || self.cutting.is_pending() || self.tuning.is_pending()
+    }
+
+    pub fn is_rendering(&self) -> bool {
+        self.rendering.is_pending()
+    }
+
+    /// Whether something the panel opened or folded is still moving.
+    pub fn settling(&self) -> bool {
+        self.settling_until.is_some_and(|t| Instant::now() < t)
+    }
+
+    fn start_settling(&mut self) {
+        self.settling_until = Some(Instant::now() + SETTLE_FOR);
+    }
+
+    pub fn is_tuning(&self) -> bool {
+        self.tuning.is_pending()
+    }
+
+    pub fn is_opening(&self) -> bool {
+        self.opening.is_pending()
+    }
+
+    fn decoded(&self, key: u64) -> Option<&Arc<Decoded>> {
+        self.session.as_ref().filter(|s| s.key == key).map(|s| &s.decoded)
+    }
+
+    pub fn is_edited(&self, key: u64) -> bool {
+        self.recipes.contains_key(&key)
+    }
+
+    /// What a drag of the asset `key` should apply.
+    pub fn recipe(&self, key: u64) -> Option<Arc<Edit>> {
+        self.recipes.get(&key).map(|e| Arc::new(e.clone()))
+    }
+
+    #[cfg(test)]
+    pub fn output_bytes(&self) -> Option<u64> {
+        self.output.as_ref().map(|o| o.bytes)
+    }
+}
+
+impl App {
+    pub(crate) fn selected_asset(&self) -> Option<Asset> {
+        self.selected.and_then(|i| self.lib.assets.get(i as usize)).cloned()
+    }
+
+    fn selected_key(&self) -> Option<u64> {
+        self.selected_asset().map(|a| a.key)
+    }
+
+    /// The selected asset's decoded source, once it's been read.
+    fn session_source(&self) -> Option<Arc<Decoded>> {
+        self.edit.decoded(self.selected_key()?).cloned()
+    }
+
+    fn audio_source(&self) -> Option<Arc<Pcm>> {
+        match self.session_source()?.as_ref() {
+            Decoded::Audio(pcm) => Some(pcm.clone()),
+            _ => None,
+        }
+    }
+
+    /// The source's sample data and the section picked within it, for the waveform's markers.
+    pub fn audio_section(&self) -> Option<(u64, u64, u64)> {
+        let pcm = self.audio_source()?;
+        let (start, end) = self.audio_edit().bounds(pcm.frames());
+        Some((start, end, pcm.frames()))
+    }
+
+    /// The decoded source of asset `key`, if that's what's being edited.
+    pub fn session_for(&self, key: u64) -> Option<Arc<Decoded>> {
+        self.edit.decoded(key).cloned()
+    }
+
+    pub fn source_format(&self) -> Option<(u32, u16)> {
+        self.audio_source().map(|p| (p.rate, p.channels))
+    }
+
+    pub fn model_doc(&self) -> Option<Arc<Decoded>> {
+        self.session_source().filter(|d| matches!(d.as_ref(), Decoded::Model(_)))
+    }
+
+    pub fn audio_edit(&self) -> AudioEdit {
+        match self.selected_key().and_then(|k| self.edit.recipes.get(&k)) {
+            Some(Edit::Audio(e)) => *e,
+            _ => AudioEdit::default(),
+        }
+    }
+
+    pub fn image_edit(&self) -> ImageEdit {
+        match self.selected_key().and_then(|k| self.edit.recipes.get(&k)) {
+            Some(Edit::Image(e)) => *e,
+            _ => ImageEdit::default(),
+        }
+    }
+
+    pub fn model_edit(&self) -> ModelEdit {
+        match self.selected_key().and_then(|k| self.edit.recipes.get(&k)) {
+            Some(Edit::Model(e)) => e.clone(),
+            _ => ModelEdit::default(),
+        }
+    }
+
+    /// Stores what the selected asset should become.
+    fn store_recipe(&mut self, edit: Edit) {
+        let Some(key) = self.selected_key() else { return };
+        let was_edited = self.edit.is_edited(key);
+        if edit.is_unchanged() {
+            self.edit.recipes.remove(&key);
+        } else {
+            self.edit.recipes.insert(key, edit);
+        }
+        // Tiles show which assets carry an edit.
+        if was_edited != self.edit.is_edited(key) { self.generation += 1; }
+    }
+
+    /// Gives the selected asset a recipe before its source has been read, for snapshots.
+    pub(crate) fn seed_scene_edit(&mut self, edit: Edit) {
+        self.store_recipe(edit);
+        self.ensure_session();
+    }
+
+    /// Unfolds a material's controls, or folds them if they're showing.
+    pub fn toggle_material(&mut self, index: usize, tx: &mut Tx) {
+        self.edit.folding = self.edit.expanded;
+        self.edit.expanded = if self.edit.expanded == Some(index) { None } else { Some(index) };
+        self.edit.start_settling();
+        tx.motion(PANEL_SPRING);
+    }
+
+    pub fn toggle_editor(&mut self, tx: &mut Tx) {
+        self.edit.open = !self.edit.open;
+        self.edit.start_settling();
+        tx.motion(PANEL_SPRING);
+        if self.edit.open {
+            self.ensure_session();
+            self.update_surface();
+        } else if self.selected_key().is_some_and(|k| !self.edit.is_edited(k)) {
+            self.clear_surface();
+        }
+    }
+
+    pub fn reset_edit(&mut self) {
+        let Some(asset) = self.selected_asset() else { return };
+        if self.edit.recipes.remove(&asset.key).is_some() { self.generation += 1; }
+        self.edit.comparing = false;
+        self.edit_changed();
+    }
+
+    /// Called when the selection changes: drops the old source, and reads the new one if it
+    /// will be needed.
+    pub(crate) fn editor_on_select(&mut self) {
+        self.edit.session = None;
+        self.edit.output = None;
+        self.edit.clean = None;
+        self.edit.coded = None;
+        self.edit.rendered_image = None;
+        self.edit.timeline = None;
+        self.edit.failure = None;
+        self.edit.comparing = false;
+        self.edit.expanded = None;
+        self.edit.folding = None;
+        self.edit.autoplay_waiting = false;
+        self.clear_surface();
+        self.ensure_session();
+    }
+
+    fn clear_surface(&mut self) {
+        if self.stage.surface.take().is_some() { self.stage.surface_revision += 1; }
+    }
+
+    /// Whether audio selected with autoplay on should wait for its edit before starting.
+    pub(crate) fn defer_autoplay(&mut self) -> bool {
+        let edited = self.selected_key().is_some_and(|k| self.edit.is_edited(k));
+        self.edit.autoplay_waiting = edited;
+        edited
+    }
+
+    fn ensure_session(&mut self) {
+        let Some(asset) = self.selected_asset() else { return };
+        if !self.edit.open && !self.edit.is_edited(asset.key) { return }
+        if self.edit.decoded(asset.key).is_some() { return }
+        self.edit.failure = None;
+        let path = self.lib.path(&asset);
+        let library = self.lib.root.clone();
+        self.edit.opening.request((asset, path), move |(asset, path)| {
+            (asset.key, edit::open(&path, asset.kind, &library).map(Arc::new))
+        });
+    }
+
+    /// The size the render should use, matching what the inspector's drag bar asks for.
+    fn render_options(&self, asset: &Asset) -> Options {
+        let max_size = match self.edit.decoded(asset.key).map(Arc::as_ref) {
+            Some(Decoded::Image(image)) => self.texture_size.filter(|m| *m < image.width().max(image.height())),
+            _ => None,
+        };
+        Options { max_size, nearest: self.nearest, companions: self.companions, edit: self.edit.recipe(asset.key) }
+    }
+
+    /// Brings previews and outputs in line with the current recipe, and starts whatever render
+    /// that takes.
+    pub(crate) fn edit_changed(&mut self) {
+        let Some(asset) = self.selected_asset() else { return };
+        self.redraw_seam();
+        let Some(decoded) = self.edit.decoded(asset.key).cloned() else { return };
+        // The last size stays up while the next one renders, so the readout doesn't blink.
+        self.edit.coded = None;
+        let options = self.render_options(&asset);
+        self.update_surface();
+        if options.edit.is_none() {
+            self.edit.output = None;
+            self.edit.rendered_image = None;
+            self.edit.clean = None;
+            self.edit.rendering.cancel();
+            self.edit.cutting.cancel();
+            if asset.kind == Kind::Texture { self.show_plain_size(); }
+            self.refresh_audition();
+            return;
+        }
+        if let (Decoded::Audio(source), Some(Edit::Audio(edit))) = (decoded.as_ref(), options.edit.as_deref()) {
+            let (source, edit) = (source.clone(), *edit);
+            self.edit.cutting.request((asset.key, source, edit), |(key, source, edit)| (key, Arc::new(sound::cut(&source, &edit))));
+        }
+        self.edit.rendering.request((asset, options, decoded), |(asset, options, decoded)| {
+            let finished = edit::render(&decoded, asset.name(), &options).map(|Rendered { name, bytes, shown }| {
+                // Failing to cache is fine: the drag will just make the file itself.
+                let _ = export::stage_rendered(&asset, &options, &name, &bytes);
+                Finished { bytes: bytes.len() as u64, name, shown }
+            });
+            (asset.key, finished)
+        });
+    }
+
+    /// Lands whatever background editing work has finished; true if anything did.
+    pub(crate) fn poll_editor(&mut self) -> bool {
+        let mut changed = false;
+        if let Some((key, result)) = self.edit.opening.take() {
+            changed = true;
+            if self.selected_key() == Some(key) {
+                match result {
+                    Ok(decoded) => {
+                        // A model's first material opens by itself, so the panel starts useful.
+                        if let Decoded::Model(doc) = decoded.as_ref() && self.edit.expanded.is_none() && !doc.materials.is_empty() { self.edit.expanded = Some(0); }
+                        self.edit.session = Some(Session { key, decoded });
+                        self.edit_changed();
+                    }
+                    Err(reason) => self.edit.failure = Some(reason),
+                }
+            }
+        }
+        if let Some((key, clean)) = self.edit.cutting.take() {
+            changed = true;
+            if self.selected_key() == Some(key) {
+                self.edit.clean = Some(clean);
+                self.refresh_audition();
+            }
+        }
+        if let Some((key, result)) = self.edit.rendering.take() {
+            changed = true;
+            if self.selected_key() == Some(key) { self.land_render(result); }
+        }
+        if let Some((key, end)) = self.edit.tuning.take() {
+            changed = true;
+            if self.selected_key() == Some(key) {
+                let start = self.audio_section().map_or(0, |s| s.0);
+                self.set_section(start, end, true);
+            }
+        }
+        changed
+    }
+
+    fn land_render(&mut self, result: Result<Finished, String>) {
+        let finished = match result {
+            Ok(finished) => finished,
+            Err(reason) => {
+                self.edit.failure = Some(reason);
+                return;
+            }
+        };
+        self.edit.failure = None;
+        self.edit.output = Some(Output { name: finished.name, bytes: finished.bytes });
+        match finished.shown {
+            Shown::Image(image) => {
+                self.edit.rendered_image = Some(image);
+                self.show_rendered_image();
+            }
+            Shown::Audio(pcm) => {
+                self.edit.coded = Some(pcm);
+                self.refresh_audition();
+            }
+            Shown::Model(images) => self.update_surface_with(Some(images)),
+        }
+    }
+
+    /// Puts the current render on the stage. A no-op while comparing against the original.
+    pub(crate) fn show_rendered_image(&mut self) {
+        if self.edit.comparing { return }
+        let Some(image) = self.edit.rendered_image.clone() else { return };
+        self.show_texture(image);
+    }
+
+    /// Whether the selected texture carries an image edit.
+    pub(crate) fn has_image_edit(&self) -> bool {
+        self.selected_key().is_some_and(|k| matches!(self.edit.recipes.get(&k), Some(Edit::Image(_))))
+    }
+
+    pub fn set_comparing(&mut self, comparing: bool) {
+        self.edit.comparing = comparing;
+        if matches!(self.preview, Preview::Texture(_)) {
+            if comparing { self.show_plain_size(); } else { self.show_rendered_image(); }
+        }
+        self.update_surface();
+        self.refresh_audition();
+    }
+
+    pub fn set_image_edit(&mut self, edit: ImageEdit) {
+        self.store_recipe(Edit::Image(edit));
+        self.edit_changed();
+    }
+
+    // --- Models ---
+
+    fn update_surface(&mut self) {
+        self.update_surface_with(None);
+    }
+
+    /// Recomputes the preview's materials, optionally with a new set of rendered textures.
+    fn update_surface_with(&mut self, rendered: Option<Vec<Arc<Image>>>) {
+        let Some(decoded) = self.model_doc() else { return };
+        let Decoded::Model(doc) = decoded.as_ref() else { return };
+        let edit = self.model_edit();
+        let surface = if self.edit.comparing {
+            doc.surface(&ModelEdit::default(), doc.original_images())
+        } else {
+            let images = rendered.or_else(|| self.stage.surface.as_ref().map(|s| s.images.clone())).unwrap_or_else(|| doc.original_images());
+            doc.surface(&edit, images)
+        };
+        self.stage.surface = Some(surface);
+        self.stage.surface_revision += 1;
+    }
+
+    /// Changes one material. `commit` is false while a slider is still moving.
+    pub fn set_material(&mut self, index: usize, commit: bool, change: impl FnOnce(&mut MaterialEdit)) {
+        let mut edit = self.model_edit();
+        let entry = edit.materials.entry(index).or_default();
+        change(entry);
+        if let Some(decoded) = self.model_doc()
+            && let Decoded::Model(doc) = decoded.as_ref()
+        {
+            let info = &doc.materials[index];
+            let close = |a: f32, b: f32| (a - b).abs() < 0.0005;
+            if entry.roughness.is_some_and(|v| close(v, info.roughness)) { entry.roughness = None; }
+            if entry.metallic.is_some_and(|v| close(v, info.metallic)) { entry.metallic = None; }
+            if entry.color.is_some_and(|c| (0..3).all(|i| close(c[i], info.color[i]))) { entry.color = None; }
+        }
+        if *entry == MaterialEdit::default() { edit.materials.remove(&index); }
+        self.store_recipe(Edit::Model(edit));
+        if commit { self.edit_changed(); } else { self.update_surface(); }
+    }
+
+    /// Sets the texture size on every material that has a texture bigger than it.
+    pub fn set_all_texture_sizes(&mut self, size: Option<u32>) {
+        let Some(decoded) = self.model_doc() else { return };
+        let Decoded::Model(doc) = decoded.as_ref() else { return };
+        let mut edit = self.model_edit();
+        for index in 0..doc.materials.len() {
+            let Some(longest) = doc.longest_texture(index) else { continue };
+            let entry = edit.materials.entry(index).or_default();
+            entry.max_texture = size.filter(|s| *s < longest);
+            if *entry == MaterialEdit::default() { edit.materials.remove(&index); }
+        }
+        self.store_recipe(Edit::Model(edit));
+        self.edit_changed();
+    }
+
+    pub fn reset_material(&mut self, index: usize) {
+        let mut edit = self.model_edit();
+        edit.materials.remove(&index);
+        self.store_recipe(Edit::Model(edit));
+        self.edit_changed();
+    }
+
+    // --- Audio ---
+
+    pub fn set_audio_edit(&mut self, edit: AudioEdit) {
+        self.store_recipe(Edit::Audio(edit));
+        self.edit_changed();
+    }
+
+    /// Sets the Vorbis quality. `commit` is false while the slider is still moving.
+    pub fn set_quality(&mut self, quality: u8, commit: bool) {
+        let mut edit = self.audio_edit();
+        edit.quality = quality;
+        self.store_recipe(Edit::Audio(edit));
+        if commit { self.edit_changed(); }
+    }
+
+    /// Moves the section. `commit` is false while a marker is still being dragged.
+    pub fn set_section(&mut self, start: u64, end: u64, commit: bool) {
+        let Some(pcm) = self.audio_source() else { return };
+        let frames = pcm.frames();
+        let shortest = (u64::from(pcm.rate) * MIN_SECTION_MS / 1000).max(1).min(frames);
+        let end = end.clamp(shortest, frames);
+        let start = start.min(end - shortest);
+        let mut edit = self.audio_edit();
+        edit.section = (start > 0 || end < frames).then_some((start, end));
+        self.store_recipe(Edit::Audio(edit));
+        if commit { self.edit_changed(); } else { self.redraw_seam(); }
+    }
+
+    pub fn drag_marker(&mut self, marker: Marker, drag: &mut rune::Drag) {
+        use rune::Phase;
+        let Some((start, end, frames)) = self.audio_section() else { return };
+        let width = self.stage_size[0].max(1.0);
+        match drag.phase {
+            Phase::Down => {
+                let frame = if marker == Marker::Start { start } else { end };
+                drag.data = (frame as f64 / frames.max(1) as f64 * f64::from(width)) as f32;
+            }
+            Phase::Move | Phase::Up => {
+                let at = (f64::from(drag.data + drag.dx) / f64::from(width)).clamp(0.0, 1.0);
+                let mut frame = (at * frames as f64) as u64;
+                let done = drag.phase == Phase::Up;
+                if done && self.audio_edit().looped && let Some(pcm) = self.audio_source() {
+                    frame = sound::snap_to_zero(&pcm, frame);
+                }
+                match marker {
+                    Marker::Start => self.set_section(frame, end, done),
+                    Marker::End => self.set_section(start, frame, done),
+                }
+            }
+        }
+    }
+
+    pub fn nudge_marker(&mut self, marker: Marker, milliseconds: f32) {
+        let Some((start, end, _)) = self.audio_section() else { return };
+        let Some(rate) = self.source_format().map(|(rate, _)| rate) else { return };
+        let delta = (f64::from(milliseconds) * f64::from(rate) / 1000.0) as i64;
+        let moved = |frame: u64| frame.saturating_add_signed(delta);
+        match marker {
+            Marker::Start => self.set_section(moved(start), end, true),
+            Marker::End => self.set_section(start, moved(end), true),
+        }
+    }
+
+    pub fn clear_section(&mut self) {
+        let mut edit = self.audio_edit();
+        edit.section = None;
+        self.set_audio_edit(edit);
+    }
+
+    pub fn set_looped(&mut self, looped: bool) {
+        let mut edit = self.audio_edit();
+        edit.looped = looped;
+        self.set_audio_edit(edit);
+        if looped { self.edit.audio_tab = AudioTab::Loop; }
+    }
+
+    /// The seam view's drag: pulling the audio sideways slides where the loop ends.
+    pub fn drag_seam(&mut self, drag: &rune::Drag) {
+        use rune::Phase;
+        let Some((start, end, _)) = self.audio_section() else { return };
+        let Some(rate) = self.source_format().map(|(rate, _)| rate) else { return };
+        if drag.phase == Phase::Down { self.edit.seam_drag_end = end; }
+        let frames_per_point = self.edit.seam_ms / 1000.0 * rate as f32 * 2.0 / drag.w.max(1.0);
+        let moved = self.edit.seam_drag_end.saturating_add_signed((-drag.dx * frames_per_point) as i64);
+        self.set_section(start, moved, drag.phase == Phase::Up);
+    }
+
+    pub fn zoom_seam(&mut self, wheel: f32) {
+        self.edit.seam_ms = (self.edit.seam_ms * (-wheel * 0.0035).exp()).clamp(2.0, 500.0);
+        self.redraw_seam();
+    }
+
+    pub fn seam_window_ms(&self) -> f32 {
+        self.edit.seam_ms
+    }
+
+    pub(crate) fn redraw_seam(&mut self) {
+        let Some(pcm) = self.audio_source() else { return };
+        let (start, end) = self.audio_edit().bounds(pcm.frames());
+        let window = (f64::from(self.edit.seam_ms) / 1000.0 * f64::from(pcm.rate)).max(2.0) as u64;
+        let dark = self.resolved_dark.get();
+        let (left, right) = if dark { ([150, 150, 158], [242, 242, 242]) } else { ([120, 120, 128], [22, 22, 24]) };
+        let px = sound::draw_seam(&pcm, start, end, window, SEAM_W, SEAM_H, left, right);
+        self.edit.seam.set(SEAM_W, SEAM_H, px);
+    }
+
+    /// Looks near the loop's end for the point that joins most smoothly to its start.
+    pub fn tune_seam(&mut self) {
+        let Some(asset) = self.selected_asset() else { return };
+        let Some(pcm) = self.audio_source() else { return };
+        let (start, end) = self.audio_edit().bounds(pcm.frames());
+        self.edit.tuning.request((asset.key, pcm), move |(key, pcm)| (key, sound::find_seam(&pcm, start, end)));
+    }
+
+    /// What to play for the current state of the edit, and where it sits in the source.
+    fn audition(&self) -> Option<(Arc<Pcm>, Timeline)> {
+        let source = self.audio_source()?;
+        let edit = self.audio_edit();
+        let edited = self.selected_key().is_some_and(|k| self.edit.is_edited(k));
+        if !edited {
+            return Some((source.clone(), Timeline { start: 0.0, length: source.seconds(), looped: false }));
+        }
+        let start = edit.bounds(source.frames()).0 as f32 / source.rate as f32;
+        let pcm = if self.edit.comparing { self.edit.clean.clone() } else { self.edit.coded.clone().or_else(|| self.edit.clean.clone()) }?;
+        let length = pcm.seconds();
+        Some((pcm, Timeline { start, length, looped: edit.looped }))
+    }
+
+    /// Plays the edit from `local` seconds into the clip; false if there's nothing to play yet.
+    pub(crate) fn play_audition(&mut self, local: f32) -> bool {
+        let Some((pcm, timeline)) = self.audition() else { return false };
+        let seconds = local.clamp(0.0, (timeline.length - 0.001).max(0.0));
+        self.audio.play_clip(pcm, timeline.looped, seconds);
+        self.edit.timeline = Some(timeline);
+        self.audio_watch_until = Some(Instant::now() + Duration::from_millis(600));
+        true
+    }
+
+    /// Swaps what's playing for the latest edit without losing the place.
+    fn refresh_audition(&mut self) {
+        let waiting = std::mem::take(&mut self.edit.autoplay_waiting);
+        if !waiting && !self.audio.is_playing() { return }
+        let was_at = self.playback_time();
+        let Some((_, timeline)) = self.audition() else {
+            self.edit.autoplay_waiting = waiting;
+            return;
+        };
+        self.play_audition(if waiting { 0.0 } else { was_at - timeline.start });
+    }
+
+    /// Where playback is, in the source's own seconds.
+    pub(crate) fn playback_time(&self) -> f32 {
+        let raw = self.audio.position().unwrap_or(0.0);
+        self.edit.timeline.map_or(raw, |t| t.source_time(raw))
+    }
+
+    /// Moves playback to `at` seconds in the source's own timeline. True if it was handled.
+    pub(crate) fn seek_audition(&mut self, at: f32) -> bool {
+        let Some((_, timeline)) = self.audition() else { return false };
+        let local = (at - timeline.start).clamp(0.0, (timeline.length - 0.001).max(0.0));
+        if self.audio.is_finished() || self.edit.timeline.is_none() || self.edit.timeline != Some(timeline) {
+            self.play_audition(local);
+        } else {
+            self.audio.seek(local);
+        }
+        true
+    }
+
+    /// Starts just before the loop's end, to hear it go round.
+    pub fn hear_seam(&mut self, tx: &mut rune::Tx) {
+        let Some((_, timeline)) = self.audition() else { return };
+        self.play_audition((timeline.length - SEAM_LEAD_SECONDS).max(0.0));
+        tx.wake_after(Duration::from_millis(33));
+    }
+
+    /// Text for the drag bar under an edited asset.
+    pub fn drag_detail(&self, asset: &Asset, unedited: String) -> String {
+        if !self.edit.is_edited(asset.key) { return unedited }
+        match &self.edit.output {
+            Some(output) => {
+                let ext = output.name.rsplit('.').next().unwrap_or("").to_uppercase();
+                format!("{ext}, {}", crate::app::bytes(output.bytes))
+            }
+            None => "Preparing".to_owned(),
+        }
+    }
+
+    /// Whether the texture on stage should come from the render, used when a preview lands.
+    pub(crate) fn editor_after_preview(&mut self) {
+        if matches!(self.stage.scene, Scene::Texture(_)) { self.show_rendered_image(); }
+    }
+}

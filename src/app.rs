@@ -11,6 +11,7 @@ use rune::prefs::Prefs;
 use rune::{Latest, Live, LiveText, Pixels, ScrollPos, Spring, TextEdit, Tx, Waker, WheelEvent};
 
 use crate::audio::Audio;
+use crate::editor::{AudioTab, Editor};
 use crate::export::{self, Options};
 use crate::library::{self, Filter, Kind, Library, Results, Sort};
 use crate::model::{self, Image, Model};
@@ -251,7 +252,9 @@ pub struct App {
     /// Whether the audio was playing when the view last ran.
     pub showing_playing: bool,
     /// Keeps checking playback while a sound is still opening.
-    audio_watch_until: Option<Instant>,
+    pub(crate) audio_watch_until: Option<Instant>,
+    /// The Edit panel, and what's been asked of each asset.
+    pub edit: Editor,
     inspector_w: f32,
     pub(crate) prefs: Prefs,
     pub columns: usize,
@@ -360,6 +363,7 @@ pub fn init_with(prefs: Prefs) -> App {
         confirmed: None,
         showing_playing: false,
         audio_watch_until: None,
+        edit: Editor::default(),
         inspector_w,
         prefs,
         columns: 5,
@@ -401,6 +405,7 @@ pub fn setup(s: &mut App, waker: Waker) {
     s.loading.set_waker(waker.clone());
     s.rescaling.set_waker(waker.clone());
     s.storage_job.set_waker(waker.clone());
+    s.edit.set_waker(&waker);
     s.waker = Some(waker);
     let root = s.root.clone();
     s.start_loading(root);
@@ -509,13 +514,32 @@ impl App {
                 self.set_kind(Some(Kind::Audio), tx);
                 if let Some(id) = first(self, Kind::Audio, "") { self.select(id, tx); }
             }
+            "edit-trim" | "edit-loop" | "edit-compress" => {
+                self.run_scene("sound", tx);
+                self.edit.open = true;
+                self.edit.audio_tab = match name { "edit-loop" => AudioTab::Loop, "edit-compress" => AudioTab::Compress, _ => AudioTab::Trim };
+                let edit = crate::edit::AudioEdit { section: Some((300_000, 1_500_000)), looped: name == "edit-loop", crossfade_ms: 10, quality: 2, ..crate::edit::AudioEdit::default() };
+                self.seed_scene_edit(crate::edit::Edit::Audio(edit));
+            }
+            "edit-texture" => {
+                self.run_scene("texture", tx);
+                self.edit.open = true;
+                self.seed_scene_edit(crate::edit::Edit::Image(crate::edit::ImageEdit { colors: Some(32), ..crate::edit::ImageEdit::default() }));
+            }
+            "edit-model" => {
+                self.run_scene("model", tx);
+                self.edit.open = true;
+                self.edit.expanded = Some(0);
+                let mut edit = crate::edit::ModelEdit::default();
+                edit.materials.insert(0, crate::edit::MaterialEdit { roughness: Some(0.2), metallic: Some(0.9), ..crate::edit::MaterialEdit::default() });
+                self.seed_scene_edit(crate::edit::Edit::Model(edit));
+            }
             _ => {}
         }
     }
 
     pub fn poll(&mut self, tx: &mut Tx) -> bool {
         let mut changed = false;
-        if headless() { self.finish_preview_blocking(); }
         while let Ok(message) = self.loads.1.try_recv() {
             match message {
                 LibraryMessage::Ready(lib, from_snapshot) => {
@@ -534,12 +558,21 @@ impl App {
             self.run_scene(name, tx);
             changed = true;
         }
+        // A snapshot shows finished work, so it waits for what the scene just asked for.
+        if headless() { self.finish_preview_blocking(); }
         if let Some(loaded) = self.loading.take() {
             self.land_preview(loaded);
             changed = true;
         }
         if let Some((from, shown)) = self.rescaling.take() {
             self.land_rescaled(&from, shown);
+            changed = true;
+        }
+        if self.poll_editor() { changed = true; }
+        // Reading a source starts its render, so one pass isn't enough for a snapshot.
+        while headless() && self.edit.busy() {
+            self.finish_preview_blocking();
+            self.poll_editor();
             changed = true;
         }
         if self.advance_drag() { changed = true; }
@@ -609,7 +642,7 @@ impl App {
 
     fn track_playback(&mut self, tx: &mut Tx) {
         let Preview::Audio { seconds, .. } = self.preview else { return };
-        let position = self.audio.position().unwrap_or(0.0).min(seconds);
+        let position = self.playback_time().min(seconds);
         let x = position / seconds.max(0.001) * self.stage_size[0];
         self.playhead.set([x, 0.0]);
         self.clock.set(format!("{} / {}", clock(position), clock(seconds)));
@@ -627,6 +660,7 @@ impl App {
         self.applied_dark = Some(dark);
         self.stage.look = if dark { Look::DARK } else { Look::LIGHT };
         self.thumbs.set_wave_color(self.wave_color());
+        self.redraw_seam();
         if first { return }
         self.generation += 1;
         self.request_range(self.visible_rows.clone());
@@ -875,9 +909,11 @@ impl App {
         if matches!(self.preview, Preview::None) { self.preview = Preview::Loading; }
         self.awaiting_preview = true;
         self.audio.stop();
+        self.editor_on_select();
         self.request_preview(path.clone(), asset.kind);
         if asset.kind == Kind::Audio && self.autoplay && !headless() {
-            self.audio.play(path);
+            // An edited sound plays its edit, which isn't ready yet.
+            if !self.defer_autoplay() { self.audio.play(path); }
             self.watch_audio(tx);
         }
         tx.wake_after(Duration::from_millis(1));
@@ -885,7 +921,7 @@ impl App {
 
     fn finish_preview_blocking(&mut self) {
         let start = std::time::Instant::now();
-        while self.awaiting_preview && (self.loading.is_pending() || self.rescaling.is_pending()) && start.elapsed() < Duration::from_secs(20) {
+        while (self.edit.busy() || self.awaiting_preview && (self.loading.is_pending() || self.rescaling.is_pending())) && start.elapsed() < Duration::from_secs(20) {
             std::thread::sleep(Duration::from_millis(2));
         }
     }
@@ -921,7 +957,17 @@ impl App {
         self.rescale_preview();
     }
 
+    /// Brings the selected texture to the current size, re-rendering it if it carries an edit.
     fn rescale_preview(&mut self) {
+        if self.has_image_edit() {
+            self.edit_changed();
+            if !self.edit.comparing { return }
+        }
+        self.show_plain_size();
+    }
+
+    /// Shows the selected texture unedited, at the current size.
+    pub(crate) fn show_plain_size(&mut self) {
         let Preview::Texture(full) = &self.preview else { return };
         let (full, size, nearest) = (full.clone(), self.texture_size, self.nearest);
         self.awaiting_preview = true;
@@ -936,6 +982,12 @@ impl App {
         let Preview::Texture(full) = &self.preview else { return };
         if !Arc::ptr_eq(full, from) { return }
         self.awaiting_preview = false;
+        // An older plain resize can finish after an edit has taken the stage.
+        if self.has_image_edit() && !self.edit.comparing { return }
+        self.show_texture(shown);
+    }
+
+    pub(crate) fn show_texture(&mut self, shown: Arc<Image>) {
         let at_actual_size = self.shown_size().is_some_and(|size| !self.stage.view.tile && (self.stage.view.zoom - actual_size_zoom(self.stage_size, size, self.scale)).abs() < 1e-3);
         let size = (shown.width, shown.height);
         self.stage.scene = Scene::Texture(shown);
@@ -966,6 +1018,7 @@ impl App {
             Loaded::Failed(reason) => Preview::Failed(reason),
         };
         self.stage.snap += 1;
+        self.editor_after_preview();
     }
 
     /// The inspector's width after the window has had its say.
@@ -998,7 +1051,8 @@ impl App {
         let Some(asset) = self.selected.and_then(|i| self.lib.assets.get(i as usize)) else { return };
         if asset.kind != Kind::Audio { return }
         if self.audio.is_finished() {
-            self.audio.play(self.lib.path(asset));
+            let path = self.lib.path(asset);
+            if !self.play_audition(0.0) { self.audio.play(path); }
         } else {
             self.audio.toggle();
         }
@@ -1014,8 +1068,11 @@ impl App {
         let Preview::Audio { seconds, .. } = self.preview else { return };
         let Some(asset) = self.selected.and_then(|i| self.lib.assets.get(i as usize)) else { return };
         let at = fraction.clamp(0.0, 1.0) * seconds;
-        if self.audio.is_finished() { self.audio.play(self.lib.path(asset)); }
-        self.audio.seek(at);
+        let path = self.lib.path(asset);
+        if !self.seek_audition(at) {
+            if self.audio.is_finished() { self.audio.play(path); }
+            self.audio.seek(at);
+        }
         self.playhead.set([fraction.clamp(0.0, 1.0) * self.stage_size[0], 0.0]);
         tx.wake_after(Duration::from_millis(33));
     }
@@ -1033,8 +1090,10 @@ impl App {
         tx.scroll_into_view(format!("grid/rows/r{row}"));
     }
 
-    pub fn options(&self, max_size: Option<u32>) -> Options {
-        Options { max_size, nearest: self.nearest, companions: self.companions }
+    /// How asset `id` leaves when dragged at `max_size`, with whatever edit it carries.
+    pub fn options(&self, id: u32, max_size: Option<u32>) -> Options {
+        let edit = self.lib.assets.get(id as usize).and_then(|a| self.edit.recipe(a.key));
+        Options { max_size, nearest: self.nearest, companions: self.companions, edit }
     }
 
     /// Prepares what a drag of `id` will hand over, off the UI thread. Pressing and dragging
@@ -1046,9 +1105,9 @@ impl App {
         let thumbs = self.thumbs.clone();
         let waker = self.waker.clone();
         let (send, result) = channel();
-        self.stage_job = Some(StageJob { id, options, result });
+        self.stage_job = Some(StageJob { id, options: options.clone(), result });
         let work = move || {
-            let prepared = export::stage(&path, &asset, options).map(|files| Prepared { files, image: thumbs.image(asset.key).map(drag_picture) });
+            let prepared = export::stage(&path, &asset, &options).map(|files| Prepared { files, image: thumbs.image(asset.key).map(drag_picture) });
             let _ = send.send(prepared);
             if let Some(w) = &waker { w(); }
         };
@@ -1058,14 +1117,15 @@ impl App {
     /// The drag gesture on a tile or a size rung.
     pub fn drag_gesture(&mut self, id: u32, max_size: Option<u32>, drag: &rune::Drag) {
         use rune::Phase;
-        let options = self.options(max_size);
+        let options = self.options(id, max_size);
         match drag.phase {
             Phase::Down => {
                 self.drag_started = false;
                 self.drag_wanted = false;
                 self.stage_job = None;
-                // Cheap to copy, so it gets a head start even if this is only a click.
-                if self.lib.assets.get(id as usize).is_some_and(|a| a.size <= EAGER_STAGE_BYTES) { self.start_stage_job(id, options); }
+                // Cheap to copy, so it gets a head start even if this is only a click. An edit
+                // may need rendering first, and that waits until it's really a drag.
+                if options.edit.is_none() && self.lib.assets.get(id as usize).is_some_and(|a| a.size <= EAGER_STAGE_BYTES) { self.start_stage_job(id, options); }
             }
             Phase::Move => {
                 let travel = drag.dx.hypot(drag.dy);

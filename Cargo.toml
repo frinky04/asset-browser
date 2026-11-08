@@ -11,7 +11,7 @@ rune-kit = { git = "https://github.com/anomalyco/rune", rev = "f2fb51eaed6de6e4f
 wgpu = { version = "~30.0.1", default-features = false, features = ["wgsl"] }
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.30"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tga", "webp", "gif"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tga", "webp", "gif", "color_quant"] }
 qoi = "0.4"
 gltf = "1"
 tobj = "4"
@@ -20,6 +20,11 @@ symphonia = { version = "0.5", features = ["all"] }
 rodio = { version = "0.20", default-features = false, features = ["symphonia-all"] }
 walkdir = "2"
 ufbx = "0.11"
+vorbis_rs = "0.5"
+serde_json = "1"
+base64 = "0.22"
+color_quant = "1"
+png = "0.18"
 
 [build-dependencies]
 embed-resource = "3"
