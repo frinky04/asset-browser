@@ -861,24 +861,25 @@ fn pane(s: &App, id: u32, asset: &Asset) -> Pane {
             };
             let zoomed = s.edit.view.is_some();
             let wave = el().key("waveform").w_full().h(wave_h).cursor(if s.edit.open { Cursor::Crosshair } else { Cursor::Pointer })
-                .pixels(if zoomed { &s.edit.timeline_wave } else { &s.wave })
+                .pixels(if s.timeline_ready() { &s.edit.timeline_wave } else { &s.wave })
                 .on_layout(|s: &mut App, r: [f32; 4]| s.stage_size = [r[2], r[3]])
                 .on_drag(|s: &mut App, drag, tx| s.drag_waveform(drag, tx))
                 .on_wheel(|s: &mut App, wheel, tx| s.wheel_timeline(wheel, tx))
                 .on_double_press(|s: &mut App| s.fit_timeline())
                 .child(el().key("playhead").w(1.5).h_full().fill(T.accent).absolute(0.0, 0.0).live_offset(&s.playhead));
             let wave = edit_ui::markers(s, if zoomed { wave.clip_soft(0.0) } else { wave });
-            let corner = s.edit.open.then(|| {
-                let mut hints = row().gap(8.0).items_center().child(label("Drag to select, scroll to zoom", SMALL, T.faint));
-                if zoomed { hints = hints.child(tool("Fit", false, |s, tx| { s.fit_timeline(); tx.instant(); })); }
+            let corner = (s.edit.open || zoomed).then(|| {
+                let mut hints = row().gap(8.0).items_center();
+                if s.edit.open { hints = hints.child(label("Drag to select, scroll to zoom", SMALL, T.faint)); }
+                if zoomed { hints = hints.child(tool("Fit", false, |s, tx| { s.fit_timeline(); tx.blur(); })); }
                 hints
             });
             let dock = row().key("tools").w_full().gap(10.0).items_center()
                 .child(el().key("play").role("button").label(if playing { "Pause" } else { "Play" }).focusable(true).size(30.0, 30.0).radius(15.0).center().fill(T.accent).press_scale(0.9).cursor(Cursor::Pointer)
-                    .on_press_tx(|s: &mut App, tx| s.toggle_playback(tx))
+                    .on_press_tx(|s: &mut App, tx| { s.toggle_playback(tx); tx.blur(); })
                     .child(swap(icon(&PLAY, 14.0).color(T.on_accent), icon(&PAUSE, 14.0).color(T.on_accent), playing)))
                 .child(text("0:00.0 / 0:00.0").live_text(&s.clock).font(LABEL).color(T.muted).grow(1.0))
-                .child(toggle("Play on select", s.autoplay, |s, _| s.autoplay = !s.autoplay));
+                .child(toggle("Play on select", s.autoplay, |s, tx| { s.autoplay = !s.autoplay; tx.blur(); }));
             let detail = format!("{}, {} Hz, {} ch", clock(*seconds), commas(*rate as usize), channels);
             let detail = s.drag_detail(asset, detail);
             Pane { tools: None, stage: col().w_full().px(16.0).pb(36.0).child(wave), hint: None, corner, dock: Some(dock), actions: vec![drag_bar(id, None, "Drag sound out", detail)] }
@@ -925,7 +926,15 @@ fn inspector(s: &App) -> El {
         .child(el().border(1.0, T.line).radius(GROUP_RADIUS).padding(GROUP_PAD).child(edit_button)));
     if let Some(t) = tools { body = body.child(t); }
     let well_base = if scrolling { col().w_full().h(SCROLLING_WELL_H) } else { col().w_full().grow(1.0).min_h(120.0) };
-    let mut well = well_base.justify_center().radius(WELL_RADIUS).fill(T.well).child(stage);
+    let mut well = well_base.key("preview-well").justify_center().radius(WELL_RADIUS).fill(T.well).child(stage);
+    if asset.kind == Kind::Audio {
+        // While the pointer is over the sound, Space belongs to it. A focused button would take
+        // the key first, so it gives up focus here. Text being typed elsewhere keeps it.
+        well = well.on_hover_change(|s: &mut App, inside, tx| {
+            if inside && !s.search.focused && !s.edit.scale_text.focused { tx.blur(); }
+            tx.live_only();
+        });
+    }
     if let Some(h) = hint {
         well = well.child(el().pin(Some(12.0), None, None, Some(10.0)).inert().child(label(h, SMALL, T.faint)));
     }

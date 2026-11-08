@@ -898,7 +898,7 @@ fn the_timeline_zooms_about_the_pointer_and_selection_follows_the_zoom() {
         rt.wheel_event(rune::WheelEvent::new(0.0, 80.0).at(x, y));
         rt.frame(1.0 / 60.0);
     }
-    settle(&mut rt);
+    wait_for_edit(&mut rt);
     let (start, end) = rt.state.edit.view.expect("the wheel zoomed in");
     let frames = rt.state.audio_section().unwrap().2;
     assert!((end - start) < frames / 4, "{start}..{end}");
@@ -916,8 +916,111 @@ fn the_timeline_zooms_about_the_pointer_and_selection_follows_the_zoom() {
 
     // Fit brings the whole sound back, and the selection is untouched.
     click(&mut rt, "Fit");
+    wait_for_edit(&mut rt);
     assert!(rt.state.edit.view.is_none());
     assert_eq!(rt.state.audio_section().map(|s| (s.0, s.1)), Some((first, last)));
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_zoom_eases_there_and_keeps_the_pointer_on_the_same_moment() {
+    let root = edit_fixture();
+    let mut rt = app_on(&root);
+    open_editor(&mut rt, "tone.wav");
+    for _ in 0..40 { rt.frame(1.0 / 60.0); }
+    let box_ = rect(&rt, "waveform");
+    let (x, y) = (box_[0] + box_[2] * 0.25, box_[1] + box_[3] * 0.5);
+    let frames = rt.state.audio_section().unwrap().2 as f64;
+    rt.pointer_move(x, y);
+    rt.wheel_event(rune::WheelEvent::new(0.0, 200.0).at(x, y));
+    rt.frame(1.0 / 60.0);
+
+    // Each step lands somewhere between, with the same moment under the pointer throughout.
+    let mut spans = Vec::new();
+    let start = Instant::now();
+    while rt.state.edit.timeline_moving() && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(4));
+        rt.update(|s, tx| { s.poll(tx); });
+        rt.frame(1.0 / 60.0);
+        let (from, to, _) = rt.state.audio_view().unwrap();
+        spans.push(to - from);
+        let under = from as f64 + (to - from) as f64 * 0.25;
+        assert!((under - frames * 0.25).abs() < frames * 0.002, "drifted to {under} of {frames}");
+    }
+    assert!(spans.len() > 3, "it took more than a jump: {spans:?}");
+    assert!(spans.windows(2).all(|w| w[1] <= w[0]), "{spans:?}");
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn zooming_works_without_opening_the_editor() {
+    let root = edit_fixture();
+    let mut rt = app_on(&root);
+    let tile = tile_key(&rt, "tone.wav");
+    click(&mut rt, &tile);
+    wait_for_preview(&mut rt);
+    for _ in 0..30 { rt.frame(1.0 / 60.0); }
+    assert!(!rt.state.edit.open);
+
+    let box_ = rect(&rt, "waveform");
+    let (x, y) = (box_[0] + box_[2] * 0.5, box_[1] + box_[3] * 0.5);
+    rt.pointer_move(x, y);
+    rt.wheel_event(rune::WheelEvent::new(0.0, 200.0).at(x, y));
+    rt.frame(1.0 / 60.0);
+    wait_for_edit(&mut rt);
+    let (start, end) = rt.state.edit.view.expect("the first scroll reads the sound and still zooms");
+    assert!(rt.find("timeline-overview").is_some() && rt.find("Fit").is_some());
+    assert!(rt.find("mark-end").is_none(), "no editing controls appear");
+
+    // Scrubbing goes by the zoomed view, and doesn't start an edit.
+    drag_across(&mut rt, "waveform", 0.5, 0.5);
+    assert!(!rt.state.edit.is_edited(rt.state.selected_asset().unwrap().key));
+    assert_eq!(rt.state.edit.view, Some((start, end)));
+
+    click(&mut rt, "Fit");
+    wait_for_edit(&mut rt);
+    assert!(rt.state.edit.view.is_none());
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn space_plays_the_sound_while_the_pointer_is_over_it() {
+    let root = edit_fixture();
+    let mut rt = app_on(&root);
+    open_editor(&mut rt, "tone.wav");
+    for _ in 0..40 { rt.frame(1.0 / 60.0); }
+    assert!(rt.state.edit.open, "the click left focus on the Edit button");
+    rt.on_key = Some(ui::on_key);
+    let space = || KeyEvent { key: Key::Text(" ".into()), mods: Default::default() };
+    let (x, y) = rt.find("waveform").unwrap();
+
+    // From a focused button outside, moving onto the sound hands Space to it.
+    rt.pointer_move(x, y);
+    settle(&mut rt);
+    rt.key(space());
+    settle(&mut rt);
+    assert!(rt.state.edit.open, "the Edit button didn't get the key");
+    assert!(rt.state.edit.timeline.is_some(), "playback started");
+
+    // Pressing a control inside the sound area doesn't take it back.
+    let autoplay = rt.state.autoplay;
+    click(&mut rt, "Play on select");
+    assert_ne!(rt.state.autoplay, autoplay);
+    rt.pointer_move(x, y);
+    settle(&mut rt);
+    rt.key(space());
+    settle(&mut rt);
+    assert_ne!(rt.state.autoplay, autoplay, "Space went to the sound, not the checkbox");
+
+    // Away from the sound, a focused control keeps its usual Space.
+    click(&mut rt, "audio-tab/Loop");
+    let (away_x, away_y) = rt.find("edit-foot").unwrap();
+    rt.pointer_move(away_x, away_y);
+    settle(&mut rt);
+    assert_eq!(rt.state.edit.audio_tab, crate::editor::AudioTab::Loop);
     drop(rt);
     let _ = std::fs::remove_dir_all(&root);
 }

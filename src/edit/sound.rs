@@ -331,6 +331,9 @@ pub fn draw_timeline(pcm: &Pcm, index: &PeakIndex, start: u64, end: u64, width: 
     let channels = usize::from(pcm.channels.max(1));
     let frames = pcm.frames();
     let per_column = (end.saturating_sub(start)) as f64 / w.max(1) as f64;
+    // Columns on a grid of their own width, so panning slides the picture instead of re-binning
+    // every column and making it shimmer. Up close each sample matters more than that.
+    let start = if per_column >= 1.0 { (start as f64 / per_column).floor() * per_column } else { start as f64 };
     let mid = (height as f32 - 1.0) * 0.5;
     let shaped = |v: f32| (v / index.loudest).clamp(-1.0, 1.0);
     let row_for = |v: f32| {
@@ -338,8 +341,8 @@ pub fn draw_timeline(pcm: &Pcm, index: &PeakIndex, start: u64, end: u64, width: 
         mid - v.signum() * v.abs().powf(0.7) * (mid - 1.0)
     };
     for x in 0..w {
-        let from = (start as f64 + x as f64 * per_column).floor() as u64;
-        let to = ((start as f64 + (x + 1) as f64 * per_column).ceil() as u64 + 1).min(frames);
+        let from = (start + x as f64 * per_column).floor() as u64;
+        let to = ((start + (x + 1) as f64 * per_column).ceil() as u64 + 1).min(frames);
         if from >= frames || to <= from { continue }
         let (mut low, mut high) = (f32::MAX, f32::MIN);
         if per_column >= INDEX_BLOCK as f64 {
@@ -574,6 +577,15 @@ mod tests {
         let zoomed = draw_timeline(&pcm, &index, 1_000, 1_100, 200, 50, [9, 9, 9]);
         assert_eq!(painted_columns(&zoomed, 200), 200, "even with fewer samples than columns");
         assert_ne!(whole, zoomed);
+    }
+
+    #[test]
+    fn panning_by_less_than_a_column_leaves_the_picture_steady() {
+        let pcm = sine(44_100, 44_100, 700.0, 1);
+        let index = PeakIndex::build(&pcm);
+        let at = |start: u64| draw_timeline(&pcm, &index, start, start + 4_000, 200, 50, [9, 9, 9]);
+        // 20 frames to a column: these two share the same grid.
+        assert_eq!(at(1_000), at(1_005));
     }
 
     #[test]

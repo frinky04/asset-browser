@@ -417,7 +417,7 @@ fn headless() -> bool {
 }
 
 impl App {
-    fn wake(&self) {
+    pub(crate) fn wake(&self) {
         if let Some(w) = &self.waker { w(); }
     }
 
@@ -579,6 +579,7 @@ impl App {
             changed = true;
         }
         if self.poll_editor() { changed = true; }
+        if self.step_view(tx) { changed = true; }
         // Reading a source starts its render, so one pass isn't enough for a snapshot.
         while headless() && self.edit.busy() {
             self.finish_preview_blocking();

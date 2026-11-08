@@ -30,6 +30,8 @@ pub const PANEL_SPRING: Spring = Spring::new(0.3, 0.0);
 /// The fewest frames the timeline can be zoomed to show.
 const MIN_VIEW_FRAMES: f64 = 64.0;
 const TIMELINE_ZOOM_SPEED: f32 = 0.006;
+/// How quickly the timeline closes on its goal, per second.
+const VIEW_EASE: f64 = 16.0;
 /// Points the pointer travels before a press on the waveform becomes a drag.
 const REGION_TRAVEL: f32 = 3.0;
 /// How far before a loop's end "hear the seam" starts.
@@ -111,6 +113,14 @@ pub struct Editor {
     peak_index: Option<Arc<sound::PeakIndex>>,
     /// The frames the timeline shows, when zoomed in; `None` shows the whole sound.
     pub view: Option<(u64, u64)>,
+    /// The edges the timeline is easing toward, and where they are on the way.
+    view_goal: Option<(f64, f64)>,
+    view_now: (f64, f64),
+    view_ticked: Instant,
+    /// The source was asked for by zooming, without the panel being open.
+    timeline_wanted: bool,
+    /// Zoom that arrived while the source was still being read: where, and how much.
+    pending_zoom: Option<(f32, f32)>,
     /// The timeline drawn for `view`.
     pub timeline_wave: Pixels,
     /// Where a drag across the waveform began, once it has moved far enough to be one.
@@ -179,6 +189,11 @@ impl Default for Editor {
             peak_db: None,
             peak_index: None,
             view: None,
+            view_goal: None,
+            view_now: (0.0, 0.0),
+            view_ticked: Instant::now(),
+            timeline_wanted: false,
+            pending_zoom: None,
             timeline_wave: Pixels::new(),
             region_anchor: 0,
             region_active: false,
@@ -223,7 +238,13 @@ impl Editor {
         self.rendering.is_pending()
     }
 
-    /// Whether something the panel opened or folded is still moving.
+    /// Whether the timeline is still easing to where it was sent.
+    #[cfg(test)]
+    pub fn timeline_moving(&self) -> bool {
+        self.view_goal.is_some()
+    }
+
+    /// Whether the panel opened or folded something that's still moving.
     pub fn settling(&self) -> bool {
         self.settling_until.is_some_and(|t| Instant::now() < t)
     }
@@ -359,8 +380,6 @@ impl App {
         self.edit.start_settling();
         tx.motion(PANEL_SPRING);
         self.edit.focus = None;
-        // Zoom is an editing tool, and browsing always shows the whole sound.
-        if !self.edit.open { self.edit.view = None; }
         if self.edit.open {
             self.ensure_session();
             self.update_surface();
@@ -392,6 +411,9 @@ impl App {
         self.edit.folding = None;
         self.edit.peak_index = None;
         self.edit.view = None;
+        self.edit.view_goal = None;
+        self.edit.timeline_wanted = false;
+        self.edit.pending_zoom = None;
         self.edit.peak_db = None;
         self.edit.model_images = None;
         self.edit.focus = None;
@@ -419,7 +441,7 @@ impl App {
 
     fn ensure_session(&mut self) {
         let Some(asset) = self.selected_asset() else { return };
-        if !self.edit.open && !self.edit.is_edited(asset.key) { return }
+        if !self.edit.open && !self.edit.is_edited(asset.key) && !self.edit.timeline_wanted { return }
         if self.edit.decoded(asset.key).is_some() { return }
         self.edit.failure = None;
         let path = self.lib.path(&asset);
@@ -490,8 +512,9 @@ impl App {
     #[cfg(test)]
     pub(crate) fn poll_editor_for_test(&mut self, tx: &mut Tx) -> bool {
         let landed = self.poll_editor();
+        let moving = self.edit.timeline_moving();
         self.poll(tx);
-        landed
+        landed || moving
     }
 
     /// Lands whatever background editing work has finished; true if anything did.
@@ -512,6 +535,7 @@ impl App {
                         }
                         self.edit.session = Some(Session { key, decoded });
                         self.redraw_timeline();
+                        if let Some((x, amount)) = self.edit.pending_zoom.take() { self.zoom_timeline(x, amount); }
                         self.edit_changed();
                     }
                     Err(reason) => self.edit.failure = Some(reason),
@@ -854,21 +878,67 @@ impl App {
         }
     }
 
-    fn set_view(&mut self, start: f64, span: f64) {
-        let Some(pcm) = self.audio_source() else { return };
-        let frames = pcm.frames() as f64;
+    /// `start` and `span` kept inside the sound.
+    fn clamped_view(&self, start: f64, span: f64) -> Option<(f64, f64)> {
+        let frames = self.audio_source()?.frames() as f64;
         let span = span.clamp(MIN_VIEW_FRAMES.min(frames), frames);
-        if span >= frames {
-            self.edit.view = None;
-            return;
-        }
         let start = start.clamp(0.0, frames - span);
-        self.edit.view = Some((start as u64, (start + span) as u64));
+        Some((start, start + span))
+    }
+
+    fn show_view(&mut self, edges: (f64, f64)) {
+        let frames = self.audio_source().map_or(0.0, |pcm| pcm.frames() as f64);
+        self.edit.view = (edges.1 - edges.0 < frames - 0.5).then_some((edges.0 as u64, edges.1 as u64));
         self.redraw_timeline();
     }
 
+    /// Moves the timeline at once, for when it's tied directly to the pointer.
+    fn set_view(&mut self, start: f64, span: f64) {
+        let Some(edges) = self.clamped_view(start, span) else { return };
+        self.edit.view_goal = None;
+        self.show_view(edges);
+    }
+
+    /// Sends the timeline somewhere to ease to.
+    fn aim_view(&mut self, start: f64, span: f64) {
+        let Some(goal) = self.clamped_view(start, span) else { return };
+        if self.edit.view_goal.is_none() {
+            let (from, to, _) = self.audio_view().unwrap_or((0, 0, 0));
+            self.edit.view_now = (from as f64, to as f64);
+            self.edit.view_ticked = Instant::now();
+        }
+        self.edit.view_goal = Some(goal);
+        self.wake();
+    }
+
+    /// Eases the timeline a step toward its goal; true if it moved. Both edges cover the same
+    /// share of their distance each step, so whatever was under the pointer stays under it.
+    pub(crate) fn step_view(&mut self, tx: &mut Tx) -> bool {
+        let Some(goal) = self.edit.view_goal else { return false };
+        let now = Instant::now();
+        let dt = now.duration_since(self.edit.view_ticked).as_secs_f64().min(0.05);
+        self.edit.view_ticked = now;
+        let speed = f64::from(self.motion.speed());
+        let share = if speed <= 0.0 { 1.0 } else { 1.0 - (-dt * VIEW_EASE * speed).exp() };
+        let (start, end) = self.edit.view_now;
+        let next = (start + (goal.0 - start) * share, end + (goal.1 - end) * share);
+        // Done once what's left is less than a column of the picture.
+        let settled = (next.0 - goal.0).abs().max((next.1 - goal.1).abs()) < (goal.1 - goal.0) / f64::from(WAVE_W) * 0.5;
+        let shown = if settled { goal } else { next };
+        self.edit.view_now = shown;
+        self.show_view(shown);
+        if settled { self.edit.view_goal = None; } else { tx.wake_after(Duration::from_millis(8)); }
+        tx.instant();
+        true
+    }
+
+    /// Whether the timeline can be drawn from the source itself, at any zoom.
+    pub fn timeline_ready(&self) -> bool {
+        self.edit.peak_index.is_some() && self.audio_source().is_some()
+    }
+
     pub(crate) fn redraw_timeline(&mut self) {
-        let Some((start, end)) = self.edit.view else { return };
+        let Some((start, end, _)) = self.audio_view() else { return };
         let (Some(pcm), Some(index)) = (self.audio_source(), self.edit.peak_index.clone()) else { return };
         let px = sound::draw_timeline(&pcm, &index, start, end, WAVE_W, WAVE_H, self.wave_color());
         self.edit.timeline_wave.set(WAVE_W, WAVE_H, px);
@@ -876,25 +946,51 @@ impl App {
 
     /// A wheel over the timeline: up and down zoom about the pointer, sideways pans.
     pub fn wheel_timeline(&mut self, wheel: rune::WheelEvent, tx: &mut Tx) -> bool {
-        if !self.edit.open { return false }
-        let Some((start, end, _)) = self.audio_view() else { return false };
-        let span = (end - start) as f64;
-        let per_point = span / f64::from(self.stage_size[0].max(1.0));
+        if !matches!(self.preview, Preview::Audio { .. }) { return false }
         let sideways = if wheel.mods.shift { wheel.dy } else if wheel.dx.abs() > wheel.dy.abs() { wheel.dx } else { 0.0 };
-        if sideways != 0.0 {
-            self.set_view(start as f64 - f64::from(sideways) * per_point, span);
-        } else {
-            let anchor = f64::from(wheel.x) * per_point;
-            let next = span * f64::from(-wheel.dy * TIMELINE_ZOOM_SPEED).exp();
-            self.set_view(start as f64 + anchor - anchor / span * next, next);
+        if self.audio_view().is_none() {
+            // The first zoom away from the panel reads the sound; what's asked for meanwhile
+            // is applied as soon as that lands.
+            self.edit.timeline_wanted = true;
+            self.ensure_session();
+            if sideways == 0.0 {
+                let so_far = self.edit.pending_zoom.map_or(0.0, |(_, amount)| amount);
+                self.edit.pending_zoom = Some((wheel.x, so_far + wheel.dy));
+            }
+            return true;
         }
-        // The markers and the picture have to move together.
+        if sideways != 0.0 {
+            let (start, end) = self.timeline_aim();
+            let span = end - start;
+            self.aim_view(start - f64::from(sideways) * span / f64::from(self.stage_size[0].max(1.0)), span);
+        } else {
+            self.zoom_timeline(wheel.x, wheel.dy);
+        }
         tx.instant();
         true
     }
 
+    /// Where the timeline is headed, or where it is if it's not going anywhere. Successive
+    /// wheel notches build on this, so a fast scroll adds up.
+    fn timeline_aim(&self) -> (f64, f64) {
+        self.edit.view_goal.unwrap_or_else(|| {
+            let (start, end, _) = self.audio_view().unwrap_or((0, 0, 0));
+            (start as f64, end as f64)
+        })
+    }
+
+    /// Zooms by a wheel `amount`, keeping the frame `x` points along the timeline where it is.
+    fn zoom_timeline(&mut self, x: f32, amount: f32) {
+        let (start, end) = self.timeline_aim();
+        let span = end - start;
+        let along = f64::from(x / self.stage_size[0].max(1.0)).clamp(0.0, 1.0);
+        let next = span * f64::from(-amount * TIMELINE_ZOOM_SPEED).exp();
+        self.aim_view(start + along * span - along * next, next);
+    }
+
     pub fn fit_timeline(&mut self) {
-        self.edit.view = None;
+        let Some((_, _, frames)) = self.audio_view() else { return };
+        self.aim_view(0.0, frames as f64);
     }
 
     /// Dragging along the zoomed timeline's overview bar.
@@ -917,7 +1013,14 @@ impl App {
         use rune::Phase;
         let editing = self.edit.open && self.audio_section().is_some();
         if !editing {
-            if drag.phase != Phase::Up { self.seek_fraction(drag.x / drag.w.max(1.0), tx); }
+            if drag.phase != Phase::Up {
+                // Scrubbing goes by what's on screen, which may be zoomed in.
+                let fraction = match (self.frame_at(drag.x), self.audio_view()) {
+                    (Some(frame), Some((_, _, frames))) => (frame as f64 / frames.max(1) as f64) as f32,
+                    _ => drag.x / drag.w.max(1.0),
+                };
+                self.seek_fraction(fraction, tx);
+            }
             return;
         }
         let Some(frame) = self.frame_at(drag.x) else { return };
@@ -956,7 +1059,7 @@ impl App {
         let (Some((start, end)), Some((rate, _))) = (self.edit.view, self.source_format()) else { return false };
         let frame = (f64::from(seconds) * f64::from(rate)) as u64;
         let target = self.audio.is_playing().then(|| sound::follow_view((start, end), frame, self.edit.playhead_was_in_view)).flatten();
-        if let Some(from) = target { self.set_view(from as f64, (end - start) as f64); }
+        if let Some(from) = target { self.aim_view(from as f64, (end - start) as f64); }
         self.edit.playhead_was_in_view = target.is_some() || (start..end).contains(&frame);
         target.is_some()
     }
@@ -1077,6 +1180,9 @@ impl App {
     fn refresh_audition(&mut self) {
         let waiting = std::mem::take(&mut self.edit.autoplay_waiting);
         if !waiting && !self.audio.is_playing() { return }
+        // A file already playing untouched carries on: reading it for the timeline changes nothing.
+        let edited = self.selected_key().is_some_and(|k| self.edit.is_edited(k));
+        if !waiting && !edited && self.edit.timeline.is_none() { return }
         let was_at = self.playback_time();
         let Some((_, timeline)) = self.audition() else {
             self.edit.autoplay_waiting = waiting;
