@@ -39,6 +39,7 @@ fn main() {
         ..AppSpec::new("Asset Browser", (1520.0, 900.0), app::init, ui::view)
     };
     App::new(spec)
+        .titlebar(rune::Titlebar::new(ui::TITLEBAR_H))
         .compositor(stage::StageCompositor::default())
         .on_window(remember_window)
         .run();

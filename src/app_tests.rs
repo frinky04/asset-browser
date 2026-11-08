@@ -21,7 +21,11 @@ fn fixture() -> (PathBuf, Vec<u8>) {
     }
     std::fs::write(root.join("Props/crate.obj"), "v -1 -1 0\nv 1 -1 0\nv 0 1 0\nf 1 2 3\n").unwrap();
     // SAFETY: only this test reads the variable while it runs; the others use explicit paths.
-    unsafe { std::env::set_var("ASSET_BROWSER_DATA", dir.join("data")) };
+    unsafe {
+        std::env::set_var("ASSET_BROWSER_DATA", dir.join("data"));
+        // The window's saved layout belongs to the person using the app, not to this test.
+        std::env::set_var("RUNE_PREFS_DIR", dir.join("prefs"));
+    }
     let bytes = std::fs::read(root.join("Bricks/brick_0.png")).unwrap();
     (root, bytes)
 }
@@ -79,6 +83,27 @@ fn browsing_previewing_and_dragging_out_end_to_end() {
     assert_eq!(rt.state.filter.kind, Some(Kind::Model));
     assert_eq!(rt.state.results.ids.len(), 1);
     click(&mut rt, "All 13");
+
+    // Every chooser's indicator sits evenly inside its frame, on all four sides.
+    let rect_of = |rt: &Runtime<App>, suffix: &str| rt.elements().into_iter().find(|e| e.path.ends_with(suffix)).unwrap_or_else(|| panic!("no {suffix}")).rect;
+    for group in ["kinds", "sort", "dragmax", "tilesize"] {
+        let (outer, inner) = (rect_of(&rt, group), rect_of(&rt, &format!("{group}/indicator")));
+        let (top, bottom) = (inner[1] - outer[1], outer[1] + outer[3] - inner[1] - inner[3]);
+        assert_eq!(top, bottom, "{group}: {top} above, {bottom} below");
+        let last_right = outer[0] + outer[2] - 3.0;
+        assert!(inner[0] >= outer[0] + 3.0 && inner[0] + inner[2] <= last_right + 0.01, "{group}: {inner:?} in {outer:?}");
+    }
+
+    // Neighbours in the title bar share a height and sit on one line.
+    let (sort, search) = (rect_of(&rt, "titlebar/sort"), rect_of(&rt, "titlebar/searchbar"));
+    assert_eq!((sort[1], sort[3]), (search[1], search[3]), "sort {sort:?}, search {search:?}");
+
+    // Choosing a format changes the counts, but none of the tabs may move.
+    let tabs_before = rect_of(&rt, "filters/kinds");
+    click(&mut rt, "png 12");
+    assert_eq!(rt.state.filter.ext, Some("png"));
+    assert_eq!(rect_of(&rt, "filters/kinds"), tabs_before, "the tabs keep their place");
+    click(&mut rt, "png 12");
 
     // A pack in the sidebar narrows to it.
     click(&mut rt, "Bricks");

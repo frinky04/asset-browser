@@ -52,11 +52,18 @@ const PANEL_RADIUS: f32 = 12.0;
 const WELL_RADIUS: f32 = 8.0;
 const CONTROL_RADIUS: f32 = 7.0;
 pub const WINDOW_GAP: f32 = 8.0;
+pub const TITLEBAR_H: f32 = 46.0;
 pub const SIDEBAR_W: f32 = 244.0;
 /// The outer height a segmented control comes to, shared with the controls beside them.
 const CONTROL_H: f32 = 30.0;
-/// A segment inside that height, less the hairline and the 2-point padding on each side.
-const SEGMENT_H: f32 = 24.0;
+/// The inset of a group's contents, the same on every side. Rune draws borders inside the box.
+const GROUP_PAD: f32 = 3.0;
+/// What's left for a segment inside a group.
+const SEGMENT_H: f32 = CONTROL_H - GROUP_PAD * 2.0;
+const GROUP_RADIUS: f32 = 9.0;
+/// Concentric with the group around it.
+const SEGMENT_RADIUS: f32 = GROUP_RADIUS - GROUP_PAD;
+const COUNT_SLOT: f32 = 36.0;
 const TILE_GAP: f32 = 7.0;
 const TILE_RADIUS: f32 = 11.0;
 const PACK_ROW: f32 = 32.0;
@@ -155,16 +162,16 @@ fn plain<V>(name: impl Into<String>, value: V) -> Segment<V> {
 
 /// A row of mutually exclusive choices inside a hairline. The current one is raised.
 fn segments<V: Copy + PartialEq + 'static>(key: &str, items: Vec<Segment<V>>, current: V, on: impl Fn(&mut App, V, &mut Tx) + Clone + 'static) -> El {
-    let mut bar = row().key(key.to_owned()).role("radiogroup").h(CONTROL_H).radius(CONTROL_RADIUS + 2.0).border(1.0, T.line).padding(2.0).equal_columns(items.len());
+    let mut bar = row().key(key.to_owned()).role("radiogroup").h(CONTROL_H).radius(GROUP_RADIUS).border(1.0, T.line).padding(GROUP_PAD).equal_columns(items.len());
     // The indicator shares the chosen segment's cell, so it slides when the choice moves.
     if let Some(at) = items.iter().position(|i| i.value == current) {
-        bar = bar.child(el().key("indicator").grid_cell(at).h(SEGMENT_H).radius(CONTROL_RADIUS).fill(T.raised).lead(motion::LEAD, motion::DEFAULT).a11y_hidden());
+        bar = bar.child(el().key("indicator").grid_cell(at).h(SEGMENT_H).radius(SEGMENT_RADIUS).fill(T.raised).lead(motion::LEAD, motion::DEFAULT).a11y_hidden());
     }
     for (at, Segment { name, count, glyph, value }) in items.into_iter().enumerate() {
         let selected = value == current;
         let on = on.clone();
         let whole = count.as_ref().map_or_else(|| name.clone(), |c| format!("{name} {c}"));
-        let mut item = row().role("radio").checked(selected).label(whole.clone()).focusable(true).key(whole).grid_cell(at).px(10.0).h(SEGMENT_H).gap(6.0).radius(CONTROL_RADIUS).center()
+        let mut item = row().role("radio").checked(selected).label(whole.clone()).focusable(true).key(whole).grid_cell(at).px(10.0).h(SEGMENT_H).gap(6.0).radius(SEGMENT_RADIUS).center()
             .hover(if selected { Color::TRANSPARENT } else { T.hover })
             .press(T.press)
             .press_scale(0.96)
@@ -172,7 +179,11 @@ fn segments<V: Copy + PartialEq + 'static>(key: &str, items: Vec<Segment<V>>, cu
             .on_press_tx(move |s: &mut App, tx| on(s, value, tx));
         if let Some(g) = glyph { item = item.child(icon(g, 14.0).color(if selected { T.text } else { T.muted })); }
         item = item.child(label(name, LABEL, if selected { T.text } else { T.muted }));
-        if let Some(c) = count { item = item.child(label(c, SMALL, if selected { T.muted } else { T.faint })); }
+        // Name to the left, count to the right edge, as the pack rows do. The slot is a fixed
+        // width, so a changing number can't move anything or unbalance the tab.
+        if let Some(c) = count {
+            item = item.child(el().grow(1.0)).child(row().w(COUNT_SLOT).justify_end().child(label(c, SMALL, if selected { T.muted } else { T.faint })));
+        }
         bar = bar.child(item);
     }
     bar
@@ -185,14 +196,9 @@ fn short_count(n: u32) -> String {
 
 /// Roughly how wide the kind tabs draw, to know what fits beside them.
 fn kind_tabs_width(s: &App) -> f32 {
-    let r = &s.results;
-    let tab = |name: &str, n: u32| {
-        let count = if s.is_compact() { 0.0 } else { 6.0 + short_count(n).len() as f32 * 7.0 };
-        20.0 + 20.0 + name.len() as f32 * 7.2 + count
-    };
-    // The tabs share equal columns, so the widest sets them all.
-    let widest = tab("All", r.any_kind).max(tab("Textures", r.by_kind[0])).max(tab("Models", r.by_kind[1])).max(tab("Audio", r.by_kind[2]));
-    6.0 + widest * 4.0
+    // The tabs share equal columns, and "Textures" with its count slot is always the widest.
+    let count = if s.is_compact() { 0.0 } else { 6.0 + COUNT_SLOT };
+    GROUP_PAD * 2.0 + (20.0 + 20.0 + 52.0 + count) * 4.0
 }
 
 fn kind_tabs(s: &App) -> El {
@@ -218,16 +224,18 @@ fn search_box(s: &App) -> El {
         .on_change(|s: &mut App, tx| s.refilter(tx));
     let empty = s.search.text.is_empty();
     if !empty { field = field.clear_button(); }
-    let mut bar = row().key("searchbar").w(if s.is_compact() { 190.0 } else { 280.0 }).h(34.0).pl(11.0).pr(6.0).gap(4.0).radius(CONTROL_RADIUS + 2.0).items_center().border(1.0, T.line).cursor(Cursor::Text)
+    let mut bar = row().key("searchbar").w(320.0).h(CONTROL_H).pl(11.0).pr(GROUP_PAD).gap(4.0).radius(GROUP_RADIUS).items_center().border(1.0, T.line).cursor(Cursor::Text)
         .child(icon(&SEARCH, 15.0).color(T.muted))
         .child(el().grow(1.0).min_w(0.0).child(field.build(kit()).key("search")));
     if empty {
-        bar = bar.child(el().px(7.0).h(22.0).radius(6.0).center_y().fill(T.raised).a11y_hidden().child(label("/", SMALL, T.muted)));
+        bar = bar.child(el().px(7.0).h(SEGMENT_H).radius(SEGMENT_RADIUS).center_y().fill(T.raised).a11y_hidden().child(label("/", SMALL, T.muted)));
     }
     bar
 }
 
-fn header(s: &App) -> El {
+/// The window's own title bar: a band that drags the window, holding the app's main controls.
+/// Rune draws the caption buttons over its trailing edge and keeps Windows' snap behaviour.
+fn titlebar(s: &App, cx: &mut Cx<App>) -> El {
     let scope = s.filter.pack.and_then(|p| s.lib.packs.get(p as usize)).map_or("All packs", |p| p.name.as_str());
     let sorts = vec![plain("Pack", Sort::Pack), plain("Name", Sort::Name), plain("Largest", Sort::Largest), plain("Newest", Sort::Newest)];
     let mut title = row().grow(1.0).min_w(0.0).gap(10.0).items_end()
@@ -239,29 +247,20 @@ fn header(s: &App) -> El {
         .hover(T.hover).press(T.press).press_scale(0.94).cursor(Cursor::Pointer)
         .on_press_tx(|s: &mut App, tx| s.toggle_sidebar(tx))
         .child(icon(&PANEL, 16.0).color(T.muted));
-    row().key("toolbar").w_full().h(58.0).pl(GRID_PAD - 7.0).pr(GRID_PAD).gap(8.0).items_center()
-        .child(toggle_panel)
-        .child(title.mr(4.0))
-        .child(if s.grid_width < 700.0 { sort_cycle(s) } else { segments("sort", sorts, s.filter.sort, |s, v, tx| s.set_sort(v, tx)) })
+    let mark = el().key("app-mark").size(26.0, 26.0).radius(CONTROL_RADIUS).center().fill(T.accent).a11y_hidden()
+        .child(icon(&GRID, 16.0).color(T.on_accent));
+    cx.caption_color(T.muted);
+    let insets = cx.chrome_insets();
+    row().key("titlebar").w_full().h(TITLEBAR_H).window_drag().pl(insets.leading + 11.0).pr(insets.trailing + 12.0).gap(8.0).items_center()
+        .child(mark)
+        .child(toggle_panel.ml(4.0))
+        .child(title.ml(2.0))
+        .child(segments("sort", sorts, s.filter.sort, |s, v, tx| s.set_sort(v, tx)))
         .child(search_box(s))
 }
 
-/// The sort control when there's no room for all four choices.
-fn sort_cycle(s: &App) -> El {
-    let (name, next) = match s.filter.sort {
-        Sort::Pack => ("Pack", Sort::Name),
-        Sort::Name => ("Name", Sort::Largest),
-        Sort::Largest => ("Largest", Sort::Newest),
-        Sort::Newest => ("Newest", Sort::Pack),
-    };
-    let title = format!("Sort: {name}");
-    row().key("sort-cycle").role("button").focusable(true).label(title.clone()).px(10.0).h(30.0).radius(CONTROL_RADIUS).items_center().border(1.0, T.line).hover(T.hover).cursor(Cursor::Pointer)
-        .on_press_tx(move |s: &mut App, tx| s.set_sort(next, tx))
-        .child(label(title, LABEL, T.muted))
-}
-
 fn chip(key: String, name: String, count: Option<String>, on: bool, f: impl Fn(&mut App, &mut Tx) + 'static) -> El {
-    let mut c = row().key(key.clone()).role("button").focusable(true).label(key).px(9.0).h(26.0).gap(5.0).radius(CONTROL_RADIUS).items_center()
+    let mut c = row().key(key.clone()).role("button").focusable(true).label(key).px(9.0).h(SEGMENT_H).gap(5.0).radius(SEGMENT_RADIUS).items_center()
         .fill(if on { T.raised } else { Color::TRANSPARENT })
         .hover(if on { Color::TRANSPARENT } else { T.hover })
         .press(T.press)
@@ -332,8 +331,8 @@ fn filter_bar(s: &App) -> El {
             });
         }).help("More formats"));
     }
-    let mut filters = row().key("filters").w_full().pb(12.0).px(GRID_PAD).gap(12.0).items_center().child(kind_tabs(s));
-    if !all.is_empty() { filters = filters.child(formats.radius(CONTROL_RADIUS + 2.0).border(1.0, T.line).padding(2.0)); }
+    let mut filters = row().key("filters").w_full().py(12.0).px(GRID_PAD).gap(12.0).items_center().child(kind_tabs(s));
+    if !all.is_empty() { filters = filters.child(formats.h(CONTROL_H).radius(GROUP_RADIUS).border(1.0, T.line).padding(GROUP_PAD)); }
     filters.child(el().grow(1.0))
         .child(toggle("Every format", s.filter.all_formats, |s, tx| s.toggle_all_formats(tx)).help("Show every copy of a model when a pack ships it as GLB, OBJ and DAE"))
 }
@@ -373,10 +372,7 @@ fn sidebar(s: &App) -> El {
     let mut panel = surface(el().key("sidebar").w(if open { SIDEBAR_W } else { 0.0 }).h_full().min_h(0.0)).opacity(if open { 1.0 } else { 0.0 }).clip_soft(0.0);
     if !open { panel = panel.inert(); }
     panel.child(col().w(SIDEBAR_W).h_full().min_h(0.0)
-        .child(col().w_full().h(58.0).px(18.0).justify_center()
-            .child(text("Library").key("library-title").font(TITLE).color(T.text))
-            .child(label(format!("{} files in {} packs", commas(s.lib.assets.len()), s.lib.packs.len()), SMALL, T.muted)))
-        .child(el().w_full().grow(1.0).min_h(0.0).child(scroller))
+        .child(el().w_full().grow(1.0).min_h(0.0).pt(PACK_LEFT).child(scroller))
         .child(hairline())
         .child(el().w_full().padding(8.0).child(
             row().key("change-root").role("button").focusable(true).label("Change library folder").w_full().h(32.0).px(10.0).gap(8.0).radius(CONTROL_RADIUS).items_center()
@@ -523,7 +519,8 @@ fn status_bar(s: &App) -> El {
     let (made, total) = s.thumbs.progress();
     let working = s.scanning || made < total;
     let mut bar = row().key("status").w_full().h(46.0).px(GRID_PAD).gap(12.0).items_center();
-    bar = if working || !s.is_compact() {
+    // The idle hint only shows when all of it fits; progress always shows.
+    bar = if working || s.grid_width >= 960.0 {
         bar.child(text("Making thumbnails: 00,000 of 00,000").live_text(&s.status).font(SMALL).color(T.muted).truncate_fade().grow(1.0).min_w(0.0))
     } else {
         bar.child(el().grow(1.0))
@@ -810,21 +807,23 @@ fn inspector_handle() -> El {
         .child(el().w(2.0).h(44.0).radius(1.0).fill(T.muted).group_opacity(0.0, 1.0))
 }
 
-pub fn view(s: &App, _: &mut Cx<App>) -> El {
+pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     let main = surface(col().key("main").grow(1.0).h_full().min_w(0.0).min_h(0.0))
-        .child(header(s))
         .child(filter_bar(s))
         .child(hairline())
         .child(grid(s))
         .child(hairline())
         .child(status_bar(s));
-    row().key("root").w_full().h_full().fill(T.bg).padding(WINDOW_GAP)
-        .on_layout(|s: &mut App, r: [f32; 4]| { s.window_width = r[2]; s.window_height = r[3]; })
+    let panels = row().key("panels").w_full().grow(1.0).min_h(0.0).px(WINDOW_GAP).pb(WINDOW_GAP)
         .child(sidebar(s))
         .child(el().key("sidebar-gap").w(if s.sidebar_open { WINDOW_GAP } else { 0.0 }).h_full())
         .child(main)
         .child(inspector_handle())
-        .child(inspector(s))
+        .child(inspector(s));
+    col().key("root").w_full().h_full().fill(T.bg)
+        .on_layout(|s: &mut App, r: [f32; 4]| { s.window_width = r[2]; s.window_height = r[3]; })
+        .child(titlebar(s, cx))
+        .child(panels)
 }
 
 pub fn on_key(s: &mut App, event: &rune::KeyEvent, tx: &mut Tx) -> bool {
