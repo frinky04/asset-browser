@@ -632,7 +632,13 @@ fn grid(s: &App) -> El {
     });
     if empty && !s.lib.assets.is_empty() {
         let (made, total) = s.thumbs.progress();
-        let message = if s.results.uses_facts && made < total {
+        let message = if s.only_described && s.filter.kind == Some(Kind::Audio) {
+            "Sounds can't be searched by how they look. Use words from their names."
+        } else if s.awaiting_description {
+            "Searching by description"
+        } else if s.only_described {
+            "Nothing looks like that yet. Try describing it differently."
+        } else if s.results.uses_facts && made < total {
             "Nothing matches yet. Sizes and lengths are still being read."
         } else {
             "Nothing matches. Remove a word or clear the filters."
@@ -918,7 +924,7 @@ fn inspector(s: &App) -> El {
     }
 
     let path = s.asset_path(id).map(|p| p.display().to_string()).unwrap_or_default();
-    body = body.child(row().w_full().gap(8.0)
+    body = body.child(row().w_full().gap(8.0).flex_wrap()
         .child(outlined("Show in Explorer", "Opened", s.is_confirmed("reveal"), &FOLDER, move |s, tx| {
             s.reveal(id);
             s.confirm("reveal", tx);
@@ -926,7 +932,8 @@ fn inspector(s: &App) -> El {
         .child(outlined("Copy path", "Copied", s.is_confirmed("copy"), &COPY, move |s, tx| {
             tx.copy(path.clone());
             s.confirm("copy", tx);
-        })));
+        }))
+        .children(s.can_find_similar(asset.key).then(|| outlined("Find similar", "Find similar", false, &SEARCH, move |s, tx| s.find_similar(id, tx)))));
     shell.child(body)
 }
 

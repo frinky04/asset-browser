@@ -40,9 +40,10 @@ const SEARCH_MODEL_IDLE: Duration = Duration::from_secs(120);
 /// Lets a word finish being typed before the model is asked about it.
 const SEARCH_SETTLE: Duration = Duration::from_millis(150);
 const QUERY_THREADS: usize = 4;
-const MOST_HITS: usize = 4000;
-/// Below this, even the best match for a search is a guess.
-const LEAST_SCORE: f32 = 0.65;
+/// Enough that filters can narrow the answer without running out of it.
+const MOST_HITS: usize = 20_000;
+/// Worth handing back at all. How much of it is shown depends on the kind of search.
+const LEAST_SCORE: f32 = 0.5;
 
 const VIEW_SIZE: u32 = 256;
 /// Tilt and turn of each tile of a model's contact sheet, three across and two down.
@@ -330,6 +331,24 @@ impl Smart {
     pub fn take_answer(&self) -> Option<(String, Vec<Hit>)> {
         self.shared.lock().answer.take()
     }
+
+    fn vectors_in_use(&self) -> bool {
+        let g = self.shared.lock();
+        g.enabled && g.is_ready()
+    }
+
+    /// Whether this file has been looked at, so others can be compared with it.
+    pub fn can_find_similar(&self, key: u64) -> bool {
+        self.vectors_in_use() && self.shared.vectors.read().unwrap_or_else(std::sync::PoisonError::into_inner).get(key).is_some()
+    }
+
+    /// What looks most like this file, itself first. Only compares stored vectors, so the model
+    /// doesn't run and the answer is immediate.
+    pub fn similar(&self, key: u64) -> Option<Vec<Hit>> {
+        if !self.vectors_in_use() { return None }
+        let vectors = self.shared.vectors.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        Some(vectors.nearest(vectors.get(key)?, f32::MIN_POSITIVE, MOST_HITS))
+    }
 }
 
 /// One picture per thing worth searching for: no data maps, no other format of the same model, no
@@ -530,7 +549,11 @@ fn search_loop(shared: &Shared) {
                 Ok(e) => engine = Some(e),
                 Err(e) => {
                     eprintln!("search model unavailable: {e}");
-                    shared.lock().answered_turn = turn;
+                    let mut g = shared.lock();
+                    g.answered_turn = turn;
+                    g.answer = Some((text, Vec::new()));
+                    drop(g);
+                    shared.notify_app();
                     continue;
                 }
             }
@@ -542,7 +565,11 @@ fn search_loop(shared: &Shared) {
         match hits {
             Ok(hits) if g.asked.as_ref().is_some_and(|(t, _)| *t == turn) => g.answer = Some((text, hits)),
             Ok(_) => {}
-            Err(e) => eprintln!("search failed: {e}"),
+            Err(e) => {
+                eprintln!("search failed: {e}");
+                // Whoever is waiting needs to hear there's nothing coming.
+                g.answer = Some((text, Vec::new()));
+            }
         }
         drop(g);
         shared.notify_app();
@@ -670,6 +697,15 @@ mod tests {
         assert_eq!(asked, query);
         assert!(!hits.is_empty(), "something in the folder matches");
         for h in hits.iter().take(5) {
+            println!("{:.3} {}", h.score, library.assets.iter().find(|a| a.key == h.key).map_or("?", |a| a.rel.as_str()));
+        }
+        let first = library.assets.iter().find(|a| smart.can_find_similar(a.key)).expect("something was indexed");
+        let started = Instant::now();
+        let alike = smart.similar(first.key).expect("it has a vector");
+        println!("similar to {}: {:?}", first.rel, started.elapsed());
+        assert_eq!(alike[0].key, first.key, "a file is most like itself");
+        assert!(alike.len() > 1);
+        for h in alike.iter().take(5) {
             println!("{:.3} {}", h.score, library.assets.iter().find(|a| a.key == h.key).map_or("?", |a| a.rel.as_str()));
         }
         drop(again);

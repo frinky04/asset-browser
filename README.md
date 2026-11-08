@@ -46,6 +46,8 @@ Pixels, triangles and length come from thumbnailing, so those filters fill in as
 
 These results come after files whose names matched, and `pack:`, `is:` and `-word` still apply to them. Quoted searches stay literal. Sounds are found by name only.
 
+Start a search with `~` to ignore names and rank only by how things look, as in `~old hospital tiles pack:mega`. **Find similar** in the inspector shows what looks most like the selected texture or model, written into the search box as `similar:"path"`.
+
 Each file is looked at once. **Gentle** does that with up to four CPU threads. **Faster** uses the graphics card in short bursts, resting twice as long as it works. **Maximum** runs the graphics card with no rests, or every CPU thread if the card can't run it. All of them stop on battery, and the status bar says when it's happening. **Remove** deletes the model and the index.
 
 The list under the search box completes these: arrows pick a row, Tab or Enter takes it.

@@ -56,6 +56,13 @@ impl Vectors {
         self.slots.contains_key(&key)
     }
 
+    /// What `key` was embedded to, if it could be read at all.
+    pub fn get(&self, key: u64) -> Option<&[f32]> {
+        let slot = *self.slots.get(&key)?;
+        let values = &self.values[slot * DIMENSIONS..(slot + 1) * DIMENSIONS];
+        values.iter().any(|v| *v != 0.0).then_some(values)
+    }
+
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.keys.len()
@@ -163,6 +170,7 @@ mod tests {
         let mut v = Vectors::open(&path);
         v.insert(1, &vec![0.0; DIMENSIONS]);
         assert!(v.contains(1), "it isn't tried again");
+        assert!(v.get(1).is_none(), "and there's nothing to compare others with");
         assert!(v.nearest(&unit(0), 0.1, 10).is_empty());
         let _ = fs::remove_file(path);
     }

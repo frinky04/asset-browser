@@ -236,6 +236,10 @@ pub struct App {
     pub smart_status: Status,
     /// The last description the model answered, and what matched it.
     described: Option<(String, Vec<Hit>)>,
+    /// The search is `~` or `similar:`, and the model is here to answer it.
+    pub only_described: bool,
+    /// A `~` search the model hasn't answered yet.
+    pub awaiting_description: bool,
     pub audio: Audio,
     pub scanning: bool,
     pub selected: Option<u32>,
@@ -356,6 +360,8 @@ pub fn init_with(prefs: Prefs) -> App {
         index_effort,
         smart_status,
         described: None,
+        only_described: false,
+        awaiting_description: false,
         audio,
         scanning: true,
         selected: None,
@@ -616,7 +622,10 @@ impl App {
             self.measured_at = Instant::now();
             self.refilter_keeping_scroll();
         }
-        let text = if total == 0 {
+        let indexed = (self.smart_status.indexed, self.smart_status.total);
+        let text = if self.only_described && indexed.0 < indexed.1 {
+            format!("Searching the {} of {} textures and models indexed so far", commas(indexed.0), commas(indexed.1))
+        } else if total == 0 {
             if self.scanning { "Reading library".to_owned() } else { "No supported files in this folder".to_owned() }
         } else if made < total {
             format!("Making thumbnails: {} of {}", commas(made), commas(total))
@@ -725,7 +734,30 @@ impl App {
     /// What the list under the search box offers right now.
     pub fn suggestions(&self) -> Vec<Suggestion> {
         if !self.search.focused || self.search.focus != self.search.text.len() { return Vec::new() }
-        crate::query::suggestions(&self.search.text, &self.lib)
+        let mut rows = crate::query::suggestions(&self.search.text, &self.lib);
+        if self.search.text.trim().is_empty() && self.can_describe() {
+            rows.insert(0, Suggestion { insert: "~".to_owned(), hint: "Only by how things look" });
+        }
+        rows
+    }
+
+    /// Whether the model is here and switched on.
+    pub fn can_describe(&self) -> bool {
+        self.smart_on && self.smart_status.install == Install::Ready
+    }
+
+    /// Whether others can be compared with this file.
+    pub fn can_find_similar(&self, key: u64) -> bool {
+        self.can_describe() && self.smart.can_find_similar(key)
+    }
+
+    /// Searches for what looks like this file, across every pack.
+    pub fn find_similar(&mut self, id: u32, tx: &mut Tx) {
+        let Some(rel) = self.lib.assets.get(id as usize).map(|a| a.rel.clone()) else { return };
+        self.search = TextEdit::new(&format!("similar:\"{rel}\""));
+        self.filter.pack = None;
+        self.filter.ext = None;
+        self.refilter(tx);
     }
 
     /// Puts a row of that list into the search box.
@@ -842,9 +874,20 @@ impl App {
 
     fn refilter_keeping_scroll(&mut self) {
         self.filter.text = self.search.text.clone();
-        let description = if self.smart_on { library::description_in(&self.filter.text) } else { None };
+        let able = self.can_describe();
+        let looking = if able { library::looking_for(&self.filter.text) } else { library::Looking::default() };
+        let alike = looking.similar_to.as_ref().and_then(|rel| {
+            let key = self.lib.assets.iter().find(|a| a.rel == *rel)?.key;
+            self.smart.similar(key)
+        });
+        let description = if looking.similar_to.is_some() { None } else { looking.description };
         self.smart.search(description.clone());
-        let hits = self.described.as_ref().filter(|(asked, _)| Some(asked) == description.as_ref()).map_or(&[][..], |(_, hits)| hits.as_slice());
+        let answered = self.described.as_ref().is_some_and(|(asked, _)| Some(asked) == description.as_ref());
+        self.only_described = looking.only;
+        self.awaiting_description = looking.only && description.is_some() && !answered;
+        // Between one `~` answer and the next, the last one stays up rather than blanking the grid.
+        let latest = self.described.as_ref().filter(|_| answered || self.awaiting_description).map_or(&[][..], |(_, hits)| hits.as_slice());
+        let hits = able.then_some(alike.as_deref().unwrap_or(latest));
         let thumbs = &self.thumbs;
         self.results = library::search_described(&self.lib, &self.filter, &|key| thumbs.facts(key), hits);
         self.generation += 1;
