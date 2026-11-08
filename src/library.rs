@@ -68,6 +68,11 @@ impl Asset {
         &self.rel[self.name_at as usize..]
     }
 
+    /// The file name without its extension.
+    pub fn stem(&self) -> &str {
+        self.name().rsplit_once('.').map_or(self.name(), |(stem, _)| stem)
+    }
+
     pub fn folder(&self) -> &str {
         self.rel[..self.name_at as usize].trim_end_matches('/')
     }

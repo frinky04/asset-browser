@@ -81,7 +81,8 @@ pub fn render_thumb(model: &Model, size: u32) -> Vec<u8> {
                         persp(vs[0].normal[2], vs[1].normal[2], vs[2].normal[2]),
                     );
                     let n = view.transform_vector3(n).normalize_or_zero();
-                    let lit = 0.42 + 0.78 * n.dot(light).abs();
+                    // Brighter fill than the preview: a thumbnail has to read at a glance.
+                    let lit = 0.82 + 0.72 * n.dot(light).abs();
                     depth[slot] = z;
                     color[slot] = [albedo[0] * lit, albedo[1] * lit, albedo[2] * lit, 1.0];
                 }

@@ -56,7 +56,7 @@ fn click(rt: &mut Runtime<App>, key: &str) {
 
 fn wait_for_preview(rt: &mut Runtime<App>) {
     let start = Instant::now();
-    while matches!(rt.state.preview, Preview::Loading) && start.elapsed() < Duration::from_secs(10) {
+    while !rt.state.preview_landed() && start.elapsed() < Duration::from_secs(10) {
         rt.update(|s, tx| { s.poll(tx); });
         rt.frame(1.0 / 60.0);
         std::thread::sleep(Duration::from_millis(2));
@@ -139,6 +139,28 @@ fn browsing_previewing_and_dragging_out_end_to_end() {
     assert!((rt.state.stage.view.offset[0] - 40.0).abs() < 0.5, "{:?}", rt.state.stage.view.offset);
     assert_eq!(rt.stats.commits, commits, "panning doesn't rebuild the view");
     click(&mut rt, "Tile");
+
+    // The handle beside the inspector resizes it, within bounds, and the grid follows.
+    let before = (rt.state.inspector_width(), rt.state.grid_width);
+    let (x, y) = rt.find("inspector-handle").unwrap();
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    settle(&mut rt);
+    rt.pointer_move(x - 120.0, y);
+    settle(&mut rt);
+    rt.pointer_up(x - 120.0, y);
+    settle(&mut rt);
+    assert_eq!(rt.state.inspector_width(), before.0 + 120.0);
+    assert!((rt.state.grid_width - (before.1 - 120.0)).abs() < 1.0, "{} from {}", rt.state.grid_width, before.1);
+    let (x, y) = rt.find("inspector-handle").unwrap();
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    settle(&mut rt);
+    rt.pointer_move(x + 1000.0, y);
+    settle(&mut rt);
+    rt.pointer_up(x + 1000.0, y);
+    settle(&mut rt);
+    assert_eq!(rt.state.inspector_width(), 300.0, "stops at the minimum");
 
     // A model opens in the stage, and dragging orbits while Shift-free.
     click(&mut rt, "All 13");

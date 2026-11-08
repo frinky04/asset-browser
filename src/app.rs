@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
+use rune::prefs::Prefs;
 use rune::{Latest, Live, LiveText, Pixels, TextEdit, Tx, Waker};
 
 use crate::audio::Audio;
@@ -14,7 +15,7 @@ use crate::model::{self, Image, Model};
 use crate::native_drag::{self, Ended};
 use crate::stage::{Scene, StageState, View};
 use crate::thumbs::{Thumbs, WAVE_COLOR};
-use crate::wave;
+use crate::{ui, wave};
 
 const DEFAULT_ROOT: &str = r"C:\Users\cuddl\Documents\Dev\Games\Assets";
 pub const WAVE_W: u32 = 960;
@@ -24,6 +25,13 @@ pub const WAVE_H: u32 = 480;
 const LOOKAHEAD_ROWS: usize = 12;
 /// What's fetched before the grid has reported its visible rows.
 const FIRST_SCREEN_ROWS: usize = 8;
+
+pub const INSPECTOR_DEFAULT: f32 = 372.0;
+const INSPECTOR_MIN: f32 = 300.0;
+const INSPECTOR_MAX: f32 = 900.0;
+/// The grid keeps at least this much when the inspector grows.
+const MAIN_MIN_WIDTH: f32 = 600.0;
+const INSPECTOR_PREF: &str = "inspector_width";
 
 pub enum Preview {
     None,
@@ -53,6 +61,7 @@ pub struct App {
     pub scanning: bool,
     pub selected: Option<u32>,
     pub preview: Preview,
+    awaiting_preview: bool,
     loading: Latest<Loaded>,
     pub stage: StageState,
     /// The stage's size in points.
@@ -64,6 +73,10 @@ pub struct App {
     pub clock: LiveText,
     pub autoplay: bool,
     pub grid_width: f32,
+    pub window_width: f32,
+    pub window_height: f32,
+    inspector_w: f32,
+    prefs: Prefs,
     pub columns: usize,
     pub tile_size: f32,
     /// The largest side textures are dragged out of the grid at.
@@ -104,6 +117,8 @@ fn configured_root() -> PathBuf {
 }
 
 pub fn init() -> App {
+    let prefs = Prefs::open("asset-browser-v2");
+    let inspector_w = prefs.get(INSPECTOR_PREF).unwrap_or(INSPECTOR_DEFAULT);
     App {
         lib: Arc::new(Library::default()),
         results: Results::default(),
@@ -115,6 +130,7 @@ pub fn init() -> App {
         scanning: true,
         selected: None,
         preview: Preview::None,
+        awaiting_preview: false,
         loading: Latest::default(),
         stage: StageState::default(),
         stage_size: [320.0, 320.0],
@@ -125,8 +141,12 @@ pub fn init() -> App {
         clock: LiveText::new("0:00.0"),
         autoplay: true,
         grid_width: 900.0,
+        window_width: 1520.0,
+        window_height: 900.0,
+        inspector_w,
+        prefs,
         columns: 5,
-        tile_size: 168.0,
+        tile_size: 158.0,
         drag_max: None,
         nearest: false,
         companions: true,
@@ -218,6 +238,10 @@ impl App {
                 if name != "texture" { self.set_tile(true); }
                 self.stage.view.seams = name == "tile-seams";
             }
+            "big-texture" => {
+                self.set_kind(Some(Kind::Texture), tx);
+                if let Some(id) = first(self, Kind::Texture, "1024x1024") { self.select(id, tx); }
+            }
             "model" => {
                 self.set_kind(Some(Kind::Model), tx);
                 if let Some(id) = first(self, Kind::Model, "barrel").or_else(|| first(self, Kind::Model, "")) {
@@ -289,7 +313,7 @@ impl App {
         } else if self.scanning {
             "Checking for changes".to_owned()
         } else {
-            format!("{} files in {} packs", commas(total), self.lib.packs.len())
+            "Drag assets out to copy them. Your library stays untouched.".to_owned()
         };
         self.status.set(text);
         if self.scanning || made < total { tx.wake_after(Duration::from_millis(400)); }
@@ -361,7 +385,7 @@ impl App {
     }
 
     fn columns_for(&self, width: f32) -> usize {
-        ((width - GRID_PAD * 2.0 + GRID_GAP) / (self.tile_size + GRID_GAP)).floor().max(1.0) as usize
+        ((width - GRID_INSET * 2.0 + GRID_GAP) / (self.tile_size + GRID_GAP)).floor().max(1.0) as usize
     }
 
     pub fn set_tile_size(&mut self, size: f32) {
@@ -376,7 +400,7 @@ impl App {
 
     pub fn tile_width(&self) -> f32 {
         let cols = self.columns.max(1) as f32;
-        ((self.grid_width - GRID_PAD * 2.0 - GRID_GAP * (cols - 1.0)) / cols).floor()
+        ((self.grid_width - GRID_INSET * 2.0 - GRID_GAP * (cols - 1.0)) / cols).floor()
     }
 
     /// Fetches what's on screen first, then outward.
@@ -402,14 +426,11 @@ impl App {
         let Some(asset) = self.lib.assets.get(id as usize).cloned() else { return };
         let path = self.lib.path(&asset);
         self.message = None;
-        self.preview = Preview::Loading;
+        // The last preview stays up until this one lands, so stepping through assets doesn't
+        // blank the panel between each.
+        if matches!(self.preview, Preview::None) { self.preview = Preview::Loading; }
+        self.awaiting_preview = true;
         self.audio.stop();
-        self.stage.scene = Scene::Empty;
-        self.stage.revision += 1;
-        let keep = self.stage.view;
-        self.stage.view = View { tile: keep.tile, seams: keep.seams, smooth: keep.smooth, zoom: if keep.tile { 0.34 } else { 1.0 }, ..View::default() };
-        self.stage.snap += 1;
-        self.playhead.set([0.0, 0.0]);
         self.loading.request((path.clone(), asset.kind), move |(p, kind)| load_preview(&p, kind));
         if asset.kind == Kind::Audio && self.autoplay && !headless() { self.audio.play(path); }
         tx.wake_after(Duration::from_millis(1));
@@ -417,12 +438,22 @@ impl App {
 
     fn finish_preview_blocking(&mut self) {
         let start = std::time::Instant::now();
-        while matches!(self.preview, Preview::Loading) && self.loading.is_pending() && start.elapsed() < Duration::from_secs(20) {
+        while self.awaiting_preview && self.loading.is_pending() && start.elapsed() < Duration::from_secs(20) {
             std::thread::sleep(Duration::from_millis(2));
         }
     }
 
+    /// Whether the selected asset's preview has arrived.
+    #[cfg(test)]
+    pub fn preview_landed(&self) -> bool {
+        !self.awaiting_preview
+    }
+
     fn land_preview(&mut self, loaded: Loaded) {
+        self.awaiting_preview = false;
+        let keep = self.stage.view;
+        self.stage.view = View { tile: keep.tile, seams: keep.seams, smooth: keep.smooth, zoom: if keep.tile { 0.34 } else { 1.0 }, ..View::default() };
+        self.playhead.set([0.0, 0.0]);
         self.preview = match loaded {
             Loaded::Texture(img) => {
                 self.stage.scene = Scene::Texture(img.clone());
@@ -441,6 +472,20 @@ impl App {
             Loaded::Failed(reason) => Preview::Failed(reason),
         };
         self.stage.snap += 1;
+    }
+
+    /// The inspector's width after the window has had its say.
+    pub fn inspector_width(&self) -> f32 {
+        let room = self.window_width - ui::SIDEBAR_W - ui::WINDOW_GAP * 4.0 - MAIN_MIN_WIDTH;
+        self.inspector_w.min(room).max(INSPECTOR_MIN)
+    }
+
+    pub fn resize_inspector(&mut self, width: f32) {
+        self.inspector_w = width.round().clamp(INSPECTOR_MIN, INSPECTOR_MAX);
+    }
+
+    pub fn save_inspector_width(&mut self) {
+        if !headless() { let _ = self.prefs.set(INSPECTOR_PREF, &self.inspector_w); }
     }
 
     pub fn set_tile(&mut self, on: bool) {
@@ -559,8 +604,11 @@ impl App {
     }
 }
 
-pub const GRID_PAD: f32 = 18.0;
-pub const GRID_GAP: f32 = 12.0;
+pub const GRID_PAD: f32 = 16.0;
+pub const TILE_PAD: f32 = 4.0;
+/// Tiles carry their own padding, so the grid sits this far in for pictures to meet `GRID_PAD`.
+pub const GRID_INSET: f32 = GRID_PAD - TILE_PAD;
+pub const GRID_GAP: f32 = 4.0;
 
 #[cfg(windows)]
 fn reveal_in_explorer(path: &Path) {

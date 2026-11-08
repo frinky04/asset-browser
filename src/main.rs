@@ -34,8 +34,8 @@ fn main() {
         setup: Some(app::setup),
         poll: Some(|s, _, tx| s.poll(tx)),
         on_key: Some(ui::on_key),
-        min_size: Some((960.0, 560.0)),
-        scenes: scenes!["textures", "models", "audio", "search", "small", "texture", "tile", "tile-seams", "model", "sound"],
+        min_size: Some((1180.0, 600.0)),
+        scenes: scenes!["textures", "models", "audio", "search", "small", "texture", "tile", "tile-seams", "big-texture", "model", "sound"],
         ..AppSpec::new("Asset Browser", (1520.0, 900.0), app::init, ui::view)
     };
     App::new(spec)

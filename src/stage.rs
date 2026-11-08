@@ -17,8 +17,10 @@ use crate::raster::LIGHT;
 pub const STAGE_MARK: u32 = 1;
 pub const STAGE_KEY: &str = "stage";
 /// The stage's backdrop, sRGB-encoded: the same colour as the UI's wells.
-const BACKDROP: [f32; 3] = [0.110, 0.110, 0.122];
+const BACKDROP: [f32; 3] = [0.106, 0.106, 0.106];
 pub const FOV_DEGREES: f32 = 38.0;
+/// The stage's corner radius in points, matching the wells around it.
+const CORNER_RADIUS: f32 = 8.0;
 
 #[derive(Clone)]
 pub enum Scene {
@@ -112,12 +114,21 @@ const SAMPLES: u32 = 4;
 const BLIT_WGSL: &str = r#"
 @group(0) @binding(0) var image: texture_2d<f32>;
 @group(0) @binding(1) var nearest: sampler;
+struct Shape { size: vec2f, radius: f32, pad: f32 }
+@group(0) @binding(2) var<uniform> shape: Shape;
 struct V { @builtin(position) p: vec4f, @location(0) uv: vec2f }
 @vertex fn vs(@builtin(vertex_index) i: u32) -> V {
     let uv = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
     return V(vec4f(uv * vec2f(2.0, -2.0) + vec2f(-1.0, 1.0), 0.0, 1.0), uv);
 }
-@fragment fn fs(v: V) -> @location(0) vec4f { return textureSample(image, nearest, v.uv); }
+@fragment fn fs(v: V) -> @location(0) vec4f {
+    let half = shape.size * 0.5;
+    let q = abs(v.uv * shape.size - half) - half + vec2f(shape.radius);
+    let d = length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0) - shape.radius;
+    let cover = clamp(0.5 - d, 0.0, 1.0);
+    let c = textureSample(image, nearest, v.uv);
+    return vec4f(c.rgb * cover, cover);
+}
 "#;
 
 const TEXTURE_WGSL: &str = r#"
@@ -160,7 +171,7 @@ struct V { @builtin(position) p: vec4f, @location(0) n: vec3f, @location(1) uv: 
 @fragment fn fs(v: V) -> @location(0) vec4f {
     let albedo = textureSample(image, smp, v.uv) * tint;
     if (albedo.a < 0.5) { discard; }
-    let lit = 0.42 + 0.78 * abs(dot(normalize(v.n), g.light.xyz));
+    let lit = 0.64 + 0.74 * abs(dot(normalize(v.n), g.light.xyz));
     return vec4f(albedo.rgb * lit, 1.0);
 }
 "#;
@@ -241,6 +252,7 @@ struct Pipes {
     blit_layout: wgpu::BindGroupLayout,
     blit_pipeline_layout: wgpu::PipelineLayout,
     blit_module: wgpu::ShaderModule,
+    blit_shape: wgpu::Buffer,
     blits: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
     texture_layout: wgpu::BindGroupLayout,
     texture_pipe: wgpu::RenderPipeline,
@@ -289,7 +301,8 @@ impl Pipes {
         let bgl = |entries: &[wgpu::BindGroupLayoutEntry]| device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries });
         let frag_vert = wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT;
 
-        let blit_layout = bgl(&[tex_entry(0), sampler_entry(1)]);
+        let blit_layout = bgl(&[tex_entry(0), sampler_entry(1), uniform_entry(2, wgpu::ShaderStages::FRAGMENT)]);
+        let blit_shape = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 16, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let blit_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&blit_layout)], immediate_size: 0 });
         let blit_module = module("blit", BLIT_WGSL);
 
@@ -342,6 +355,7 @@ impl Pipes {
             blit_layout,
             blit_pipeline_layout,
             blit_module,
+            blit_shape,
             blits: HashMap::new(),
             texture_layout,
             texture_pipe,
@@ -366,7 +380,12 @@ impl Pipes {
             primitive: Default::default(),
             depth_stencil: None,
             multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState { module, entry_point: Some("fs"), compilation_options: Default::default(), targets: &[Some(format.into())] }),
+            fragment: Some(wgpu::FragmentState {
+                module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState { format, blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })],
+            }),
             multiview_mask: None,
             cache: None,
         }))
@@ -400,6 +419,7 @@ impl Target {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&pipes.nearest) },
+                wgpu::BindGroupEntry { binding: 2, resource: pipes.blit_shape.as_entire_binding() },
             ],
         });
         Target {
@@ -513,6 +533,7 @@ impl Compositor<App> for StageCompositor {
                 if self.target.as_ref().is_none_or(|t| t.size != size) {
                     self.target = Some(Target::new(f.device, pipes, size));
                 }
+                f.queue.write_buffer(&pipes.blit_shape, 0, bytemuck::cast_slice(&[size.0 as f32, size.1 as f32, CORNER_RADIUS * scale, 0.0]));
                 if let Some(target) = &self.target { draw_scene(f.queue, f.encoder, pipes, target, scene, &view, [r[2], r[3]], scale); }
                 Some([r[0] * scale, r[1] * scale, size.0 as f32, size.1 as f32])
             }
