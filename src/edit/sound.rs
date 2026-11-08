@@ -481,27 +481,11 @@ pub fn draw_timeline_at(pcm: &Pcm, index: &PeakIndex, start: u64, end: u64, widt
         Some((row_for(mix(a.1, b.1, between)), row_for(mix(a.0, b.0, between))))
     }).collect();
 
-    // Each column borrows part of its neighbours' reach, giving a stroke some body, and is never
-    // thinner than a hairline, so quiet parts still read as a line.
-    let least = TIMELINE_MIN_THICKNESS * scale;
-    let edges: Vec<Option<(f32, f32)>> = (0..w).map(|x| {
-        let (mut top, mut bottom) = spans[x]?;
-        let (own_top, own_bottom) = (top, bottom);
-        for neighbour in [x.checked_sub(1), Some(x + 1)].into_iter().flatten().filter_map(|n| spans.get(n).copied().flatten()) {
-            top = top.min(mix(own_top, neighbour.0, TIMELINE_STROKE_SPREAD));
-            bottom = bottom.max(mix(own_bottom, neighbour.1, TIMELINE_STROKE_SPREAD));
-        }
-        let short = (least - (bottom - top)).max(0.0) * 0.5;
-        Some((top - short, bottom + short))
-    }).collect();
-    crate::wave::paint_envelope(&edges, width, height, color)
+    crate::wave::paint_envelope(&crate::wave::stroked(&spans, scale), width, height, color)
 }
 
 /// Below this many frames to a column there's no envelope to draw: just the samples.
 const LINE_BELOW_FRAMES_PER_COLUMN: f64 = 1.0;
-const TIMELINE_MIN_THICKNESS: f32 = 1.6;
-/// How much of a neighbouring column's extent each column takes on.
-const TIMELINE_STROKE_SPREAD: f32 = 0.65;
 const SAMPLE_LINE_HALF: f32 = 0.9;
 
 /// Deep zoom: one smooth line through the samples themselves, channels averaged.

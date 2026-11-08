@@ -674,7 +674,7 @@ impl App {
         let size = self.wave_size();
         if size == self.wave_drawn { return }
         self.wave_drawn = size;
-        let rgba = wave::draw(&self.wave_peaks, size.0, size.1, self.wave_color());
+        let rgba = wave::draw_stroked(&self.wave_peaks, size.0, size.1, self.wave_color(), self.scale);
         self.wave.set(size.0, size.1, rgba);
         self.redraw_timeline();
     }

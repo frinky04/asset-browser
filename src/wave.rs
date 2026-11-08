@@ -155,6 +155,44 @@ pub fn draw(values: &[f32], width: u32, height: u32, color: [u8; 3]) -> Vec<u8> 
     paint_envelope(&edges, width, height, color)
 }
 
+/// [`draw`] for a picture shown at its own pixel size on a screen with `scale` pixels to the
+/// point, at the same stroke weight as a zoomed timeline.
+pub fn draw_stroked(values: &[f32], width: u32, height: u32, color: [u8; 3], scale: f32) -> Vec<u8> {
+    let w = width as usize;
+    let loudest = values.iter().copied().fold(0.0, f32::max).max(1e-4);
+    let mid = height as f32 * 0.5;
+    let spans: Vec<Option<(f32, f32)>> = (0..w).map(|x| {
+        let from = x * values.len() / w;
+        let to = ((x + 1) * values.len() / w).max(from + 1).min(values.len());
+        let v = values[from..to].iter().copied().fold(0.0, f32::max) / loudest;
+        let extent = v.powf(0.7) * (mid - 1.0);
+        Some((mid - extent, mid + extent))
+    }).collect();
+    paint_envelope(&stroked(&spans, scale), width, height, color)
+}
+
+/// How much of a neighbouring column's extent each column takes on.
+const STROKE_SPREAD: f32 = 0.65;
+/// The thinnest a waveform is drawn, in points.
+const MIN_THICKNESS: f32 = 1.6;
+
+/// Gives per-column spans the weight of a stroke: each borrows part of its neighbours' reach,
+/// and none is thinner than a hairline, so quiet parts still read as a line.
+pub fn stroked(spans: &[Option<(f32, f32)>], scale: f32) -> Vec<Option<(f32, f32)>> {
+    let mix = |a: f32, b: f32, t: f32| a + (b - a) * t;
+    let least = MIN_THICKNESS * scale;
+    (0..spans.len()).map(|x| {
+        let (own_top, own_bottom) = spans[x]?;
+        let (mut top, mut bottom) = (own_top, own_bottom);
+        for neighbour in [x.checked_sub(1), Some(x + 1)].into_iter().flatten().filter_map(|n| spans.get(n).copied().flatten()) {
+            top = top.min(mix(own_top, neighbour.0, STROKE_SPREAD));
+            bottom = bottom.max(mix(own_bottom, neighbour.1, STROKE_SPREAD));
+        }
+        let short = (least - (bottom - top)).max(0.0) * 0.5;
+        Some((top - short, bottom + short))
+    }).collect()
+}
+
 /// Fills between a top and bottom edge per column, in straight-alpha RGBA. Each edge runs
 /// smoothly from column to column and every pixel is weighted by how much of it is inside, so
 /// the outline has no steps. A column with nothing in it is `None`.
@@ -242,6 +280,25 @@ mod tests {
         assert_eq!(px[(2 * 3) * 4 + 3], 127, "half of this pixel is inside");
         assert_eq!(px[(5 * 3) * 4 + 3], 255, "the middle is solid");
         assert!(px[1 * 4 + 3..2 * 4].is_empty() || (0..10).all(|y| px[(y * 3 + 1) * 4 + 3] == 0), "nothing in the empty column");
+    }
+
+    #[test]
+    fn a_stroked_waveform_keeps_its_weight_on_quiet_parts_and_scales_with_the_screen() {
+        let weight = |scale: f32| {
+            let px = draw_stroked(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 80, 41, [9, 9, 9], scale);
+            (0..41).map(|y| u32::from(px[(y * 80 + 60) * 4 + 3])).sum::<u32>()
+        };
+        assert!(weight(1.0) >= 380, "about a point and a half thick: {}", weight(1.0));
+        assert!(weight(2.0) > weight(1.0) * 3 / 2, "{} {}", weight(2.0), weight(1.0));
+    }
+
+    #[test]
+    fn stroking_widens_a_spike_into_its_neighbours() {
+        let spans = [Some((5.0, 5.0)), Some((0.0, 10.0)), Some((5.0, 5.0))];
+        let out = stroked(&spans, 1.0);
+        let (top, bottom) = out[0].unwrap();
+        assert!(top < 3.0 && bottom > 7.0, "{top} {bottom}");
+        assert_eq!(out[1], Some((0.0, 10.0)), "the spike itself keeps its height");
     }
 
     #[test]
