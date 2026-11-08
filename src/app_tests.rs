@@ -98,6 +98,18 @@ fn click(rt: &mut Runtime<App>, key: &str) {
     settle(rt);
 }
 
+/// Lets the handlers run, then waits for a drag's files, which are prepared off the UI thread.
+fn pump_drag(rt: &mut Runtime<App>) {
+    settle(rt);
+    let start = Instant::now();
+    while rt.state.drag_waiting() && start.elapsed() < Duration::from_secs(10) {
+        rt.update(|s, tx| { s.poll(tx); });
+        rt.frame(1.0 / 60.0);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    settle(rt);
+}
+
 fn wait_for_preview(rt: &mut Runtime<App>) {
     let start = Instant::now();
     while !rt.state.preview_landed() && start.elapsed() < Duration::from_secs(10) {
@@ -164,7 +176,7 @@ fn browsing_previewing_and_dragging_out_end_to_end() {
     rt.pointer_move(x, y);
     rt.pointer_down(x, y);
     rt.pointer_move(x + 30.0, y + 10.0);
-    settle(&mut rt);
+    pump_drag(&mut rt);
     rt.pointer_up(x + 30.0, y + 10.0);
     settle(&mut rt);
     let staged = rt.state.last_staged.clone();
@@ -182,7 +194,7 @@ fn browsing_previewing_and_dragging_out_end_to_end() {
     rt.pointer_move(x, y);
     rt.pointer_down(x, y);
     rt.pointer_move(x - 40.0, y);
-    settle(&mut rt);
+    pump_drag(&mut rt);
     rt.pointer_up(x - 40.0, y);
     settle(&mut rt);
     assert_eq!(rt.state.last_staged[0].file_name().unwrap(), "brick_1_512.png");

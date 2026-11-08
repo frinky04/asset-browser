@@ -4,7 +4,7 @@ use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
 use rune::prefs::Prefs;
@@ -53,6 +53,25 @@ enum Loaded {
     Model(Arc<Model>),
     Audio { rgba: Vec<u8>, seconds: f32, rate: u32, channels: u16 },
     Failed(String),
+}
+
+/// Pressing an asset this size or smaller starts copying it at once. Bigger ones wait until
+/// the pointer actually moves, so clicking through long recordings doesn't copy them all.
+const EAGER_STAGE_BYTES: u64 = 16 * 1024 * 1024;
+/// Points of travel that show a press is becoming a drag, then that it is one.
+const STAGE_TRAVEL: f32 = 1.5;
+const DRAG_TRAVEL: f32 = 4.0;
+
+/// The files and picture a drag hands to the OS, made ready off the UI thread.
+struct Prepared {
+    files: Vec<PathBuf>,
+    image: Option<(u32, u32, Vec<u8>)>,
+}
+
+struct StageJob {
+    id: u32,
+    options: Options,
+    result: Receiver<Result<Prepared, String>>,
 }
 
 /// Eases a notched mouse wheel: each step moves a target, and the view springs to it. Trackpads
@@ -141,6 +160,9 @@ pub struct App {
     /// Why the last drag didn't work, or what it staged.
     pub message: Option<String>,
     drag_started: bool,
+    /// The pointer has travelled far enough and the OS drag starts as soon as the files are ready.
+    drag_wanted: bool,
+    stage_job: Option<StageJob>,
     drag_results: (Sender<Ended>, Receiver<Ended>),
     drag_label: String,
     /// Files the last drag staged, for headless checks.
@@ -214,6 +236,8 @@ pub fn init() -> App {
         status: LiveText::new("Reading library"),
         message: None,
         drag_started: false,
+        drag_wanted: false,
+        stage_job: None,
         drag_results: channel(),
         drag_label: String::new(),
         last_staged: Vec::new(),
@@ -342,6 +366,7 @@ impl App {
             self.land_preview(loaded);
             changed = true;
         }
+        if self.advance_drag() { changed = true; }
         if let Ok(ended) = self.drag_results.1.try_recv() {
             self.message = Some(match ended {
                 Ended::Dropped => format!("Copied {}", self.drag_label),
@@ -634,12 +659,22 @@ impl App {
         Options { max_size, nearest: self.nearest, companions: self.companions }
     }
 
-    /// Starts copying a big file the moment it's pressed, so the drag doesn't wait for it.
-    pub fn prestage(&self, id: u32, options: Options) {
+    /// Prepares what a drag of `id` will hand over, off the UI thread. Pressing and dragging
+    /// both ask, so this does nothing when that exact job is already under way.
+    fn start_stage_job(&mut self, id: u32, options: Options) {
+        if self.stage_job.as_ref().is_some_and(|j| j.id == id && j.options == options) { return }
         let Some(asset) = self.lib.assets.get(id as usize).cloned() else { return };
-        if asset.size < 16 * 1024 * 1024 { return }
         let path = self.lib.path(&asset);
-        std::thread::spawn(move || { let _ = export::stage(&path, &asset, options); });
+        let thumbs = self.thumbs.clone();
+        let waker = self.waker.clone();
+        let (send, result) = channel();
+        self.stage_job = Some(StageJob { id, options, result });
+        let work = move || {
+            let prepared = export::stage(&path, &asset, options).map(|files| Prepared { files, image: thumbs.image(asset.key).map(drag_picture) });
+            let _ = send.send(prepared);
+            if let Some(w) = &waker { w(); }
+        };
+        if headless() { work(); } else { std::thread::spawn(work); }
     }
 
     /// The drag gesture on a tile or a size rung.
@@ -649,37 +684,61 @@ impl App {
         match drag.phase {
             Phase::Down => {
                 self.drag_started = false;
-                self.prestage(id, options);
+                self.drag_wanted = false;
+                self.stage_job = None;
+                // Cheap to copy, so it gets a head start even if this is only a click.
+                if self.lib.assets.get(id as usize).is_some_and(|a| a.size <= EAGER_STAGE_BYTES) { self.start_stage_job(id, options); }
             }
-            Phase::Move if !self.drag_started && drag.dx.hypot(drag.dy) > 5.0 => {
-                self.drag_started = true;
-                self.start_drag(id, options);
+            Phase::Move => {
+                let travel = drag.dx.hypot(drag.dy);
+                if travel >= STAGE_TRAVEL { self.start_stage_job(id, options); }
+                if !self.drag_started && travel > DRAG_TRAVEL {
+                    self.drag_started = true;
+                    self.drag_wanted = true;
+                    self.advance_drag();
+                }
             }
-            Phase::Up => self.drag_started = false,
-            Phase::Move => {}
+            Phase::Up => {
+                self.drag_started = false;
+                self.drag_wanted = false;
+            }
         }
     }
 
-    fn start_drag(&mut self, id: u32, options: Options) {
-        let Some(asset) = self.lib.assets.get(id as usize).cloned() else { return };
-        let path = self.lib.path(&asset);
-        let files = match export::stage(&path, &asset, options) {
-            Ok(files) => files,
-            Err(reason) => {
-                self.message = Some(format!("Couldn't prepare {}: {reason}", asset.name()));
-                return;
-            }
+    /// Starts the OS drag once it's wanted and its files are ready; true if anything changed.
+    fn advance_drag(&mut self) -> bool {
+        if !self.drag_wanted { return false }
+        let Some(job) = &self.stage_job else { return false };
+        let prepared = match job.result.try_recv() {
+            Ok(prepared) => prepared,
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => Err("the copy stopped early".to_owned()),
         };
-        self.last_staged = files.clone();
-        self.drag_label = files.first().and_then(|f| f.file_name()).map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-        if headless() {
-            self.message = Some(format!("Staged {}", self.drag_label));
-            return;
+        let id = job.id;
+        self.drag_wanted = false;
+        match prepared {
+            Err(reason) => {
+                let name = self.lib.assets.get(id as usize).map_or("the file", |a| a.name());
+                self.message = Some(format!("Couldn't prepare {name}: {reason}"));
+            }
+            Ok(Prepared { files, image }) => {
+                self.last_staged = files.clone();
+                self.drag_label = files.first().and_then(|f| f.file_name()).map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                if headless() {
+                    self.message = Some(format!("Staged {}", self.drag_label));
+                } else {
+                    self.dragging = Some(id);
+                    native_drag::begin(native_drag::Request { files, image, done: self.drag_results.0.clone() });
+                }
+            }
         }
-        self.dragging = Some(id);
-        let image = self.thumbs.image(asset.key).map(drag_picture);
-        let done = self.drag_results.0.clone();
-        native_drag::begin(native_drag::Request { files, image, done });
+        true
+    }
+
+    /// Whether a drag is still waiting for its files.
+    #[cfg(test)]
+    pub fn drag_waiting(&self) -> bool {
+        self.drag_wanted
     }
 
     pub fn change_root(&mut self, root: PathBuf) {
