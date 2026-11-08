@@ -49,7 +49,7 @@ The list under the search box completes these: arrows pick a row, Tab or Enter t
 
 | Asset | Controls | Leaves as |
 | --- | --- | --- |
-| Audio | Drag the waveform's markers to trim. Under Loop, slide the join in the seam view, crossfade it, or let **Find best join** line it up. Under Level, set gain, normalize and fade the ends. Under Compress, set quality, sample rate and channels | Ogg Vorbis |
+| Audio | Drag across the waveform to pick a section, then fine-tune with its markers. Scroll to zoom, Shift-scroll to pan. Under Loop, slide the join in the seam view, crossfade it, or let **Find best join** line it up. Under Level, set gain, normalize and fade the ends. Under Compress, set quality, sample rate and channels | Ogg Vorbis |
 | Textures | Palette size, dithering and encoder effort, on top of the size ladder. Flip green to convert a normal map between DirectX and OpenGL | PNG |
 | Models | Every material's roughness, metallic, emissive, normal strength, tint and texture size, or a quick look: Matte, Satin, Gloss, Metal. Under Whole model, move the origin, scale it, and set every texture's size and filtering. Click a map's thumbnail to set its own filter, or to flip a normal map's green | GLB |
 
@@ -66,4 +66,4 @@ cargo test
 target/release/asset-browser --snap out.png --scene model --size 1520x900
 ```
 
-Scenes: `textures`, `models`, `audio`, `search`, `small`, `texture`, `tile`, `tile-seams`, `big-texture`, `model`, `sound`, `edit-trim`, `edit-loop`, `edit-level`, `edit-compress`, `edit-texture`, `edit-model`, `edit-whole-model`. Set `AB_FRAME_MS=16` with a `--script` to scroll against the real thumbnail workers at 60 fps.
+Scenes: `textures`, `models`, `audio`, `search`, `small`, `texture`, `tile`, `tile-seams`, `big-texture`, `model`, `sound`, `edit-trim`, `edit-zoom`, `edit-loop`, `edit-level`, `edit-compress`, `edit-texture`, `edit-model`, `edit-whole-model`. Set `AB_FRAME_MS=16` with a `--script` to scroll against the real thumbnail workers at 60 fps.

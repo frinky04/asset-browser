@@ -301,6 +301,74 @@ pub fn find_seam(pcm: &Pcm, start: u64, end: u64) -> u64 {
     best.1 as u64
 }
 
+/// How many frames each entry of a `PeakIndex` covers.
+const INDEX_BLOCK: u64 = 256;
+
+/// The quietest and loudest sample of every few hundred frames, so a zoomed-out timeline can be
+/// drawn without reading the whole recording again.
+pub struct PeakIndex {
+    blocks: Vec<(f32, f32)>,
+    /// The largest absolute sample anywhere, which every zoom level is scaled to.
+    pub loudest: f32,
+}
+
+impl PeakIndex {
+    pub fn build(pcm: &Pcm) -> PeakIndex {
+        let channels = usize::from(pcm.channels.max(1));
+        let blocks: Vec<(f32, f32)> = pcm.samples.chunks(INDEX_BLOCK as usize * channels).map(|block| {
+            block.iter().fold((f32::MAX, f32::MIN), |(low, high), v| (low.min(*v), high.max(*v)))
+        }).collect();
+        let loudest = blocks.iter().fold(0.0f32, |m, (low, high)| m.max(low.abs()).max(high.abs()));
+        PeakIndex { blocks, loudest: loudest.max(1e-4) }
+    }
+}
+
+/// Frames `start..end` drawn across `width`×`height` straight-alpha RGBA. Each column is a real
+/// low-to-high span, so at high zoom you see the wave itself and where it crosses zero.
+pub fn draw_timeline(pcm: &Pcm, index: &PeakIndex, start: u64, end: u64, width: u32, height: u32, color: [u8; 3]) -> Vec<u8> {
+    let (w, h) = (width as usize, height as usize);
+    let mut out = vec![0u8; w * h * 4];
+    let channels = usize::from(pcm.channels.max(1));
+    let frames = pcm.frames();
+    let per_column = (end.saturating_sub(start)) as f64 / w.max(1) as f64;
+    let mid = (height as f32 - 1.0) * 0.5;
+    let shaped = |v: f32| (v / index.loudest).clamp(-1.0, 1.0);
+    let row_for = |v: f32| {
+        let v = shaped(v);
+        mid - v.signum() * v.abs().powf(0.7) * (mid - 1.0)
+    };
+    for x in 0..w {
+        let from = (start as f64 + x as f64 * per_column).floor() as u64;
+        let to = ((start as f64 + (x + 1) as f64 * per_column).ceil() as u64 + 1).min(frames);
+        if from >= frames || to <= from { continue }
+        let (mut low, mut high) = (f32::MAX, f32::MIN);
+        if per_column >= INDEX_BLOCK as f64 {
+            for (block_low, block_high) in &index.blocks[(from / INDEX_BLOCK) as usize..((to / INDEX_BLOCK) as usize + 1).min(index.blocks.len())] {
+                low = low.min(*block_low);
+                high = high.max(*block_high);
+            }
+        } else {
+            for sample in &pcm.samples[from as usize * channels..to as usize * channels] {
+                low = low.min(*sample);
+                high = high.max(*sample);
+            }
+        }
+        let (top, bottom) = (row_for(high).floor() as usize, row_for(low).ceil() as usize);
+        for y in top.min(h - 1)..=bottom.min(h - 1) {
+            let at = (y * w + x) * 4;
+            out[at..at + 3].copy_from_slice(&color);
+            out[at + 3] = 255;
+        }
+    }
+    out
+}
+
+/// Where a zoomed timeline should jump to when playback has just run off it, if anywhere.
+pub fn follow_view(view: (u64, u64), frame: u64, was_inside: bool) -> Option<u64> {
+    let inside = (view.0..view.1).contains(&frame);
+    (was_inside && !inside).then_some(frame)
+}
+
 /// The waveform around a loop's seam: the frames before `end` on the left half, the frames from
 /// `start` on the right, `window` frames each, as straight-alpha RGBA.
 #[allow(clippy::too_many_arguments)]
@@ -487,6 +555,43 @@ mod tests {
         let end = find_seam(&pcm, start, 30_123);
         assert_eq!((end - start) % 441, 0, "{end}");
         assert!((end as i64 - 30_123).abs() <= 441, "stays near where it was asked: {end}");
+    }
+
+    fn painted_columns(px: &[u8], width: usize) -> usize {
+        px.chunks_exact(width * 4).next().map_or(0, |_| {
+            let height = px.len() / 4 / width;
+            (0..width).filter(|x| (0..height).any(|y| px[(y * width + x) * 4 + 3] == 255)).count()
+        })
+    }
+
+    #[test]
+    fn the_index_finds_the_extremes_and_the_timeline_fills_its_width() {
+        let pcm = sine(44_100, 44_100, 440.0, 2);
+        let index = PeakIndex::build(&pcm);
+        assert!((index.loudest - 0.5).abs() < 0.01, "{}", index.loudest);
+        let whole = draw_timeline(&pcm, &index, 0, pcm.frames(), 200, 50, [9, 9, 9]);
+        assert_eq!(painted_columns(&whole, 200), 200);
+        let zoomed = draw_timeline(&pcm, &index, 1_000, 1_100, 200, 50, [9, 9, 9]);
+        assert_eq!(painted_columns(&zoomed, 200), 200, "even with fewer samples than columns");
+        assert_ne!(whole, zoomed);
+    }
+
+    #[test]
+    fn a_zoomed_view_of_silence_stays_flat_next_to_a_loud_part() {
+        let mut samples = vec![0.0f32; 1000];
+        samples.extend(vec![0.9f32; 1000]);
+        let pcm = Pcm { samples, channels: 1, rate: 1000 };
+        let index = PeakIndex::build(&pcm);
+        let quiet = draw_timeline(&pcm, &index, 0, 500, 50, 41, [9, 9, 9]);
+        let top_row = (0..50).filter(|x| quiet[x * 4 + 3] == 255).count();
+        assert_eq!(top_row, 0, "scaled to the whole file, not to what's in view");
+    }
+
+    #[test]
+    fn playback_only_pulls_the_view_along_when_it_runs_off_the_edge() {
+        assert_eq!(follow_view((100, 200), 250, true), Some(250), "it just left");
+        assert_eq!(follow_view((100, 200), 250, false), None, "the view was moved away on purpose");
+        assert_eq!(follow_view((100, 200), 150, true), None);
     }
 
     #[test]

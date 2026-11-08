@@ -859,14 +859,20 @@ fn pane(s: &App, id: u32, asset: &Asset) -> Pane {
             } else {
                 200.0
             };
-            let wave = el().key("waveform").w_full().h(wave_h).cursor(Cursor::Pointer)
-                .pixels(&s.wave)
+            let zoomed = s.edit.view.is_some();
+            let wave = el().key("waveform").w_full().h(wave_h).cursor(if s.edit.open { Cursor::Crosshair } else { Cursor::Pointer })
+                .pixels(if zoomed { &s.edit.timeline_wave } else { &s.wave })
                 .on_layout(|s: &mut App, r: [f32; 4]| s.stage_size = [r[2], r[3]])
-                .on_drag(|s: &mut App, drag, tx| {
-                    if drag.phase != Phase::Up { s.seek_fraction(drag.x / drag.w.max(1.0), tx); }
-                })
+                .on_drag(|s: &mut App, drag, tx| s.drag_waveform(drag, tx))
+                .on_wheel(|s: &mut App, wheel, tx| s.wheel_timeline(wheel, tx))
+                .on_double_press(|s: &mut App| s.fit_timeline())
                 .child(el().key("playhead").w(1.5).h_full().fill(T.accent).absolute(0.0, 0.0).live_offset(&s.playhead));
-            let wave = edit_ui::markers(s, wave);
+            let wave = edit_ui::markers(s, if zoomed { wave.clip_soft(0.0) } else { wave });
+            let corner = s.edit.open.then(|| {
+                let mut hints = row().gap(8.0).items_center().child(label("Drag to select, scroll to zoom", SMALL, T.faint));
+                if zoomed { hints = hints.child(tool("Fit", false, |s, tx| { s.fit_timeline(); tx.instant(); })); }
+                hints
+            });
             let dock = row().key("tools").w_full().gap(10.0).items_center()
                 .child(el().key("play").role("button").label(if playing { "Pause" } else { "Play" }).focusable(true).size(30.0, 30.0).radius(15.0).center().fill(T.accent).press_scale(0.9).cursor(Cursor::Pointer)
                     .on_press_tx(|s: &mut App, tx| s.toggle_playback(tx))
@@ -875,7 +881,7 @@ fn pane(s: &App, id: u32, asset: &Asset) -> Pane {
                 .child(toggle("Play on select", s.autoplay, |s, _| s.autoplay = !s.autoplay));
             let detail = format!("{}, {} Hz, {} ch", clock(*seconds), commas(*rate as usize), channels);
             let detail = s.drag_detail(asset, detail);
-            Pane { tools: None, stage: col().w_full().px(16.0).pb(36.0).child(wave), hint: None, corner: None, dock: Some(dock), actions: vec![drag_bar(id, None, "Drag sound out", detail)] }
+            Pane { tools: None, stage: col().w_full().px(16.0).pb(36.0).child(wave), hint: None, corner, dock: Some(dock), actions: vec![drag_bar(id, None, "Drag sound out", detail)] }
         }
         Preview::Failed(reason) => Pane {
             tools: None,

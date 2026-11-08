@@ -514,6 +514,10 @@ impl App {
                 self.set_kind(Some(Kind::Audio), tx);
                 if let Some(id) = first(self, Kind::Audio, "") { self.select(id, tx); }
             }
+            "edit-zoom" => {
+                self.run_scene("edit-trim", tx);
+                self.edit.view = Some((280_000, 520_000));
+            }
             "edit-whole-model" => {
                 self.run_scene("model", tx);
                 self.edit.open = true;
@@ -606,7 +610,7 @@ impl App {
             self.confirmed = None;
             changed = true;
         }
-        if matches!(self.preview, Preview::Audio { .. }) { self.track_playback(tx); }
+        if matches!(self.preview, Preview::Audio { .. }) && self.track_playback(tx) { changed = true; }
         let playing = self.audio.is_playing();
         if playing != self.showing_playing {
             self.showing_playing = playing;
@@ -646,17 +650,20 @@ impl App {
         if self.scanning || made < total { tx.wake_after(Duration::from_millis(400)); }
     }
 
-    fn track_playback(&mut self, tx: &mut Tx) {
-        let Preview::Audio { seconds, .. } = self.preview else { return };
+    /// Moves the playhead along; true if a zoomed timeline had to page to keep up with it.
+    fn track_playback(&mut self, tx: &mut Tx) -> bool {
+        let Preview::Audio { seconds, .. } = self.preview else { return false };
         let position = self.playback_time().min(seconds);
-        let x = position / seconds.max(0.001) * self.stage_size[0];
-        self.playhead.set([x, 0.0]);
+        let paged = self.follow_playhead(position);
+        if paged { tx.instant(); }
+        self.playhead.set([self.timeline_x(position, seconds), 0.0]);
         self.clock.set(format!("{} / {}", clock(position), clock(seconds)));
         let opening = self.audio_watch_until.is_some_and(|t| Instant::now() < t);
         if self.audio.is_playing() || opening { tx.wake_after(Duration::from_millis(33)); }
+        paged
     }
 
-    fn wave_color(&self) -> [u8; 3] {
+    pub(crate) fn wave_color(&self) -> [u8; 3] {
         if self.resolved_dark.get() { WAVE_COLOR } else { LIGHT_WAVE_COLOR }
     }
 
@@ -667,6 +674,7 @@ impl App {
         self.stage.look = if dark { Look::DARK } else { Look::LIGHT };
         self.thumbs.set_wave_color(self.wave_color());
         self.redraw_seam();
+        self.redraw_timeline();
         if first { return }
         self.generation += 1;
         self.request_range(self.visible_rows.clone());
@@ -1079,7 +1087,7 @@ impl App {
             if self.audio.is_finished() { self.audio.play(path); }
             self.audio.seek(at);
         }
-        self.playhead.set([fraction.clamp(0.0, 1.0) * self.stage_size[0], 0.0]);
+        self.playhead.set([self.timeline_x(at, seconds), 0.0]);
         tx.wake_after(Duration::from_millis(33));
     }
 

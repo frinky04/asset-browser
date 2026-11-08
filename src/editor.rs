@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use rune::{Latest, Pixels, Spring, TextEdit, Tx, Waker};
 
-use crate::app::{App, Preview};
+use crate::app::{App, Preview, WAVE_H, WAVE_W};
 use crate::edit::mesh::{Origin, SurfaceMaterial, TextureFilter};
 use crate::edit::{self, AudioEdit, Decoded, Edit, ImageEdit, MaterialEdit, ModelDoc, ModelEdit, Pcm, Rendered, Shown, ball, sound};
 use crate::export::{self, Options};
@@ -27,6 +27,11 @@ const MIN_SECTION_MS: u64 = 10;
 const SETTLE_FOR: Duration = Duration::from_millis(900);
 /// How the panel and its rows open and close.
 pub const PANEL_SPRING: Spring = Spring::new(0.3, 0.0);
+/// The fewest frames the timeline can be zoomed to show.
+const MIN_VIEW_FRAMES: f64 = 64.0;
+const TIMELINE_ZOOM_SPEED: f32 = 0.006;
+/// Points the pointer travels before a press on the waveform becomes a drag.
+const REGION_TRAVEL: f32 = 3.0;
 /// How far before a loop's end "hear the seam" starts.
 const SEAM_LEAD_SECONDS: f32 = 2.0;
 
@@ -89,7 +94,7 @@ pub struct Editor {
     /// Only recipes that change something are kept here.
     recipes: HashMap<u64, Edit>,
     session: Option<Session>,
-    opening: Latest<(u64, Result<Arc<Decoded>, String>)>,
+    opening: Latest<(u64, Result<(Arc<Decoded>, Option<Arc<sound::PeakIndex>>), String>)>,
     rendering: Latest<(u64, Result<Finished, String>)>,
     cutting: Latest<(u64, Arc<Pcm>, f32)>,
     tuning: Latest<(u64, u64)>,
@@ -103,6 +108,15 @@ pub struct Editor {
     pub scale_text: TextEdit,
     /// The edited section's loudest moment, in decibels of full scale.
     pub peak_db: Option<f32>,
+    peak_index: Option<Arc<sound::PeakIndex>>,
+    /// The frames the timeline shows, when zoomed in; `None` shows the whole sound.
+    pub view: Option<(u64, u64)>,
+    /// The timeline drawn for `view`.
+    pub timeline_wave: Pixels,
+    /// Where a drag across the waveform began, once it has moved far enough to be one.
+    region_anchor: u64,
+    region_active: bool,
+    playhead_was_in_view: bool,
     /// The material whose controls are unfolded.
     pub expanded: Option<usize>,
     pub seam: Pixels,
@@ -163,6 +177,12 @@ impl Default for Editor {
             model_tab: ModelTab::Materials,
             scale_text: TextEdit::new("1"),
             peak_db: None,
+            peak_index: None,
+            view: None,
+            timeline_wave: Pixels::new(),
+            region_anchor: 0,
+            region_active: false,
+            playhead_was_in_view: false,
             expanded: None,
             seam: Pixels::new(),
             seam_ms: SEAM_MS_DEFAULT,
@@ -339,6 +359,8 @@ impl App {
         self.edit.start_settling();
         tx.motion(PANEL_SPRING);
         self.edit.focus = None;
+        // Zoom is an editing tool, and browsing always shows the whole sound.
+        if !self.edit.open { self.edit.view = None; }
         if self.edit.open {
             self.ensure_session();
             self.update_surface();
@@ -368,6 +390,8 @@ impl App {
         self.edit.comparing = false;
         self.edit.expanded = None;
         self.edit.folding = None;
+        self.edit.peak_index = None;
+        self.edit.view = None;
         self.edit.peak_db = None;
         self.edit.model_images = None;
         self.edit.focus = None;
@@ -401,7 +425,14 @@ impl App {
         let path = self.lib.path(&asset);
         let library = self.lib.root.clone();
         self.edit.opening.request((asset, path), move |(asset, path)| {
-            (asset.key, edit::open(&path, asset.kind, &library).map(Arc::new))
+            let opened = edit::open(&path, asset.kind, &library).map(|decoded| {
+                let peaks = match &decoded {
+                    Decoded::Audio(pcm) => Some(Arc::new(sound::PeakIndex::build(pcm))),
+                    _ => None,
+                };
+                (Arc::new(decoded), peaks)
+            });
+            (asset.key, opened)
         });
     }
 
@@ -470,7 +501,8 @@ impl App {
             changed = true;
             if self.selected_key() == Some(key) {
                 match result {
-                    Ok(decoded) => {
+                    Ok((decoded, peaks)) => {
+                        self.edit.peak_index = peaks;
                         if let Decoded::Model(doc) = decoded.as_ref() {
                             self.edit.balls = doc.materials.iter().map(|_| Pixels::new()).collect();
                             self.edit.ball_seen = vec![None; doc.materials.len()];
@@ -479,6 +511,7 @@ impl App {
                             self.sync_scale_text();
                         }
                         self.edit.session = Some(Session { key, decoded });
+                        self.redraw_timeline();
                         self.edit_changed();
                     }
                     Err(reason) => self.edit.failure = Some(reason),
@@ -793,18 +826,155 @@ impl App {
         if commit { self.edit_changed(); } else { self.redraw_seam(); }
     }
 
+    /// The frames on the timeline, and the sound's length. The whole sound unless zoomed.
+    pub fn audio_view(&self) -> Option<(u64, u64, u64)> {
+        let pcm = self.audio_source()?;
+        let frames = pcm.frames();
+        let (start, end) = self.edit.view.unwrap_or((0, frames));
+        Some((start, end, frames))
+    }
+
+    /// The frame `x` points along the timeline falls on.
+    fn frame_at(&self, x: f32) -> Option<u64> {
+        let (start, end, _) = self.audio_view()?;
+        let along = f64::from(x / self.stage_size[0].max(1.0)).clamp(0.0, 1.0);
+        Some(start + (along * (end - start) as f64) as u64)
+    }
+
+    /// Where `seconds` of the sound sits along the timeline, in points.
+    pub(crate) fn timeline_x(&self, seconds: f32, duration: f32) -> f32 {
+        let width = self.stage_size[0];
+        match (self.edit.view, self.source_format()) {
+            (Some((start, end)), Some((rate, _))) => {
+                let along = (f64::from(seconds) * f64::from(rate) - start as f64) / (end - start) as f64;
+                // Off the end it's clipped by the timeline's own edge.
+                (along as f32 * width).clamp(-20.0, width + 20.0)
+            }
+            _ => seconds / duration.max(0.001) * width,
+        }
+    }
+
+    fn set_view(&mut self, start: f64, span: f64) {
+        let Some(pcm) = self.audio_source() else { return };
+        let frames = pcm.frames() as f64;
+        let span = span.clamp(MIN_VIEW_FRAMES.min(frames), frames);
+        if span >= frames {
+            self.edit.view = None;
+            return;
+        }
+        let start = start.clamp(0.0, frames - span);
+        self.edit.view = Some((start as u64, (start + span) as u64));
+        self.redraw_timeline();
+    }
+
+    pub(crate) fn redraw_timeline(&mut self) {
+        let Some((start, end)) = self.edit.view else { return };
+        let (Some(pcm), Some(index)) = (self.audio_source(), self.edit.peak_index.clone()) else { return };
+        let px = sound::draw_timeline(&pcm, &index, start, end, WAVE_W, WAVE_H, self.wave_color());
+        self.edit.timeline_wave.set(WAVE_W, WAVE_H, px);
+    }
+
+    /// A wheel over the timeline: up and down zoom about the pointer, sideways pans.
+    pub fn wheel_timeline(&mut self, wheel: rune::WheelEvent, tx: &mut Tx) -> bool {
+        if !self.edit.open { return false }
+        let Some((start, end, _)) = self.audio_view() else { return false };
+        let span = (end - start) as f64;
+        let per_point = span / f64::from(self.stage_size[0].max(1.0));
+        let sideways = if wheel.mods.shift { wheel.dy } else if wheel.dx.abs() > wheel.dy.abs() { wheel.dx } else { 0.0 };
+        if sideways != 0.0 {
+            self.set_view(start as f64 - f64::from(sideways) * per_point, span);
+        } else {
+            let anchor = f64::from(wheel.x) * per_point;
+            let next = span * f64::from(-wheel.dy * TIMELINE_ZOOM_SPEED).exp();
+            self.set_view(start as f64 + anchor - anchor / span * next, next);
+        }
+        // The markers and the picture have to move together.
+        tx.instant();
+        true
+    }
+
+    pub fn fit_timeline(&mut self) {
+        self.edit.view = None;
+    }
+
+    /// Dragging along the zoomed timeline's overview bar.
+    pub fn drag_overview(&mut self, drag: &mut rune::Drag, tx: &mut Tx) {
+        let Some((start, end, frames)) = self.audio_view() else { return };
+        let span = (end - start) as f64;
+        let at = f64::from(drag.x / drag.w.max(1.0)).clamp(0.0, 1.0) * frames as f64;
+        if drag.phase == rune::Phase::Down {
+            // Grabbing the thumb holds it by that spot; anywhere else centres it there.
+            let on_thumb = (start as f64..end as f64).contains(&at);
+            drag.data = if on_thumb { ((at - start as f64) / span) as f32 } else { 0.5 };
+        }
+        self.set_view(at - f64::from(drag.data) * span, span);
+        tx.instant();
+    }
+
+    /// The waveform's own drag. In the editor it picks out a section and a plain click seeks;
+    /// otherwise it scrubs.
+    pub fn drag_waveform(&mut self, drag: &rune::Drag, tx: &mut Tx) {
+        use rune::Phase;
+        let editing = self.edit.open && self.audio_section().is_some();
+        if !editing {
+            if drag.phase != Phase::Up { self.seek_fraction(drag.x / drag.w.max(1.0), tx); }
+            return;
+        }
+        let Some(frame) = self.frame_at(drag.x) else { return };
+        match drag.phase {
+            Phase::Down => {
+                self.edit.region_anchor = frame;
+                self.edit.region_active = false;
+            }
+            Phase::Move => {
+                if !self.edit.region_active && drag.dx.abs() < REGION_TRAVEL { return }
+                self.edit.region_active = true;
+                let anchor = self.edit.region_anchor;
+                self.set_section(anchor.min(frame), anchor.max(frame), false);
+                tx.instant();
+            }
+            Phase::Up if self.edit.region_active => {
+                self.edit.region_active = false;
+                let anchor = self.edit.region_anchor;
+                let (mut first, mut last) = (anchor.min(frame), anchor.max(frame));
+                if self.audio_edit().looped && let Some(pcm) = self.audio_source() {
+                    first = sound::snap_to_zero(&pcm, first);
+                    last = sound::snap_to_zero(&pcm, last);
+                }
+                self.set_section(first, last, true);
+                tx.instant();
+            }
+            Phase::Up => {
+                let frames = self.audio_view().map_or(1, |(_, _, frames)| frames.max(1));
+                self.seek_fraction((frame as f64 / frames as f64) as f32, tx);
+            }
+        }
+    }
+
+    /// Pages a zoomed timeline along when playback runs off its edge; true if it moved.
+    pub(crate) fn follow_playhead(&mut self, seconds: f32) -> bool {
+        let (Some((start, end)), Some((rate, _))) = (self.edit.view, self.source_format()) else { return false };
+        let frame = (f64::from(seconds) * f64::from(rate)) as u64;
+        let target = self.audio.is_playing().then(|| sound::follow_view((start, end), frame, self.edit.playhead_was_in_view)).flatten();
+        if let Some(from) = target { self.set_view(from as f64, (end - start) as f64); }
+        self.edit.playhead_was_in_view = target.is_some() || (start..end).contains(&frame);
+        target.is_some()
+    }
+
     pub fn drag_marker(&mut self, marker: Marker, drag: &mut rune::Drag) {
         use rune::Phase;
-        let Some((start, end, frames)) = self.audio_section() else { return };
+        let Some((start, end, _)) = self.audio_section() else { return };
+        let Some((view_start, view_end, _)) = self.audio_view() else { return };
         let width = self.stage_size[0].max(1.0);
+        let span = (view_end - view_start).max(1) as f64;
         match drag.phase {
             Phase::Down => {
                 let frame = if marker == Marker::Start { start } else { end };
-                drag.data = (frame as f64 / frames.max(1) as f64 * f64::from(width)) as f32;
+                drag.data = ((frame as f64 - view_start as f64) / span * f64::from(width)) as f32;
             }
             Phase::Move | Phase::Up => {
                 let at = (f64::from(drag.data + drag.dx) / f64::from(width)).clamp(0.0, 1.0);
-                let mut frame = (at * frames as f64) as u64;
+                let mut frame = view_start + (at * span) as u64;
                 let done = drag.phase == Phase::Up;
                 if done && self.audio_edit().looped && let Some(pcm) = self.audio_source() {
                     frame = sound::snap_to_zero(&pcm, frame);

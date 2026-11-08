@@ -830,6 +830,98 @@ fn texture_filters_reach_the_stage_and_the_exported_file() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A pointer drag over `key`, from `from` to `to` as shares of its width, at its middle height.
+fn drag_across(rt: &mut Runtime<App>, key: &str, from: f32, to: f32) {
+    let box_ = rect(rt, key);
+    let (y, at) = (box_[1] + box_[3] * 0.5, |share: f32| box_[0] + box_[2] * share);
+    rt.pointer_move(at(from), y);
+    rt.pointer_down(at(from), y);
+    settle(rt);
+    rt.pointer_move(at(to), y);
+    settle(rt);
+    rt.pointer_up(at(to), y);
+    settle(rt);
+}
+
+#[test]
+fn dragging_the_waveform_picks_the_section_and_clicking_only_seeks() {
+    let root = edit_fixture();
+    let mut rt = app_on(&root);
+    open_editor(&mut rt, "tone.wav");
+    for _ in 0..40 { rt.frame(1.0 / 60.0); }
+
+    drag_across(&mut rt, "waveform", 0.25, 0.5);
+    wait_for_edit(&mut rt);
+    let (start, end, frames) = rt.state.audio_section().unwrap();
+    let share = |frame: u64| frame as f32 / frames as f32;
+    assert!((share(start) - 0.25).abs() < 0.02 && (share(end) - 0.5).abs() < 0.02, "{start}..{end} of {frames}");
+
+    // Backwards works too.
+    drag_across(&mut rt, "waveform", 0.8, 0.6);
+    wait_for_edit(&mut rt);
+    let (start, end, _) = rt.state.audio_section().unwrap();
+    assert!((share(start) - 0.6).abs() < 0.02 && (share(end) - 0.8).abs() < 0.02, "{start}..{end}");
+
+    // A click doesn't touch the section.
+    let picked = rt.state.audio_section();
+    let box_ = rect(&rt, "waveform");
+    let (x, y) = (box_[0] + box_[2] * 0.7, box_[1] + box_[3] * 0.5);
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    wait_for_edit(&mut rt);
+    assert_eq!(rt.state.audio_section(), picked);
+
+    // Outside the editor the waveform goes back to plain scrubbing.
+    click(&mut rt, "edit-toggle");
+    for _ in 0..80 { rt.frame(1.0 / 60.0); }
+    drag_across(&mut rt, "waveform", 0.1, 0.3);
+    assert_eq!(rt.state.audio_section(), picked, "browsing can't change the edit");
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_timeline_zooms_about_the_pointer_and_selection_follows_the_zoom() {
+    let root = edit_fixture();
+    let mut rt = app_on(&root);
+    open_editor(&mut rt, "tone.wav");
+    for _ in 0..40 { rt.frame(1.0 / 60.0); }
+    assert!(rt.state.edit.view.is_none() && rt.find("timeline-overview").is_none());
+    let panel = rect(&rt, "edit-panel");
+
+    // Zooming keeps what's under the pointer where it is.
+    let box_ = rect(&rt, "waveform");
+    let (x, y) = (box_[0] + box_[2] * 0.5, box_[1] + box_[3] * 0.5);
+    rt.pointer_move(x, y);
+    for _ in 0..6 {
+        rt.wheel_event(rune::WheelEvent::new(0.0, 80.0).at(x, y));
+        rt.frame(1.0 / 60.0);
+    }
+    settle(&mut rt);
+    let (start, end) = rt.state.edit.view.expect("the wheel zoomed in");
+    let frames = rt.state.audio_section().unwrap().2;
+    assert!((end - start) < frames / 4, "{start}..{end}");
+    assert!((((start + end) / 2) as i64 - (frames / 2) as i64).abs() < 400, "stayed centred: {start}..{end}");
+    assert!(rt.find("timeline-overview").is_some());
+    assert_eq!(rect(&rt, "edit-panel"), panel, "zooming moves nothing else");
+
+    // Dragging at this zoom measures in the zoomed frames.
+    drag_across(&mut rt, "waveform", 0.25, 0.75);
+    wait_for_edit(&mut rt);
+    let (first, last, _) = rt.state.audio_section().unwrap();
+    let quarter = (end - start) / 4;
+    assert!((first as i64 - (start + quarter) as i64).abs() < 300, "{first} in {start}..{end}");
+    assert!((last as i64 - (end - quarter) as i64).abs() < 300, "{last} in {start}..{end}");
+
+    // Fit brings the whole sound back, and the selection is untouched.
+    click(&mut rt, "Fit");
+    assert!(rt.state.edit.view.is_none());
+    assert_eq!(rt.state.audio_section().map(|s| (s.0, s.1)), Some((first, last)));
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn level_fades_and_normalize_reach_the_exported_sound() {
     let root = edit_fixture();

@@ -547,13 +547,24 @@ pub fn foot(s: &App, asset: &Asset) -> El {
 pub fn markers(s: &App, wave: El) -> El {
     let Some((start, end, frames)) = s.audio_section() else { return wave };
     if frames == 0 { return wave }
+    let Some((view_start, view_end, _)) = s.audio_view() else { return wave };
     let width = s.stage_size[0];
-    let px = |frame: u64| frame as f32 / frames as f32 * width;
+    let span = (view_end - view_start).max(1) as f64;
+    let px = |frame: u64| ((frame as f64 - view_start as f64) / span) as f32 * width;
     let (left, right) = (px(start), px(end));
+    let on_view = |at: f32| (-1.0..=width + 1.0).contains(&at);
     let shade = T.well.alpha(0.78);
     let mut wave = wave
-        .child(el().key("shade-start").pin(Some(0.0), Some(0.0), None, Some(0.0)).w(left).fill(shade).inert())
-        .child(el().key("shade-end").pin(Some(right), Some(0.0), Some(0.0), Some(0.0)).fill(shade).inert());
+        .child(el().key("shade-start").pin(Some(0.0), Some(0.0), None, Some(0.0)).w(left.clamp(0.0, width)).fill(shade).inert())
+        .child(el().key("shade-end").pin(Some(right.clamp(0.0, width)), Some(0.0), Some(0.0), Some(0.0)).fill(shade).inert());
+    if s.edit.view.is_some() {
+        // Where the visible part sits in the whole sound. Dragging it pans.
+        let share = |frame: u64| frame as f32 / frames as f32;
+        let thumb = el().pin(Some(share(view_start) * width), Some(1.0), None, Some(1.0)).w(((share(view_end) - share(view_start)) * width).max(8.0)).radius(2.0).fill(T.accent).inert();
+        wave = wave.child(el().key("timeline-overview").role("slider").label("Visible part of the sound").pin(Some(0.0), None, Some(0.0), Some(0.0)).h(6.0).radius(3.0).fill(T.line).cursor(Cursor::Grab)
+            .on_drag(|s: &mut App, drag, tx| s.drag_overview(drag, tx))
+            .child(thumb));
+    }
     if s.edit.open {
         let handle = |key: &str, name: &str, at: f32, marker: Marker| {
             el().key(key.to_owned()).role("slider").label(name.to_owned()).absolute(at - 7.0, 0.0).w(14.0).h_full().center().cursor(Cursor::ResizeColumn)
@@ -564,7 +575,8 @@ pub fn markers(s: &App, wave: El) -> El {
                 })
                 .child(el().w(2.0).h_full().fill(T.accent).child(el().size(10.0, 12.0).radius(3.0).fill(T.accent).absolute(-4.0, 0.0)))
         };
-        wave = wave.child(handle("mark-start", "Section start", left, Marker::Start)).child(handle("mark-end", "Section end", right, Marker::End));
+        if on_view(left) { wave = wave.child(handle("mark-start", "Section start", left, Marker::Start)); }
+        if on_view(right) { wave = wave.child(handle("mark-end", "Section end", right, Marker::End)); }
     }
     wave
 }
