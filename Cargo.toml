@@ -3,6 +3,7 @@ name = "asset-browser"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/frinky04/asset-browser"
 
 [dependencies]
 rune = { git = "https://github.com/anomalyco/rune", rev = "f2fb51eaed6de6e4fae5f8ef86084be89af9e04a", features = ["native-file-dialog"] }
