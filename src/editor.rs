@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use rune::{Latest, Pixels, Spring, Tx, Waker};
 
 use crate::app::{App, Preview};
-use crate::edit::{self, AudioEdit, Decoded, Edit, ImageEdit, MaterialEdit, ModelEdit, Pcm, Rendered, Shown, sound};
+use crate::edit::mesh::SurfaceMaterial;
+use crate::edit::{self, AudioEdit, Decoded, Edit, ImageEdit, MaterialEdit, ModelDoc, ModelEdit, Pcm, Rendered, Shown, ball, sound};
 use crate::export::{self, Options};
 use crate::library::{Asset, Kind};
 use crate::model::Image;
@@ -106,6 +107,31 @@ pub struct Editor {
     settling_until: Option<Instant>,
     /// The material row that just folded away, kept drawn while it closes.
     pub folding: Option<usize>,
+    /// The textures the last render made, which the stage shows unless comparing.
+    model_images: Option<Vec<Arc<Image>>>,
+    /// The material hovered in the list.
+    focus: Option<usize>,
+    /// A rendered sphere per document material.
+    pub balls: Vec<Pixels>,
+    /// A small copy of each document image.
+    pub map_thumbs: Vec<Pixels>,
+    ball_seen: Vec<Option<BallSig>>,
+    thumb_seen: Vec<usize>,
+    drawing: Latest<Drawn>,
+    shrunk: Arc<ball::Shrunk>,
+}
+
+/// Everything a material ball's picture depends on.
+#[derive(Clone, Copy, PartialEq)]
+struct BallSig {
+    material: SurfaceMaterial,
+    maps: [usize; 4],
+}
+
+struct Drawn {
+    key: u64,
+    balls: Vec<(usize, BallSig, Vec<u8>)>,
+    thumbs: Vec<(usize, usize, Arc<Image>)>,
 }
 
 impl Default for Editor {
@@ -133,6 +159,14 @@ impl Default for Editor {
             autoplay_waiting: false,
             settling_until: None,
             folding: None,
+            model_images: None,
+            focus: None,
+            balls: Vec::new(),
+            map_thumbs: Vec::new(),
+            ball_seen: Vec::new(),
+            thumb_seen: Vec::new(),
+            drawing: Latest::default(),
+            shrunk: Arc::default(),
         }
     }
 }
@@ -143,10 +177,11 @@ impl Editor {
         self.rendering.set_waker(waker.clone());
         self.cutting.set_waker(waker.clone());
         self.tuning.set_waker(waker.clone());
+        self.drawing.set_waker(waker.clone());
     }
 
     pub fn busy(&self) -> bool {
-        self.opening.is_pending() || self.rendering.is_pending() || self.cutting.is_pending() || self.tuning.is_pending()
+        self.opening.is_pending() || self.rendering.is_pending() || self.cutting.is_pending() || self.tuning.is_pending() || self.drawing.is_pending()
     }
 
     pub fn is_rendering(&self) -> bool {
@@ -181,6 +216,12 @@ impl Editor {
     /// What a drag of the asset `key` should apply.
     pub fn recipe(&self, key: u64) -> Option<Arc<Edit>> {
         self.recipes.get(&key).map(|e| Arc::new(e.clone()))
+    }
+
+    /// The values material `index`'s ball was last drawn with.
+    #[cfg(test)]
+    pub fn drawn_ball(&self, index: usize) -> Option<SurfaceMaterial> {
+        self.ball_seen.get(index).copied().flatten().map(|sig| sig.material)
     }
 
     #[cfg(test)]
@@ -282,6 +323,7 @@ impl App {
         self.edit.open = !self.edit.open;
         self.edit.start_settling();
         tx.motion(PANEL_SPRING);
+        self.edit.focus = None;
         if self.edit.open {
             self.ensure_session();
             self.update_surface();
@@ -310,6 +352,14 @@ impl App {
         self.edit.comparing = false;
         self.edit.expanded = None;
         self.edit.folding = None;
+        self.edit.model_images = None;
+        self.edit.focus = None;
+        self.edit.balls.clear();
+        self.edit.map_thumbs.clear();
+        self.edit.ball_seen.clear();
+        self.edit.thumb_seen.clear();
+        self.edit.drawing.cancel();
+        self.edit.shrunk = Arc::default();
         self.edit.autoplay_waiting = false;
         self.clear_surface();
         self.ensure_session();
@@ -360,6 +410,8 @@ impl App {
         if options.edit.is_none() {
             self.edit.output = None;
             self.edit.rendered_image = None;
+            self.edit.model_images = None;
+            self.update_surface();
             self.edit.clean = None;
             self.edit.rendering.cancel();
             self.edit.cutting.cancel();
@@ -381,6 +433,14 @@ impl App {
         });
     }
 
+    /// A full poll, reporting whether editing work landed in it.
+    #[cfg(test)]
+    pub(crate) fn poll_editor_for_test(&mut self, tx: &mut Tx) -> bool {
+        let landed = self.poll_editor();
+        self.poll(tx);
+        landed
+    }
+
     /// Lands whatever background editing work has finished; true if anything did.
     pub(crate) fn poll_editor(&mut self) -> bool {
         let mut changed = false;
@@ -390,7 +450,13 @@ impl App {
                 match result {
                     Ok(decoded) => {
                         // A model's first material opens by itself, so the panel starts useful.
-                        if let Decoded::Model(doc) = decoded.as_ref() && self.edit.expanded.is_none() && !doc.materials.is_empty() { self.edit.expanded = Some(0); }
+                        if let Decoded::Model(doc) = decoded.as_ref() {
+                            if self.edit.expanded.is_none() && !doc.materials.is_empty() { self.edit.expanded = Some(0); }
+                            self.edit.balls = doc.materials.iter().map(|_| Pixels::new()).collect();
+                            self.edit.ball_seen = vec![None; doc.materials.len()];
+                            self.edit.map_thumbs = (0..doc.image_count()).map(|_| Pixels::new()).collect();
+                            self.edit.thumb_seen = vec![0; doc.image_count()];
+                        }
                         self.edit.session = Some(Session { key, decoded });
                         self.edit_changed();
                     }
@@ -408,6 +474,10 @@ impl App {
         if let Some((key, result)) = self.edit.rendering.take() {
             changed = true;
             if self.selected_key() == Some(key) { self.land_render(result); }
+        }
+        if let Some(drawn) = self.edit.drawing.take() {
+            changed = true;
+            self.land_drawn(drawn);
         }
         if let Some((key, end)) = self.edit.tuning.take() {
             changed = true;
@@ -478,15 +548,84 @@ impl App {
     fn update_surface_with(&mut self, rendered: Option<Vec<Arc<Image>>>) {
         let Some(decoded) = self.model_doc() else { return };
         let Decoded::Model(doc) = decoded.as_ref() else { return };
-        let edit = self.model_edit();
-        let surface = if self.edit.comparing {
-            doc.surface(&ModelEdit::default(), doc.original_images())
+        // Kept apart from the stage's copy, which holds the originals while comparing.
+        if rendered.is_some() { self.edit.model_images = rendered; }
+        let (edit, images) = if self.edit.comparing {
+            (ModelEdit::default(), doc.original_images())
         } else {
-            let images = rendered.or_else(|| self.stage.surface.as_ref().map(|s| s.images.clone())).unwrap_or_else(|| doc.original_images());
-            doc.surface(&edit, images)
+            (self.model_edit(), self.edit.model_images.clone().unwrap_or_else(|| doc.original_images()))
         };
+        self.request_balls(doc, &edit, &images);
+        let mut surface = doc.surface(&edit, images);
+        surface.focus = self.edit.focus;
         self.stage.surface = Some(surface);
         self.stage.surface_revision += 1;
+    }
+
+    /// Picks out one material on the stage, for as long as it's hovered in the list.
+    pub fn set_material_focus(&mut self, index: usize, inside: bool) {
+        let focus = if inside { Some(index) } else { self.edit.focus.filter(|f| *f != index) };
+        self.edit.focus = focus;
+        if let Some(surface) = &mut self.stage.surface {
+            surface.focus = focus;
+            self.stage.surface_revision += 1;
+        }
+    }
+
+    /// Redraws the material balls and map thumbnails that are out of date, off the UI thread.
+    fn request_balls(&mut self, doc: &ModelDoc, edit: &ModelEdit, images: &[Arc<Image>]) {
+        let Some(key) = self.selected_key() else { return };
+        let address = |image: Option<u32>| image.and_then(|i| images.get(i as usize)).map_or(0, |a| Arc::as_ptr(a) as usize);
+        let mut balls = Vec::new();
+        for index in 0..doc.materials.len() {
+            let material = doc.material_surface(index, edit);
+            let sig = BallSig { material, maps: [address(material.image), address(material.surface_image), address(material.normal_image), address(material.emissive_image)] };
+            if self.edit.ball_seen.get(index).copied().flatten() != Some(sig) { balls.push((index, sig)); }
+        }
+        let used: std::collections::BTreeSet<usize> = doc.materials.iter().flat_map(|m| m.maps.iter().map(|(_, i)| *i)).collect();
+        let thumbs: Vec<(usize, Arc<Image>)> = used.into_iter().filter_map(|i| {
+            let image = images.get(i)?;
+            (self.edit.thumb_seen.get(i).copied() != Some(Arc::as_ptr(image) as usize)).then(|| (i, image.clone()))
+        }).collect();
+        if balls.is_empty() && thumbs.is_empty() {
+            self.edit.drawing.cancel();
+            return;
+        }
+        let images = images.to_vec();
+        let shrunk = self.edit.shrunk.clone();
+        self.edit.drawing.request((key, balls, thumbs, images), move |(key, balls, thumbs, images)| {
+            let small = |index: Option<u32>| index.and_then(|i| images.get(i as usize)).map(|image| shrunk.get(image));
+            let balls = balls.into_iter().map(|(index, sig): (usize, BallSig)| {
+                let m = sig.material;
+                let maps = ball::Maps { base: small(m.image), surface: small(m.surface_image), normal: small(m.normal_image), emissive: small(m.emissive_image) };
+                (index, sig, ball::draw(&m, &maps, ball::BALL_PX))
+            }).collect();
+            let thumbs = thumbs.into_iter().map(|(index, image)| {
+                let shown = shrunk.get(&image);
+                (index, Arc::as_ptr(&image) as usize, shown)
+            }).collect();
+            Drawn { key, balls, thumbs }
+        });
+    }
+
+    fn land_drawn(&mut self, drawn: Drawn) {
+        if self.selected_key() != Some(drawn.key) { return }
+        for (index, sig, rgba) in drawn.balls {
+            if let Some(pixels) = self.edit.balls.get(index) { pixels.set(ball::BALL_PX, ball::BALL_PX, rgba); }
+            if let Some(slot) = self.edit.ball_seen.get_mut(index) { *slot = Some(sig); }
+        }
+        for (index, address, shown) in drawn.thumbs {
+            if let Some(pixels) = self.edit.map_thumbs.get(index) { pixels.set(shown.width, shown.height, shown.rgba.clone()); }
+            if let Some(slot) = self.edit.thumb_seen.get_mut(index) { *slot = address; }
+        }
+    }
+
+    /// Applies a look to a material in one step.
+    pub fn apply_preset(&mut self, index: usize, roughness: f32, metallic: f32) {
+        self.set_material(index, true, |m| {
+            m.roughness = Some(roughness);
+            m.metallic = Some(metallic);
+        });
     }
 
     /// Changes one material. `commit` is false while a slider is still moving.
@@ -501,6 +640,7 @@ impl App {
             let close = |a: f32, b: f32| (a - b).abs() < 0.0005;
             if entry.roughness.is_some_and(|v| close(v, info.roughness)) { entry.roughness = None; }
             if entry.metallic.is_some_and(|v| close(v, info.metallic)) { entry.metallic = None; }
+            if entry.normal.is_some_and(|v| close(v, info.normal_scale)) { entry.normal = None; }
             if entry.color.is_some_and(|c| (0..3).all(|i| close(c[i], info.color[i]))) { entry.color = None; }
         }
         if *entry == MaterialEdit::default() { edit.materials.remove(&index); }

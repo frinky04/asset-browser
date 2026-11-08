@@ -442,12 +442,15 @@ fn wait_for_edit(rt: &mut Runtime<App>) {
     // A pointer event's handler can start the work on the next frame.
     settle(rt);
     let start = Instant::now();
-    while rt.state.edit.busy() && start.elapsed() < Duration::from_secs(30) {
-        rt.update(|s, tx| { s.poll(tx); });
+    // One job's answer often starts the next, so it's only over when polling finds nothing more.
+    let mut quiet = 0;
+    while quiet < 3 && start.elapsed() < Duration::from_secs(30) {
+        let mut landed = false;
+        rt.update(|s, tx| landed = s.poll_editor_for_test(tx));
+        quiet = if landed || rt.state.edit.busy() { 0 } else { quiet + 1 };
         rt.frame(1.0 / 60.0);
         std::thread::sleep(Duration::from_millis(2));
     }
-    rt.update(|s, tx| { s.poll(tx); });
     settle(rt);
 }
 
@@ -704,6 +707,80 @@ fn audio_tabs_and_the_loop_switch_never_resize_the_panel() {
 }
 
 #[test]
+fn flipping_to_the_original_and_back_keeps_a_models_edits_on_stage() {
+    let root = edit_fixture();
+    let mut rt = app_on(&root);
+    open_editor(&mut rt, "tri.obj");
+    rt.update(|s, _| s.set_material(0, true, |m| m.roughness = Some(0.2)));
+    wait_for_edit(&mut rt);
+    click(&mut rt, "all-textures/64");
+    wait_for_edit(&mut rt);
+    let shown = |rt: &Runtime<App>| {
+        let surface = rt.state.stage.surface.as_ref().unwrap();
+        (surface.materials[0].roughness, surface.images[0].width)
+    };
+    assert_eq!(shown(&rt), (0.2, 64));
+
+    click(&mut rt, "compare/Original");
+    wait_for_edit(&mut rt);
+    assert_eq!(shown(&rt), (1.0, 128), "Original shows the source's values and textures");
+
+    click(&mut rt, "compare/Edited");
+    wait_for_edit(&mut rt);
+    assert_eq!(shown(&rt), (0.2, 64), "the edit comes back as it was, with nothing else touched");
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_render_finishing_while_comparing_is_there_when_flipping_back() {
+    let root = edit_fixture();
+    let mut rt = app_on(&root);
+    open_editor(&mut rt, "tri.obj");
+    click(&mut rt, "all-textures/64");
+    click(&mut rt, "compare/Original");
+    wait_for_edit(&mut rt);
+    assert_eq!(rt.state.stage.surface.as_ref().unwrap().images[0].width, 128);
+    click(&mut rt, "compare/Edited");
+    wait_for_edit(&mut rt);
+    assert_eq!(rt.state.stage.surface.as_ref().unwrap().images[0].width, 64);
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn material_rows_show_a_ball_presets_and_their_maps() {
+    let root = edit_fixture();
+    let mut rt = app_on(&root);
+    open_editor(&mut rt, "tri.obj");
+    for _ in 0..40 { rt.frame(1.0 / 60.0); }
+    assert!(rt.find("ball-0").is_some());
+    assert_eq!(rt.state.edit.balls[0].size(), (crate::edit::ball::BALL_PX, crate::edit::ball::BALL_PX), "the ball was drawn");
+    assert_eq!(rt.state.edit.map_thumbs[0].size(), (128, 128), "the map strip has the texture");
+
+    // A preset sets both values, and the ball follows.
+    click(&mut rt, "m0-preset/Metal");
+    wait_for_edit(&mut rt);
+    let edit = rt.state.model_edit();
+    assert_eq!((edit.materials[&0].roughness, edit.materials[&0].metallic), (Some(0.3), Some(1.0)));
+    assert_eq!(rt.state.edit.drawn_ball(0).map(|m| (m.roughness, m.metallic)), Some((0.3, 1.0)), "the ball was redrawn");
+
+    // Hovering a row picks the material out on the stage, and leaving lets it go.
+    rt.update(|s, _| s.set_material_focus(0, true));
+    assert_eq!(rt.state.stage.surface.as_ref().unwrap().focus, Some(0));
+    rt.update(|s, _| s.set_material_focus(0, false));
+    assert_eq!(rt.state.stage.surface.as_ref().unwrap().focus, None);
+
+    // Folding the open row back leaves a small ball.
+    let open = rect(&rt, "ball-0")[2];
+    click(&mut rt, "ball-0");
+    for _ in 0..40 { rt.frame(1.0 / 60.0); }
+    assert!(rect(&rt, "ball-0")[2] < open);
+    drop(rt);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn a_material_row_springs_open_and_closed_inside_a_fixed_panel() {
     let root = edit_fixture();
     let mut rt = app_on(&root);
@@ -713,7 +790,7 @@ fn a_material_row_springs_open_and_closed_inside_a_fixed_panel() {
     let stage = rect(&rt, "stage")[3];
     let open = rect(&rt, "fold-0")[3];
     assert!(open > 100.0, "{open}");
-    press(&mut rt, "material-0");
+    press(&mut rt, "ball-0");
     let steps = heights(&mut rt, "fold-0", 40, |rt| assert_eq!((rect(rt, "edit-panel"), rect(rt, "stage")[3]), (panel, stage)));
     assert!(eases_between(&steps, open, 0.0), "{steps:?}");
     assert_eq!(rect(&rt, "fold-0")[3], 0.0);

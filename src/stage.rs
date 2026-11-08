@@ -187,6 +187,25 @@ struct G { clip: mat4x4f, light: vec4f, eye: vec4f }
 struct M { tint: vec4f, pbr: vec4f, emissive: vec4f }
 @group(1) @binding(2) var<uniform> m: M;
 @group(1) @binding(3) var surface_map: texture_2d<f32>;
+@group(1) @binding(4) var normal_map: texture_2d<f32>;
+@group(1) @binding(5) var emissive_map: texture_2d<f32>;
+// Bends `n` by a tangent-space sample, finding the tangent frame from screen derivatives so the
+// mesh needs no tangents of its own. A glTF normal map's +Y points against increasing v.
+fn bent(n: vec3f, world: vec3f, uv: vec2f, texel: vec3f, scale: f32) -> vec3f {
+    let dp1 = dpdx(world);
+    let dp2 = dpdy(world);
+    let duv1 = dpdx(uv);
+    let duv2 = dpdy(uv);
+    let across = cross(dp2, n);
+    let along = cross(n, dp1);
+    let t = across * duv1.x + along * duv2.x;
+    let b = across * duv1.y + along * duv2.y;
+    let longest = max(dot(t, t), dot(b, b));
+    if (longest < 1e-14) { return n; }
+    let unit = 1.0 / sqrt(longest);
+    let bump = (texel * 2.0 - vec3f(1.0)) * vec3f(scale, scale, 1.0);
+    return normalize(t * unit * bump.x - b * unit * bump.y + n * bump.z);
+}
 struct V { @builtin(position) p: vec4f, @location(0) n: vec3f, @location(1) uv: vec2f, @location(2) world: vec3f }
 @vertex fn vs(@location(0) pos: vec3f, @location(1) n: vec3f, @location(2) uv: vec2f) -> V {
     return V(g.clip * vec4f(pos, 1.0), n, uv, pos);
@@ -195,13 +214,17 @@ struct V { @builtin(position) p: vec4f, @location(0) n: vec3f, @location(1) uv: 
     let albedo = textureSample(image, smp, v.uv) * m.tint;
     if (albedo.a < 0.5) { discard; }
     var n = normalize(v.n);
-    let lit = 0.64 + 0.74 * abs(dot(n, g.light.xyz));
-    if (m.pbr.z < 0.5) { return vec4f(albedo.rgb * lit, 1.0); }
+    let flat_lit = 0.64 + 0.74 * abs(dot(n, g.light.xyz));
     let map = textureSample(surface_map, smp, v.uv);
+    let normal_texel = textureSample(normal_map, smp, v.uv).xyz;
+    let glow = textureSample(emissive_map, smp, v.uv).rgb;
+    if (m.pbr.z < 0.5) { return vec4f(albedo.rgb * flat_lit, 1.0); }
     let rough = clamp(m.pbr.x * map.g, 0.045, 1.0);
     let metal = clamp(m.pbr.y * map.b, 0.0, 1.0);
     let eye = normalize(g.eye.xyz - v.world);
     if (dot(n, eye) < 0.0) { n = -n; }
+    n = bent(n, v.world, v.uv, normal_texel, m.emissive.w);
+    let lit = 0.64 + 0.74 * abs(dot(n, g.light.xyz));
     let half = normalize(g.light.xyz + eye);
     let a = rough * rough;
     let a2 = a * a;
@@ -211,9 +234,12 @@ struct V { @builtin(position) p: vec4f, @location(0) n: vec3f, @location(1) uv: 
     let f0 = mix(vec3f(0.04), albedo.rgb, metal);
     let toward = reflect(-eye, n);
     let sky = mix(vec3f(0.22, 0.23, 0.26), vec3f(0.98, 0.99, 1.0), toward.y * 0.5 + 0.5);
-    let reflection = mix(sky, vec3f(0.55), rough) * (1.0 - rough * 0.7);
+    // A rough metal still reflects the whole room, just blurred, so it stays as bright as its colour.
+    let reflection = mix(sky, vec3f(0.8), rough) * mix(1.0 - rough * 0.7, 1.0, metal);
     let shaded = albedo.rgb * lit * (1.0 - metal) + f0 * (highlight * abs(dot(n, g.light.xyz)) * 0.25 + reflection);
-    return vec4f(shaded + m.emissive.rgb, 1.0);
+    let finished = shaded + m.emissive.rgb * glow;
+    // Hovering a material in the list leaves the others like this.
+    return vec4f(mix(finished * 0.28, finished, m.pbr.w), 1.0);
 }
 "#;
 
@@ -375,7 +401,7 @@ impl Pipes {
         let texture_uniform = uniform(std::mem::size_of::<TextureUniform>());
 
         let global_layout = bgl(&[uniform_entry(0, frag_vert)]);
-        let part_layout = bgl(&[tex_entry(0), sampler_entry(1), uniform_entry(2, wgpu::ShaderStages::FRAGMENT), tex_entry(3)]);
+        let part_layout = bgl(&[tex_entry(0), sampler_entry(1), uniform_entry(2, wgpu::ShaderStages::FRAGMENT), tex_entry(3), tex_entry(4), tex_entry(5)]);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&global_layout), Some(&part_layout)], immediate_size: 0 });
         let m = module("model", MODEL_WGSL);
         let attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
@@ -499,6 +525,8 @@ struct GpuPart {
 /// The textures a model is drawn with, uploaded once each however many times they're rebound.
 struct ModelImages {
     white: wgpu::TextureView,
+    /// A normal map that doesn't bend anything.
+    flat: wgpu::TextureView,
     /// Keyed by the image's address, which the `Arc` or `Model` holding it keeps stable.
     views: HashMap<usize, (wgpu::TextureView, Option<Arc<Image>>)>,
 }
@@ -516,7 +544,7 @@ fn bind_parts(device: &wgpu::Device, queue: &wgpu::Queue, pipes: &Pipes, parts: 
     let mut used = std::collections::HashSet::new();
     for part in parts {
         let shaded = surface.and_then(|s| s.materials.get(part.material as usize).map(|m| (s, *m)));
-        let (uniform, base, map) = if let Some((surface, m)) = shaded {
+        let (uniform, base, map, normal, glow) = if let Some((surface, m)) = shaded {
             let view_of = |index: Option<u32>, images: &mut ModelImages, used: &mut std::collections::HashSet<usize>| {
                 let image = index.and_then(|i| surface.images.get(i as usize))?;
                 used.insert(Arc::as_ptr(image) as usize);
@@ -524,17 +552,21 @@ fn bind_parts(device: &wgpu::Device, queue: &wgpu::Queue, pipes: &Pipes, parts: 
             };
             let base = view_of(m.image, images, &mut used);
             let map = view_of(m.surface_image, images, &mut used);
-            (PartUniform { tint: m.color, pbr: [m.roughness, m.metallic, 1.0, 0.0], emissive: [m.emissive[0], m.emissive[1], m.emissive[2], 0.0] }, base, map)
+            let normal = view_of(m.normal_image, images, &mut used);
+            let glow = view_of(m.emissive_image, images, &mut used);
+            let picked = surface.focus.is_none_or(|focus| m.doc == Some(focus as u32));
+            (PartUniform { tint: m.color, pbr: [m.roughness, m.metallic, 1.0, f32::from(u8::from(picked))], emissive: [m.emissive[0], m.emissive[1], m.emissive[2], m.normal_scale] }, base, map, normal, glow)
         } else {
             let material = model.materials[part.material as usize];
             let base = material.image.and_then(|i| model.images.get(i as usize)).map(|image| {
                 used.insert(std::ptr::from_ref(image) as usize);
                 images.view(device, queue, image, None)
             });
-            (PartUniform { tint: material.color, pbr: [1.0, 0.0, 0.0, 0.0], emissive: [0.0; 4] }, base, None)
+            (PartUniform { tint: material.color, pbr: [1.0, 0.0, 0.0, 1.0], emissive: [0.0; 4] }, base, None, None, None)
         };
         queue.write_buffer(&part.uniform, 0, bytemuck::bytes_of(&uniform));
         let white = images.white.clone();
+        let flat = images.flat.clone();
         part.group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &pipes.part_layout,
@@ -543,6 +575,8 @@ fn bind_parts(device: &wgpu::Device, queue: &wgpu::Queue, pipes: &Pipes, parts: 
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&pipes.repeat_nearest) },
                 wgpu::BindGroupEntry { binding: 2, resource: part.uniform.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(map.as_ref().unwrap_or(&white)) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(normal.as_ref().unwrap_or(&flat)) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(glow.as_ref().unwrap_or(&white)) },
             ],
         });
     }
@@ -572,7 +606,8 @@ fn prepare_scene(device: &wgpu::Device, queue: &wgpu::Queue, pipes: &Pipes, scen
             let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&m.vertices), usage: wgpu::BufferUsages::VERTEX });
             let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&m.indices), usage: wgpu::BufferUsages::INDEX });
             let white = upload_image(device, queue, &Image { width: 1, height: 1, rgba: vec![255; 4] });
-            let mut images = ModelImages { white: white.clone(), views: HashMap::new() };
+            let flat = upload_image(device, queue, &Image { width: 1, height: 1, rgba: vec![128, 128, 255, 255] });
+            let mut images = ModelImages { white: white.clone(), flat: flat.clone(), views: HashMap::new() };
             let mut parts: Vec<GpuPart> = m.parts.iter().map(|p| {
                 let uniform = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: std::mem::size_of::<PartUniform>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
                 let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -583,6 +618,8 @@ fn prepare_scene(device: &wgpu::Device, queue: &wgpu::Queue, pipes: &Pipes, scen
                         wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&pipes.repeat_nearest) },
                         wgpu::BindGroupEntry { binding: 2, resource: uniform.as_entire_binding() },
                         wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&white) },
+                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&flat) },
+                        wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&white) },
                     ],
                 });
                 GpuPart { start: p.start, count: p.count, material: p.material, uniform, group }

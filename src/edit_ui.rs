@@ -4,11 +4,11 @@
 //! nothing around them moves.
 
 use rune::tok::motion;
-use rune::{Color, Cursor, El, Phase, ScrollSpec, Tx, col, el, row, text};
+use rune::{Color, Cursor, El, Phase, ScrollSpec, SurfaceFit, Tx, col, el, icon, row, text};
 use rune_kit::ScrollBar;
 
 use crate::app::{App, bytes, ladder};
-use crate::edit::mesh::{MaterialInfo, ModelDoc};
+use crate::edit::mesh::{MaterialInfo, ModelDoc, Slot};
 use crate::edit::{Decoded, Effort, ImageEdit, MaterialEdit, ModelEdit};
 use crate::editor::{AudioTab, Marker};
 use crate::library::{Asset, Kind};
@@ -26,6 +26,11 @@ const IMAGE_PANEL_H: f32 = 128.0;
 /// The tab bar over the tallest tab, Loop.
 const AUDIO_PANEL_H: f32 = 240.0;
 const MATERIAL_ROW_GAP: f32 = 4.0;
+const MATERIAL_HEAD_CLOSED: f32 = 42.0;
+const MATERIAL_HEAD_OPEN: f32 = 80.0;
+const MATERIAL_BALL_CLOSED: f32 = 32.0;
+const MATERIAL_BALL_OPEN: f32 = 66.0;
+const MAP_THUMB: f32 = 42.0;
 const SEAM_H: f32 = 64.0;
 
 fn clock_fine(seconds: f32) -> String {
@@ -190,10 +195,60 @@ fn image_controls(s: &App) -> El {
             })), edit.colors.is_some()))
 }
 
-fn material_summary(doc: &ModelDoc, index: usize, change: &MaterialEdit) -> String {
+/// Quick looks a material can be given: a name, roughness and metallic.
+const PRESETS: [(&str, f32, f32); 4] = [("Matte", 0.9, 0.0), ("Satin", 0.5, 0.0), ("Gloss", 0.15, 0.0), ("Metal", 0.3, 1.0)];
+
+/// A material's row: its ball, name and, when open, a bigger ball and quick looks.
+fn material_head(s: &App, doc: &ModelDoc, index: usize, info: &MaterialInfo, change: &MaterialEdit, open: bool) -> El {
     let (_, roughness, metallic, _) = doc.values(index, &ModelEdit { materials: [(index, *change)].into() });
-    let size = change.max_texture.or_else(|| doc.longest_texture(index)).map_or_else(String::new, |n| format!(", {n}"));
-    format!("R {roughness:.2} M {metallic:.2}{size}")
+    let edited = *change != MaterialEdit::default();
+    let height = if open { MATERIAL_HEAD_OPEN } else { MATERIAL_HEAD_CLOSED };
+    let size = if open { MATERIAL_BALL_OPEN } else { MATERIAL_BALL_CLOSED };
+    let mut ball = el().key(format!("ball-{index}")).size(size, size).mt((height - size) * 0.5).inert();
+    if let Some(pixels) = s.edit.balls.get(index) { ball = ball.pixels_fit(pixels, SurfaceFit::Fit); }
+
+    let mut title = row().w_full().h(18.0).gap(8.0).items_center()
+        .child(el().grow(1.0).min_w(0.0).child(text(info.name.clone()).font(LABEL).color(if edited || open { T.text } else { T.muted }).truncate()));
+    title = if open {
+        title.child(dim(el().key(format!("reset-{index}")).role("button").focusable(true).label("Reset this material").help("Reset this material").size(20.0, 20.0).radius(5.0).center()
+            .hover(T.hover).press(T.press).press_scale(0.92).cursor(Cursor::Pointer)
+            .on_press_tx(move |s: &mut App, _| s.reset_material(index))
+            .child(icon(&REFRESH, 12.0).color(T.muted)), edited))
+    } else {
+        title.child(label(format!("R {roughness:.2}  M {metallic:.2}"), SMALL, T.faint))
+    };
+    let mut words = col().grow(1.0).min_w(0.0).gap(6.0).pt((MATERIAL_HEAD_CLOSED - 18.0) * 0.5).child(title);
+    if open {
+        let current = PRESETS.iter().position(|(_, r, m)| (r - roughness).abs() < 0.01 && (m - metallic).abs() < 0.01).unwrap_or(usize::MAX);
+        let items = PRESETS.iter().enumerate().map(|(at, (name, ..))| plain(*name, at)).collect();
+        words = words.child(segments_inset(&format!("m{index}-preset"), items, current, move |s, at, _| {
+            let (_, r, m) = PRESETS[at];
+            s.apply_preset(index, r, m);
+        }, 1.0).w_full().transition(rune::Transition::opacity()));
+    }
+    row().key(format!("material-{index}")).role("button").focusable(true).label(info.name.clone()).w_full().h(height).px(8.0).gap(10.0).items_start().radius(6.0).clip_soft(0.0)
+        .hover(if open { Color::TRANSPARENT } else { T.hover }).press(if open { Color::TRANSPARENT } else { T.press }).cursor(Cursor::Pointer)
+        .on_press_tx(move |s: &mut App, tx| s.toggle_material(index, tx))
+        .on_hover_change(move |s: &mut App, inside, tx| {
+            s.set_material_focus(index, inside);
+            tx.live_only();
+        })
+        .child(ball)
+        .child(words)
+}
+
+/// A thumbnail of every map the material uses.
+fn map_strip(s: &App, doc: &ModelDoc, info: &MaterialInfo) -> El {
+    let mut strip = row().w_full().gap(6.0).mt(2.0);
+    for (slot, image) in &info.maps {
+        let size = doc.image_size(*image).map_or_else(|| "can't be resized".to_owned(), |(w, h)| format!("{w}×{h}"));
+        let mut picture = el().size(MAP_THUMB, MAP_THUMB).radius(5.0).fill(T.bg).border(1.0, T.line).clip_rounded(5.0);
+        if let Some(pixels) = s.edit.map_thumbs.get(*image) { picture = picture.pixels_fit(pixels, SurfaceFit::Fill); }
+        strip = strip.child(col().w(MAP_THUMB + 4.0).gap(2.0).items_center().help(format!("{} {size}", slot.title()))
+            .child(picture)
+            .child(label(slot.short(), SMALL, T.faint)));
+    }
+    strip
 }
 
 fn has_texture_sizes(doc: &ModelDoc, index: usize) -> bool {
@@ -204,19 +259,25 @@ fn has_texture_sizes(doc: &ModelDoc, index: usize) -> bool {
 fn material_body_height(doc: &ModelDoc, index: usize, info: &MaterialInfo) -> f32 {
     let mut height = (SLIDER_H + MATERIAL_ROW_GAP) * 3.0; // Roughness, metallic, tint.
     if info.glows() { height += SLIDER_H + MATERIAL_ROW_GAP; }
+    if info.map(Slot::Normal).is_some() { height += SLIDER_H + MATERIAL_ROW_GAP; }
     if has_texture_sizes(doc, index) { height += 30.0 + MATERIAL_ROW_GAP; }
-    if !info.maps.is_empty() { height += 16.0 + MATERIAL_ROW_GAP + 2.0; }
-    height + 30.0 + CARD_PAD
+    if !info.maps.is_empty() { height += MAP_THUMB + 2.0 + 16.0 + 2.0 + MATERIAL_ROW_GAP; }
+    height + CARD_PAD
 }
 
-fn material_body(doc: &ModelDoc, index: usize, info: &MaterialInfo, change: &MaterialEdit) -> El {
-    let (shade, roughness, metallic, emissive) = doc.values(index, &ModelEdit { materials: [(index, *change)].into() });
+fn material_body(s: &App, doc: &ModelDoc, index: usize, info: &MaterialInfo, change: &MaterialEdit) -> El {
+    let edit = ModelEdit { materials: [(index, *change)].into() };
+    let (shade, roughness, metallic, emissive) = doc.values(index, &edit);
     let mut body = col().w_full().px(CARD_PAD).pb(CARD_PAD).gap(MATERIAL_ROW_GAP)
         .child(slider(&format!("m{index}-rough"), "Roughness", roughness, format!("{roughness:.2}"), move |s, v, done| s.set_material(index, done, |m| m.roughness = Some(v))))
         .child(slider(&format!("m{index}-metal"), "Metallic", metallic, format!("{metallic:.2}"), move |s, v, done| s.set_material(index, done, |m| m.metallic = Some(v))));
     if info.glows() {
         let peak = emissive.iter().copied().fold(0.0, f32::max);
         body = body.child(slider(&format!("m{index}-glow"), "Emissive", peak, format!("{peak:.2}"), move |s, v, done| s.set_material(index, done, |m| m.emissive = Some(v))));
+    }
+    if info.map(Slot::Normal).is_some() {
+        let strength = doc.normal_strength(index, &edit);
+        body = body.child(slider(&format!("m{index}-normal"), "Normal", strength / 2.0, format!("{strength:.2}"), move |s, v, done| s.set_material(index, done, |m| m.normal = Some(v * 2.0))));
     }
     let channel = |at: usize, fill: &str| {
         track(format!("m{index}-tint-{at}"), ["Red", "Green", "Blue"][at], shade[at], color(fill), move |s: &mut App, v, done| {
@@ -234,15 +295,8 @@ fn material_body(doc: &ModelDoc, index: usize, info: &MaterialInfo, change: &Mat
         let items = std::iter::once(plain("Full", None)).chain(ladder(longest).into_iter().map(|n| plain(n.to_string(), Some(n)))).collect();
         body = body.child(labelled("Textures", segments_inset(&format!("m{index}-size"), items, change.max_texture, move |s, v, _| s.set_material(index, true, |m| m.max_texture = v), 1.0).w_full()));
     }
-    if !info.maps.is_empty() {
-        let lines = info.maps.iter().map(|(slot, image)| {
-            let size = doc.image_size(*image).map_or_else(|| "kept as is".to_owned(), |(w, h)| format!("{w}×{h}"));
-            format!("{} {size}", slot.title())
-        }).collect::<Vec<_>>().join("   ");
-        body = body.child(text(lines).font(SMALL).color(T.faint).truncate().w_full().mt(2.0));
-    }
-    let edited = *change != MaterialEdit::default();
-    body.child(row().w_full().justify_end().child(dim(outlined("Reset material", "Reset material", false, &REFRESH, move |s, _| s.reset_material(index)), edited)))
+    if !info.maps.is_empty() { body = body.child(map_strip(s, doc, info)); }
+    body
 }
 
 fn model_controls(s: &App, doc: &ModelDoc) -> El {
@@ -257,27 +311,19 @@ fn model_controls(s: &App, doc: &ModelDoc) -> El {
             let all: Vec<Option<u32>> = (0..doc.materials.len()).filter(|i| doc.longest_texture(*i).is_some()).map(|i| edit.materials.get(&i).and_then(|m| m.max_texture)).collect();
             let agree = all.windows(2).all(|p| p[0] == p[1]);
             let current = if agree { all.first().copied().flatten() } else { Some(0) };
-            list = list.child(labelled("All textures", segments_inset("all-textures", items, current, |s, v, _| s.set_all_texture_sizes(v), 1.0).w_full()).mb(MATERIAL_ROW_GAP));
+            let count = doc.texture_count();
+            list = list.child(labelled(&format!("{count} texture{}", if count == 1 { "" } else { "s" }), segments_inset("all-textures", items, current, |s, v, _| s.set_all_texture_sizes(v), 1.0).w_full()).mb(MATERIAL_ROW_GAP));
         }
     }
     for (index, info) in doc.materials.iter().enumerate() {
         let change = edit.materials.get(&index).copied().unwrap_or_default();
         let open = s.edit.expanded == Some(index);
-        let shade = doc.swatch(index, &edit);
-        let tone = |c: f32| (c.clamp(0.0, 1.0) * 255.0) as u8;
-        let swatch = color(&format!("#{:02X}{:02X}{:02X}", tone(shade[0]), tone(shade[1]), tone(shade[2])));
-        let edited = change != MaterialEdit::default();
-        let head = row().key(format!("material-{index}")).role("button").focusable(true).label(info.name.clone()).w_full().h(30.0).px(8.0).gap(8.0).items_center().radius(6.0)
-            .hover(T.hover).press(T.press).cursor(Cursor::Pointer)
-            .on_press_tx(move |s: &mut App, tx| s.toggle_material(index, tx))
-            .child(el().size(14.0, 14.0).radius(4.0).fill(swatch).border(1.0, T.line))
-            .child(el().grow(1.0).min_w(0.0).child(text(info.name.clone()).font(LABEL).color(if edited { T.text } else { T.muted }).truncate()))
-            .child(label(material_summary(doc, index, &change), SMALL, T.faint));
+        let head = material_head(s, doc, index, info, &change, open);
         // Drawn while open or still closing; otherwise its zero height hides nothing.
         let folding = s.edit.folding == Some(index) && s.edit.settling();
         let mut fold = el().key(format!("fold-{index}")).w_full().h(if open { material_body_height(doc, index, info) } else { 0.0 }).clip_soft(0.0).opacity(if open { 1.0 } else { 0.0 });
         if !open { fold = fold.inert(); }
-        if open || folding { fold = fold.child(material_body(doc, index, info, &change)); }
+        if open || folding { fold = fold.child(material_body(s, doc, index, info, &change)); }
         list = list.child(col().key(format!("mat-{index}")).w_full().radius(7.0).border(1.0, if open { T.line } else { Color::TRANSPARENT }).child(head).child(fold));
     }
     if !doc.keeps_scene {
@@ -292,7 +338,7 @@ fn panel_height(s: &App, kind: Kind) -> f32 {
     match kind {
         Kind::Texture => IMAGE_PANEL_H,
         Kind::Audio => AUDIO_PANEL_H,
-        Kind::Model => (s.window_height * 0.3).clamp(210.0, 300.0),
+        Kind::Model => (s.window_height * 0.37).clamp(240.0, 370.0),
     }
 }
 

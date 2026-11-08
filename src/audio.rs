@@ -20,6 +20,11 @@ enum Command {
     Clip { pcm: Arc<Pcm>, looped: bool, at: f32 },
 }
 
+/// Tests and headless runs never open a sound device, so they can't make a noise.
+fn silent() -> bool {
+    cfg!(test) || rune::tooling::headless_run().is_some()
+}
+
 /// Plays samples held in memory, optionally forever.
 struct Clip {
     pcm: Arc<Pcm>,
@@ -80,7 +85,7 @@ impl Audio {
             // Opened on first use, so a machine with no output only loses sound.
             let mut output = None;
             while let Ok(command) = inbox.recv() {
-                if output.is_none() { output = OutputStream::try_default().ok(); }
+                if output.is_none() && !silent() { output = OutputStream::try_default().ok(); }
                 let Some((_, handle)) = &output else { continue };
                 let Ok(next) = Sink::try_new(handle) else { continue };
                 next.set_volume(f32::from_bits(level.load(Ordering::Relaxed)));
@@ -149,5 +154,18 @@ impl Audio {
     /// Whether a sound finished (or nothing has been asked to play).
     pub fn is_finished(&self) -> bool {
         self.with(|s| s.empty()).unwrap_or(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tests_never_reach_a_sound_device() {
+        let audio = Audio::new();
+        audio.play_clip(Arc::new(Pcm { samples: vec![0.0; 4_410], channels: 1, rate: 44_100 }), true, 0.0);
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!audio.is_playing() && audio.is_finished(), "nothing was opened to play on");
     }
 }

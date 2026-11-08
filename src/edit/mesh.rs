@@ -21,6 +21,8 @@ pub struct MaterialEdit {
     pub metallic: Option<f32>,
     /// The brightest emissive channel.
     pub emissive: Option<f32>,
+    /// How strongly the normal map bends the surface.
+    pub normal: Option<f32>,
     /// The largest side this material's textures leave at.
     pub max_texture: Option<u32>,
 }
@@ -55,6 +57,17 @@ impl Slot {
             Slot::Emissive => "Emissive",
         }
     }
+
+    /// A label that fits under a small thumbnail.
+    pub fn short(self) -> &'static str {
+        match self {
+            Slot::Base => "Base",
+            Slot::MetalRough => "M / R",
+            Slot::Normal => "Normal",
+            Slot::Occlusion => "AO",
+            Slot::Emissive => "Glow",
+        }
+    }
 }
 
 /// One material, as the file has it.
@@ -65,6 +78,7 @@ pub struct MaterialInfo {
     pub roughness: f32,
     pub metallic: f32,
     pub emissive: [f32; 3],
+    pub normal_scale: f32,
     pub maps: Vec<(Slot, usize)>,
 }
 
@@ -88,6 +102,11 @@ pub struct SurfaceMaterial {
     pub emissive: [f32; 3],
     pub image: Option<u32>,
     pub surface_image: Option<u32>,
+    pub normal_image: Option<u32>,
+    pub emissive_image: Option<u32>,
+    pub normal_scale: f32,
+    /// The document material this is, if any.
+    pub doc: Option<u32>,
 }
 
 /// What the preview draws a model's materials with.
@@ -95,6 +114,8 @@ pub struct SurfaceMaterial {
 pub struct Surface {
     pub materials: Vec<SurfaceMaterial>,
     pub images: Vec<Arc<Image>>,
+    /// The document material to pick out, leaving the rest dim.
+    pub focus: Option<usize>,
 }
 
 struct DocImage {
@@ -163,9 +184,7 @@ pub fn open(path: &Path, library: &Path) -> Result<ModelDoc, String> {
     let doc = if matches!(ext.as_str(), "glb" | "gltf") { from_gltf(path, model)? } else { from_flat(model) };
     // Decoded now, off the UI thread, because the preview's shading uses them straight away.
     for material in &doc.materials {
-        for slot in [Slot::Base, Slot::MetalRough] {
-            if let Some(image) = material.map(slot) { doc.images[image].pixels(); }
-        }
+        for (_, image) in &material.maps { doc.images[*image].pixels(); }
     }
     Ok(doc)
 }
@@ -202,6 +221,7 @@ fn read_materials(root: &Value) -> Vec<MaterialInfo> {
             roughness: factor("roughnessFactor", 1.0),
             metallic: factor("metallicFactor", 1.0),
             emissive: array3(m.get("emissiveFactor"), [0.0; 3]),
+            normal_scale: m.get("normalTexture").and_then(|n| n.get("scale")).and_then(Value::as_f64).map_or(1.0, |v| v as f32),
             maps,
         }
     }).collect()
@@ -404,18 +424,47 @@ impl ModelDoc {
         (color, change.roughness.unwrap_or(info.roughness), change.metallic.unwrap_or(info.metallic), emissive)
     }
 
+    /// How the normal map is weighted under `edit`.
+    pub fn normal_strength(&self, material: usize, edit: &ModelEdit) -> f32 {
+        edit.materials.get(&material).and_then(|m| m.normal).unwrap_or(self.materials[material].normal_scale)
+    }
+
+    /// Document material `index` as it's drawn under `edit`.
+    pub fn material_surface(&self, index: usize, edit: &ModelEdit) -> SurfaceMaterial {
+        let (color, roughness, metallic, emissive) = self.values(index, edit);
+        let info = &self.materials[index];
+        let map = |slot| info.map(slot).map(|i| i as u32);
+        SurfaceMaterial {
+            color,
+            roughness,
+            metallic,
+            emissive,
+            image: map(Slot::Base),
+            surface_image: map(Slot::MetalRough),
+            normal_image: map(Slot::Normal),
+            emissive_image: map(Slot::Emissive),
+            normal_scale: self.normal_strength(index, edit),
+            doc: Some(index as u32),
+        }
+    }
+
     /// The preview's materials under `edit`, drawing on `images`.
     pub fn surface(&self, edit: &ModelEdit, images: Vec<Arc<Image>>) -> Surface {
         let default_material = model::Material::default();
         let materials = self.flat.iter().map(|doc| match doc {
-            Some(index) => {
-                let (color, roughness, metallic, emissive) = self.values(*index, edit);
-                let info = &self.materials[*index];
-                SurfaceMaterial { color, roughness, metallic, emissive, image: info.map(Slot::Base).map(|i| i as u32), surface_image: info.map(Slot::MetalRough).map(|i| i as u32) }
-            }
-            None => SurfaceMaterial { color: default_material.color, roughness: 1.0, metallic: 0.0, emissive: [0.0; 3], image: None, surface_image: None },
+            Some(index) => self.material_surface(*index, edit),
+            None => SurfaceMaterial { color: default_material.color, roughness: 1.0, metallic: 0.0, emissive: [0.0; 3], image: None, surface_image: None, normal_image: None, emissive_image: None, normal_scale: 1.0, doc: None },
         }).collect();
-        Surface { materials, images }
+        Surface { materials, images, focus: None }
+    }
+
+    /// How many different images the materials use.
+    pub fn texture_count(&self) -> usize {
+        self.materials.iter().flat_map(|m| m.maps.iter().map(|(_, i)| *i)).collect::<std::collections::HashSet<_>>().len()
+    }
+
+    pub fn image_count(&self) -> usize {
+        self.images.len()
     }
 
     /// The source's own images, as the preview needs them.
@@ -425,22 +474,6 @@ impl ModelDoc {
 
     pub fn image_size(&self, image: usize) -> Option<(u32, u32)> {
         self.images.get(image).and_then(|i| i.size)
-    }
-
-    /// What a material looks like at a glance: its colour times its base texture's average.
-    pub fn swatch(&self, material: usize, edit: &ModelEdit) -> [f32; 3] {
-        let (color, ..) = self.values(material, edit);
-        let average = self.materials[material].map(Slot::Base).and_then(|i| self.images[i].pixels.get().cloned().flatten()).map_or([1.0; 3], |image| {
-            // A few thousand samples is plenty for a 14-point square.
-            let every = (image.rgba.len() / 4 / 4096).max(1);
-            let (mut sum, mut count) = ([0u64; 3], 0u64);
-            for pixel in image.rgba.chunks_exact(4).step_by(every) {
-                for channel in 0..3 { sum[channel] += u64::from(pixel[channel]); }
-                count += 1;
-            }
-            sum.map(|s| s as f32 / count.max(1) as f32 / 255.0)
-        });
-        [color[0] * average[0], color[1] * average[1], color[2] * average[2]]
     }
 
     /// The longest side among the images `material` uses, if any can be resized.
@@ -498,6 +531,7 @@ impl ModelDoc {
             if change.roughness.is_some() { pbr["roughnessFactor"] = json!(roughness); }
             if change.metallic.is_some() { pbr["metallicFactor"] = json!(metallic); }
             if change.emissive.is_some() { material["emissiveFactor"] = json!(emissive); }
+            if let Some(scale) = change.normal && material.get("normalTexture").is_some() { material["normalTexture"]["scale"] = json!(scale); }
         }
     }
 

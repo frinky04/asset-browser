@@ -3,6 +3,7 @@
 //! preview and the drag both come from `render`, so what's previewed is what gets dropped, and
 //! nothing here ever writes near the library.
 
+pub mod ball;
 pub mod mesh;
 pub mod picture;
 pub mod sound;
