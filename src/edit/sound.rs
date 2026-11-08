@@ -94,8 +94,8 @@ pub fn draw_fades(view: (u64, u64), section: (u64, u64), rate: u32, edit: &Audio
         }
         let here = (x as f32 + 0.5, top + 0.5);
         let from = previous.unwrap_or(here);
-        cover_segment(&mut covered, w, h, from, here);
-        cover_segment(&mut covered, w, h, (from.0, h as f32 - from.1), (here.0, h as f32 - here.1));
+        cover_segment(&mut covered, w, h, from, here, FADE_LINE_HALF);
+        cover_segment(&mut covered, w, h, (from.0, h as f32 - from.1), (here.0, h as f32 - here.1), FADE_LINE_HALF);
         previous = Some(here);
     }
     for (index, coverage) in covered.iter().enumerate().filter(|(_, c)| **c > 0.0) {
@@ -114,9 +114,10 @@ pub fn draw_fades(view: (u64, u64), section: (u64, u64), rate: u32, edit: &Audio
 const FADE_LINE_HALF: f32 = 1.5;
 const FADE_SHADE_ALPHA: f32 = 150.0;
 
-/// Marks how much of each pixel a line from `a` to `b` covers, from its distance to the line.
-fn cover_segment(covered: &mut [f32], width: usize, height: usize, a: (f32, f32), b: (f32, f32)) {
-    let reach = FADE_LINE_HALF + 1.0;
+/// Marks how much of each pixel a line from `a` to `b`, `half` wide each side, covers, from its
+/// distance to the line. Keeps the most any line has covered, so joins aren't drawn twice.
+fn cover_segment(covered: &mut [f32], width: usize, height: usize, a: (f32, f32), b: (f32, f32), half: f32) {
+    let reach = half + 1.0;
     let (left, right) = (((a.0.min(b.0) - reach).floor().max(0.0)) as usize, ((a.0.max(b.0) + reach).ceil() as usize).min(width));
     let (top, bottom) = (((a.1.min(b.1) - reach).floor().max(0.0)) as usize, ((a.1.max(b.1) + reach).ceil() as usize).min(height));
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
@@ -126,7 +127,7 @@ fn cover_segment(covered: &mut [f32], width: usize, height: usize, a: (f32, f32)
             let (px, py) = (x as f32 + 0.5 - a.0, y as f32 + 0.5 - a.1);
             let along = ((px * dx + py * dy) / length).clamp(0.0, 1.0);
             let distance = (px - dx * along).hypot(py - dy * along);
-            let coverage = (FADE_LINE_HALF + 0.5 - distance).clamp(0.0, 1.0);
+            let coverage = (half + 0.5 - distance).clamp(0.0, 1.0);
             let slot = &mut covered[y * width + x];
             *slot = slot.max(coverage);
         }
@@ -423,21 +424,24 @@ impl PeakIndex {
 /// Frames `start..end` drawn across `width`×`height` straight-alpha RGBA. Each column is a real
 /// low-to-high span, so at high zoom you see the wave itself and where it crosses zero.
 pub fn draw_timeline(pcm: &Pcm, index: &PeakIndex, start: u64, end: u64, width: u32, height: u32, color: [u8; 3]) -> Vec<u8> {
-    let (w, h) = (width as usize, height as usize);
-    let mut out = vec![0u8; w * h * 4];
+    let w = width as usize;
     let channels = usize::from(pcm.channels.max(1));
     let frames = pcm.frames();
     let per_column = (end.saturating_sub(start)) as f64 / w.max(1) as f64;
-    // Columns on a grid of their own width, so panning slides the picture instead of re-binning
-    // every column and making it shimmer. Up close each sample matters more than that.
-    let start = if per_column >= 1.0 { (start as f64 / per_column).floor() * per_column } else { start as f64 };
-    let mid = (height as f32 - 1.0) * 0.5;
+    let mid = height as f32 * 0.5;
     let shaped = |v: f32| (v / index.loudest).clamp(-1.0, 1.0);
     let row_for = |v: f32| {
         let v = shaped(v);
         mid - v.signum() * v.abs().powf(0.7) * (mid - 1.0)
     };
-    for x in 0..w {
+    if per_column < LINE_BELOW_FRAMES_PER_COLUMN {
+        return draw_sample_line(pcm, start, per_column, width, height, color, &row_for);
+    }
+    // Columns on a grid of their own width, so panning slides the picture instead of re-binning
+    // every column and making it shimmer.
+    let start = (start as f64 / per_column).floor() * per_column;
+    let mut edges: Vec<Option<(f32, f32)>> = vec![None; w];
+    for (x, slot) in edges.iter_mut().enumerate() {
         let from = (start + x as f64 * per_column).floor() as u64;
         let to = ((start + (x + 1) as f64 * per_column).ceil() as u64 + 1).min(frames);
         if from >= frames || to <= from { continue }
@@ -453,12 +457,35 @@ pub fn draw_timeline(pcm: &Pcm, index: &PeakIndex, start: u64, end: u64, width: 
                 high = high.max(*sample);
             }
         }
-        let (top, bottom) = (row_for(high).floor() as usize, row_for(low).ceil() as usize);
-        for y in top.min(h - 1)..=bottom.min(h - 1) {
-            let at = (y * w + x) * 4;
-            out[at..at + 3].copy_from_slice(&color);
-            out[at + 3] = 255;
-        }
+        // Never thinner than a hairline, so silence still reads as a line.
+        let (top, bottom) = (row_for(high), row_for(low));
+        let thin = (TIMELINE_MIN_THICKNESS - (bottom - top)).max(0.0) * 0.5;
+        *slot = Some((top - thin, bottom + thin));
+    }
+    crate::wave::paint_envelope(&edges, width, height, color)
+}
+
+/// Below this many frames to a column there's no envelope to draw: just the samples.
+const LINE_BELOW_FRAMES_PER_COLUMN: f64 = 1.5;
+const TIMELINE_MIN_THICKNESS: f32 = 1.5;
+const SAMPLE_LINE_HALF: f32 = 1.3;
+
+/// Deep zoom: one smooth line through the samples themselves, channels averaged.
+fn draw_sample_line(pcm: &Pcm, start: u64, per_column: f64, width: u32, height: u32, color: [u8; 3], row_for: &dyn Fn(f32) -> f32) -> Vec<u8> {
+    let (w, h) = (width as usize, height as usize);
+    let frames = pcm.frames();
+    let first = start.saturating_sub(1);
+    let last = ((start as f64 + w as f64 * per_column).ceil() as u64 + 2).min(frames);
+    let mono = pcm.mono(first.min(frames), last.max(first).min(frames));
+    let mut covered = vec![0.0f32; w * h];
+    let point = |i: usize, value: f32| (((first + i as u64) as f64 - start as f64 + 0.5) as f32 / per_column as f32, row_for(value));
+    for (i, pair) in mono.windows(2).enumerate() {
+        cover_segment(&mut covered, w, h, point(i, pair[0]), point(i + 1, pair[1]), SAMPLE_LINE_HALF);
+    }
+    let mut out = vec![0u8; w * h * 4];
+    for (index, coverage) in covered.iter().enumerate().filter(|(_, c)| **c > 0.0) {
+        out[index * 4..index * 4 + 3].copy_from_slice(&color);
+        out[index * 4 + 3] = (coverage * 255.0) as u8;
     }
     out
 }
@@ -717,6 +744,28 @@ mod tests {
         let zoomed = draw_timeline(&pcm, &index, 1_000, 1_100, 200, 50, [9, 9, 9]);
         assert_eq!(painted_columns(&zoomed, 200), 200, "even with fewer samples than columns");
         assert_ne!(whole, zoomed);
+    }
+
+    #[test]
+    fn the_timeline_has_soft_edges_at_every_zoom() {
+        let pcm = sine(44_100, 44_100, 300.0, 1);
+        let index = PeakIndex::build(&pcm);
+        let soft = |px: &[u8]| px.chunks_exact(4).filter(|p| p[3] > 0 && p[3] < 255).count();
+        assert!(soft(&draw_timeline(&pcm, &index, 0, 44_100, 200, 80, [9, 9, 9])) > 100, "zoomed out");
+        assert!(soft(&draw_timeline(&pcm, &index, 1_000, 1_500, 200, 80, [9, 9, 9])) > 100, "a few samples per column");
+        assert!(soft(&draw_timeline(&pcm, &index, 1_000, 1_100, 200, 80, [9, 9, 9])) > 100, "right down at the samples");
+    }
+
+    #[test]
+    fn at_the_samples_the_line_follows_the_wave() {
+        let pcm = sine(44_100, 44_100, 300.0, 1);
+        let index = PeakIndex::build(&pcm);
+        let (width, height) = (400usize, 81usize);
+        let px = draw_timeline(&pcm, &index, 0, 147, width as u32, height as u32, [9, 9, 9]);
+        let row_at = |x: usize| (0..height).find(|y| px[(y * width + x) * 4 + 3] == 255);
+        // One cycle: above the middle in its first half, below it in its second.
+        assert!(row_at(width / 4).unwrap() < height / 2, "{:?}", row_at(width / 4));
+        assert!(row_at(width * 3 / 4).unwrap() > height / 2, "{:?}", row_at(width * 3 / 4));
     }
 
     #[test]

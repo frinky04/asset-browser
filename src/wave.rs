@@ -141,23 +141,52 @@ pub fn peaks(path: &Path, buckets: usize) -> Result<Peaks, String> {
 
 /// Mirrored bars across `width`×`height` straight-alpha RGBA, scaled to the loudest moment.
 pub fn draw(values: &[f32], width: u32, height: u32, color: [u8; 3]) -> Vec<u8> {
-    let (w, h) = (width as usize, height as usize);
-    let mut out = vec![0u8; w * h * 4];
+    let w = width as usize;
     let loudest = values.iter().copied().fold(0.0, f32::max).max(1e-4);
     let mid = height as f32 * 0.5;
-    for x in 0..w {
+    let edges: Vec<Option<(f32, f32)>> = (0..w).map(|x| {
         let from = x * values.len() / w;
         let to = ((x + 1) * values.len() / w).max(from + 1).min(values.len());
         let v = values[from..to].iter().copied().fold(0.0, f32::max) / loudest;
         // A little compression, so quiet tails stay readable.
         let extent = (v.powf(0.7) * (mid - 1.0)).max(0.75);
-        for y in 0..h {
-            let d = (y as f32 + 0.5 - mid).abs();
-            let a = (extent - d + 0.5).clamp(0.0, 1.0);
-            if a > 0.0 {
+        Some((mid - extent, mid + extent))
+    }).collect();
+    paint_envelope(&edges, width, height, color)
+}
+
+/// Fills between a top and bottom edge per column, in straight-alpha RGBA. Each edge runs
+/// smoothly from column to column and every pixel is weighted by how much of it is inside, so
+/// the outline has no steps. A column with nothing in it is `None`.
+pub fn paint_envelope(edges: &[Option<(f32, f32)>], width: u32, height: u32, color: [u8; 3]) -> Vec<u8> {
+    /// Where across a column the edges are sampled.
+    const ACROSS: [f32; 4] = [0.125, 0.375, 0.625, 0.875];
+    let (w, h) = (width as usize, height as usize);
+    let mut out = vec![0u8; w * h * 4];
+    let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+    for x in 0..w.min(edges.len()) {
+        let Some(here) = edges[x] else { continue };
+        let before = x.checked_sub(1).and_then(|i| edges[i]).unwrap_or(here);
+        let after = edges.get(x + 1).copied().flatten().unwrap_or(here);
+        let spans = ACROSS.map(|along| {
+            let (other, t) = if along < 0.5 { (before, 0.5 - along) } else { (after, along - 0.5) };
+            (lerp(here.0, other.0, t), lerp(here.1, other.1, t))
+        });
+        let highest = spans.iter().fold(f32::MAX, |m, s| m.min(s.0));
+        let lowest = spans.iter().fold(f32::MIN, |m, s| m.max(s.1));
+        let solid_from = spans.iter().fold(f32::MIN, |m, s| m.max(s.0));
+        let solid_to = spans.iter().fold(f32::MAX, |m, s| m.min(s.1));
+        for y in highest.floor().max(0.0) as usize..(lowest.ceil() as usize).min(h) {
+            let row = y as f32;
+            let coverage = if row >= solid_from && row + 1.0 <= solid_to {
+                1.0
+            } else {
+                spans.iter().map(|(top, bottom)| ((row + 1.0).min(*bottom) - row.max(*top)).max(0.0)).sum::<f32>() / ACROSS.len() as f32
+            };
+            if coverage > 0.0 {
                 let at = (y * w + x) * 4;
                 out[at..at + 3].copy_from_slice(&color);
-                out[at + 3] = (a * 255.0) as u8;
+                out[at + 3] = (coverage * 255.0) as u8;
             }
         }
     }
@@ -204,6 +233,23 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         assert!((p.seconds - 1.0).abs() < 1e-3, "{}", p.seconds);
         assert!(p.values[0] < 0.01 && p.values[1] > 0.5, "{:?}", p.values);
+    }
+
+    #[test]
+    fn an_envelope_has_soft_top_edges_and_leaves_empty_columns_clear() {
+        let edges = [Some((2.5, 7.5)), None, Some((4.0, 6.0))];
+        let px = paint_envelope(&edges, 3, 10, [9, 9, 9]);
+        assert_eq!(px[(2 * 3) * 4 + 3], 127, "half of this pixel is inside");
+        assert_eq!(px[(5 * 3) * 4 + 3], 255, "the middle is solid");
+        assert!(px[1 * 4 + 3..2 * 4].is_empty() || (0..10).all(|y| px[(y * 3 + 1) * 4 + 3] == 0), "nothing in the empty column");
+    }
+
+    #[test]
+    fn neighbouring_columns_blend_so_a_step_is_not_a_hard_edge() {
+        let edges = [Some((1.0, 9.0)), Some((1.0, 9.0)), Some((5.0, 5.5)), Some((5.0, 5.5))];
+        let px = paint_envelope(&edges, 4, 10, [9, 9, 9]);
+        let alpha = px[(2 * 4 + 1) * 4 + 3];
+        assert!(alpha > 0 && alpha < 255, "{alpha}");
     }
 
     #[test]
