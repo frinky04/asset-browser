@@ -242,15 +242,23 @@ fn confirm_ambiguous_maps(assets: &mut [Asset]) {
     for i in lonely { assets[i].map = ""; }
 }
 
+/// Whether a folder only sorts files by format: `FBX`, `GLB (recommended)`, `other-formats`.
+fn names_a_format(folder: &str) -> bool {
+    let words = words_of(&folder.to_lowercase());
+    words == "other formats" || matches!(words.strip_suffix(" recommended").unwrap_or(&words), "glb" | "gltf" | "obj" | "dae" | "fbx")
+}
+
 /// Packs ship the same model as GLB, OBJ, DAE and FBX: keep the most self-contained one in view.
+/// Only format folders can separate those copies; any other folder is a different version.
 fn mark_shadowed(assets: &mut [Asset]) {
     fn rank(ext: &str) -> u8 {
         match ext { "glb" => 0, "gltf" => 1, "obj" => 2, "dae" => 3, _ => 4 }
     }
-    let mut best: HashMap<(u32, String), (u8, usize)> = HashMap::new();
+    let mut best: HashMap<(u32, String, String), (u8, usize)> = HashMap::new();
     for (i, a) in assets.iter().enumerate().filter(|(_, a)| a.kind == Kind::Model) {
         let stem = a.name().rsplit_once('.').map_or(a.name(), |(s, _)| s).to_lowercase();
-        let slot = best.entry((a.pack, stem)).or_insert((u8::MAX, i));
+        let place = a.folder().split('/').filter(|f| !names_a_format(f)).collect::<Vec<_>>().join("/").to_lowercase();
+        let slot = best.entry((a.pack, place, stem)).or_insert((u8::MAX, i));
         if rank(a.ext) < slot.0 { *slot = (rank(a.ext), i); }
     }
     let keep: std::collections::HashSet<usize> = best.into_values().map(|(_, i)| i).collect();
@@ -634,6 +642,25 @@ mod tests {
         assert_eq!(names(&l, &r), ["door_2.glb"]);
         let r = search(&l, &Filter { text: "door_2".into(), ext: Some("obj"), ..Filter::default() });
         assert_eq!(names(&l, &r), ["door_2.obj"], "asking for the format shows it");
+    }
+
+    #[test]
+    fn versions_in_their_own_folders_each_show_in_their_best_format() {
+        let l = Library::build(PathBuf::from("C:/lib"), vec![
+            entry("Nature/Nature/Models/GLB/tree.glb"),
+            entry("Nature/Nature/Models/other-formats/FBX/tree.fbx"),
+            entry("Nature/Nature (Separated)/Models/GLB (recommended)/tree.glb"),
+            entry("Nature/Nature (Separated)/Models/other-formats/OBJ/tree.obj"),
+            entry("Nature/Nature/Models/other-formats/OBJ/bush.obj"),
+            entry("Nature/Nature (Separated)/Models/GLB (recommended)/bush.glb"),
+        ]);
+        let shown: Vec<&str> = search(&l, &Filter::default()).ids.iter().map(|i| l.assets[*i as usize].rel.as_str()).collect();
+        assert_eq!(shown, [
+            "Nature/Nature (Separated)/Models/GLB (recommended)/bush.glb",
+            "Nature/Nature (Separated)/Models/GLB (recommended)/tree.glb",
+            "Nature/Nature/Models/GLB/tree.glb",
+            "Nature/Nature/Models/other-formats/OBJ/bush.obj",
+        ]);
     }
 
     #[test]
