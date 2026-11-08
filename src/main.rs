@@ -32,6 +32,7 @@ macro_rules! scenes {
 }
 
 fn main() {
+    let _ = rune::set_app_icon(include_bytes!("../assets/icon.png").as_slice());
     let spec = AppSpec::<app::App> {
         setup: Some(app::setup),
         poll: Some(|s, _, tx| s.poll(tx)),
