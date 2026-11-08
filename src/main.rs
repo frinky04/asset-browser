@@ -16,6 +16,7 @@ mod model;
 mod native_drag;
 mod raster;
 mod settings;
+mod smart;
 mod query;
 mod stage;
 mod texture_guess;

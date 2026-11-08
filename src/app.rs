@@ -17,6 +17,7 @@ use crate::library::{self, Filter, Kind, Library, Results, Sort};
 use crate::model::{self, Image, Model};
 use crate::query::Suggestion;
 use crate::native_drag::{self, Ended};
+use crate::smart::{Effort, Hit, Install, Smart, Status};
 use crate::stage::{Look, Scene, StageState, View, actual_size_zoom};
 use crate::thumbs::{Thumbs, WAVE_COLOR};
 use crate::{ui, wave};
@@ -42,6 +43,7 @@ const SIDEBAR_SPRING: Spring = Spring::new(0.3, 0.0);
 const CONFIRM_FOR: Duration = Duration::from_millis(1400);
 /// How often a search on measured facts picks up what thumbnailing has found.
 const MEASURE_EVERY: Duration = Duration::from_millis(800);
+const SMART_PROGRESS_EVERY: Duration = Duration::from_secs(1);
 
 pub enum Preview {
     None,
@@ -117,6 +119,8 @@ struct Saved {
     drag_max: Option<u32>,
     all_formats: bool,
     tile_size: f32,
+    smart_on: bool,
+    index_effort: u8,
 }
 
 impl Saved {
@@ -132,6 +136,8 @@ impl Saved {
             drag_max: prefs.get("drag_max").unwrap_or(None),
             all_formats: prefs.get("all_formats").unwrap_or(false),
             tile_size: prefs.get("tile_size").unwrap_or(DEFAULT_TILE),
+            smart_on: prefs.get("smart_on").unwrap_or(false),
+            index_effort: prefs.get("index_effort").unwrap_or(Effort::Cpu.code()),
         }
     }
 
@@ -146,6 +152,8 @@ impl Saved {
         let _ = prefs.set("drag_max", &self.drag_max);
         let _ = prefs.set("all_formats", &self.all_formats);
         let _ = prefs.set("tile_size", &self.tile_size);
+        let _ = prefs.set("smart_on", &self.smart_on);
+        let _ = prefs.set("index_effort", &self.index_effort);
     }
 }
 
@@ -221,6 +229,18 @@ pub struct App {
     pub filter: Filter,
     pub search: TextEdit,
     pub thumbs: Thumbs,
+    pub smart: Smart,
+    /// Whether searches also look for what files depict, once the model is here.
+    pub smart_on: bool,
+    pub index_effort: Effort,
+    /// As of the last poll, so the view only reruns when it changes.
+    pub smart_status: Status,
+    /// The last description the model answered, and what matched it.
+    described: Option<(String, Vec<Hit>)>,
+    /// The search is `~` or `similar:`, and the model is here to answer it.
+    pub only_described: bool,
+    /// A `~` search the model hasn't answered yet.
+    pub awaiting_description: bool,
     pub audio: Audio,
     pub scanning: bool,
     pub selected: Option<u32>,
@@ -334,6 +354,11 @@ pub fn init_with(prefs: Prefs) -> App {
     let motion = Motion::from_code(saved.motion);
     let audio = Audio::new();
     audio.set_volume(saved.volume);
+    // A headless run draws what's on disk and never starts the model.
+    let smart_on = saved.smart_on && !headless();
+    let index_effort = Effort::from_code(saved.index_effort);
+    let smart = Smart::new(export::app_dir().join("models"), smart_on, index_effort);
+    let smart_status = smart.status();
     App {
         lib: Arc::new(Library::default()),
         results: Results::default(),
@@ -341,6 +366,13 @@ pub fn init_with(prefs: Prefs) -> App {
         filter: Filter { all_formats: saved.all_formats, ..Filter::default() },
         search: TextEdit::new(""),
         thumbs: Thumbs::new(export::app_dir().join("cache")),
+        smart,
+        smart_on: saved.smart_on,
+        index_effort,
+        smart_status,
+        described: None,
+        only_described: false,
+        awaiting_description: false,
         audio,
         scanning: true,
         selected: None,
@@ -412,6 +444,7 @@ pub fn setup(s: &mut App, waker: Waker) {
     s.rescaling.set_waker(waker.clone());
     s.storage_job.set_waker(waker.clone());
     s.edit.set_waker(&waker);
+    s.smart.set_waker(waker.clone());
     s.waker = Some(waker);
     let root = s.root.clone();
     s.start_loading(root);
@@ -603,6 +636,16 @@ impl App {
             self.dragging = None;
             changed = true;
         }
+        if let Some(answer) = self.smart.take_answer() {
+            self.described = Some(answer);
+            self.refilter_keeping_scroll();
+            changed = true;
+        }
+        let smart_status = self.smart.status();
+        if smart_status != self.smart_status {
+            self.smart_status = smart_status;
+            changed = true;
+        }
         self.update_status(tx);
         let dark = self.resolved_dark.get();
         if self.applied_dark != Some(dark) {
@@ -649,17 +692,26 @@ impl App {
             self.measured_at = Instant::now();
             self.refilter_keeping_scroll();
         }
-        let text = if total == 0 {
+        let indexed = (self.smart_status.indexed, self.smart_status.total);
+        let text = if self.only_described && indexed.0 < indexed.1 {
+            format!("Searching the {} of {} textures and models indexed so far", commas(indexed.0), commas(indexed.1))
+        } else if total == 0 {
             if self.scanning { "Reading library".to_owned() } else { "No supported files in this folder".to_owned() }
         } else if made < total {
             format!("Making thumbnails: {} of {}", commas(made), commas(total))
         } else if self.scanning {
             "Checking for changes".to_owned()
+        } else if let Some(on_gpu) = self.smart_status.working_on_gpu {
+            let by = if on_gpu { "graphics card" } else { "CPU" };
+            format!("Indexing for search on the {by}: {} of {}", commas(self.smart_status.indexed), commas(self.smart_status.total))
         } else {
             "Drag assets out to copy them. Your library stays untouched.".to_owned()
         };
         self.status.set(text);
         if self.scanning || made < total { tx.wake_after(Duration::from_millis(400)); }
+        // Progress has nothing else to wake the app for.
+        let smart_busy = self.smart_status.working_on_gpu.is_some() || matches!(self.smart_status.install, Install::Downloading { .. } | Install::Removing);
+        if smart_busy { tx.wake_after(SMART_PROGRESS_EVERY); }
     }
 
     /// The size in device pixels the waveform is shown at. Pictures are drawn at exactly this,
@@ -741,6 +793,8 @@ impl App {
             drag_max: self.drag_max,
             all_formats: self.filter.all_formats,
             tile_size: self.tile_size,
+            smart_on: self.smart_on,
+            index_effort: self.index_effort.code(),
         };
         if now != self.saved {
             now.write(&mut self.prefs);
@@ -771,7 +825,30 @@ impl App {
     /// What the list under the search box offers right now.
     pub fn suggestions(&self) -> Vec<Suggestion> {
         if !self.search.focused || self.search.focus != self.search.text.len() { return Vec::new() }
-        crate::query::suggestions(&self.search.text, &self.lib)
+        let mut rows = crate::query::suggestions(&self.search.text, &self.lib);
+        if self.search.text.trim().is_empty() && self.can_describe() {
+            rows.insert(0, Suggestion { insert: "~".to_owned(), hint: "Only by how things look" });
+        }
+        rows
+    }
+
+    /// Whether the model is here and switched on.
+    pub fn can_describe(&self) -> bool {
+        self.smart_on && self.smart_status.install == Install::Ready
+    }
+
+    /// Whether others can be compared with this file.
+    pub fn can_find_similar(&self, key: u64) -> bool {
+        self.can_describe() && self.smart.can_find_similar(key)
+    }
+
+    /// Searches for what looks like this file, across every pack.
+    pub fn find_similar(&mut self, id: u32, tx: &mut Tx) {
+        let Some(rel) = self.lib.assets.get(id as usize).map(|a| a.rel.clone()) else { return };
+        self.search = TextEdit::new(&format!("similar:\"{rel}\""));
+        self.filter.pack = None;
+        self.filter.ext = None;
+        self.refilter(tx);
     }
 
     /// Puts a row of that list into the search box.
@@ -801,6 +878,31 @@ impl App {
     pub fn toggle_all_formats(&mut self) {
         self.filter.all_formats = !self.filter.all_formats;
         self.grid_glide.forget();
+        self.refilter_keeping_scroll();
+    }
+
+    /// The user's yes to the download, which also turns the feature on.
+    pub fn download_smart_search(&mut self) {
+        self.smart_on = true;
+        self.smart.install();
+    }
+
+    pub fn set_smart_on(&mut self, on: bool) {
+        self.smart_on = on;
+        self.smart.set_enabled(on);
+        if !on { self.described = None; }
+        self.refilter_keeping_scroll();
+    }
+
+    pub fn set_index_effort(&mut self, effort: Effort) {
+        self.index_effort = effort;
+        self.smart.set_effort(effort);
+    }
+
+    pub fn remove_smart_search(&mut self) {
+        self.smart_on = false;
+        self.described = None;
+        self.smart.remove();
         self.refilter_keeping_scroll();
     }
 
@@ -856,14 +958,29 @@ impl App {
         self.lib = lib.clone();
         self.filter.pack = pack.and_then(|name| lib.packs.iter().position(|p| p.name == name)).map(|p| p as u32);
         self.selected = selected.and_then(|rel| lib.assets.iter().position(|a| a.rel == rel)).map(|i| i as u32);
-        self.thumbs.set_library(lib);
+        self.thumbs.set_library(lib.clone());
+        self.smart.set_library(lib);
         self.refilter_keeping_scroll();
     }
 
     fn refilter_keeping_scroll(&mut self) {
         self.filter.text = self.search.text.clone();
+        let able = self.can_describe();
+        let looking = if able { library::looking_for(&self.filter.text) } else { library::Looking::default() };
+        let alike = looking.similar_to.as_ref().and_then(|rel| {
+            let key = self.lib.assets.iter().find(|a| a.rel == *rel)?.key;
+            self.smart.similar(key)
+        });
+        let description = if looking.similar_to.is_some() { None } else { looking.description };
+        self.smart.search(description.clone());
+        let answered = self.described.as_ref().is_some_and(|(asked, _)| Some(asked) == description.as_ref());
+        self.only_described = looking.only;
+        self.awaiting_description = looking.only && description.is_some() && !answered;
+        // Between one `~` answer and the next, the last one stays up rather than blanking the grid.
+        let latest = self.described.as_ref().filter(|_| answered || self.awaiting_description).map_or(&[][..], |(_, hits)| hits.as_slice());
+        let hits = able.then_some(alike.as_deref().unwrap_or(latest));
         let thumbs = &self.thumbs;
-        self.results = library::search_with(&self.lib, &self.filter, &|key| thumbs.facts(key));
+        self.results = library::search_described(&self.lib, &self.filter, &|key| thumbs.facts(key), hits);
         self.generation += 1;
         self.request_range(0..FIRST_SCREEN_ROWS);
     }

@@ -194,6 +194,15 @@ struct Context<'a> {
 }
 
 impl Check {
+    /// Free words, or a choice among them, rather than a field.
+    fn is_words(&self) -> bool {
+        match self {
+            Check::Text(_) => true,
+            Check::Any(all) => all.iter().any(|c| matches!(c, Check::Text(_))),
+            _ => false,
+        }
+    }
+
     fn needs_facts(&self) -> bool {
         match self {
             Check::Res(_) | Check::Width(_) | Check::Height(_) | Check::Tris(_) | Check::Seconds(_) => true,
@@ -246,6 +255,10 @@ pub struct Query {
     want: Vec<Check>,
     reject: Vec<Check>,
     now: u64,
+    /// `~words` or `similar:`: names don't count, only what files look like.
+    only_described: bool,
+    /// From `similar:"path"`, the library file to find others like.
+    similar: Option<String>,
 }
 
 /// One whitespace-separated piece of a query, with quotes understood.
@@ -338,8 +351,13 @@ fn one_of(mut checks: Vec<Check>) -> Option<Check> {
 
 impl Query {
     pub fn parse(text: &str, now: u64) -> Query {
+        let (tilde, text) = text.trim_start().strip_prefix('~').map_or((false, text), |rest| (true, rest));
         let mut q = Query { now, ..Query::default() };
         for piece in pieces(text) {
+            if piece.key.as_deref() == Some("similar") {
+                q.similar = Some(piece.value);
+                continue;
+            }
             let check = match &piece.key {
                 Some(key) if KEYS.contains(&key.as_str()) => one_of(piece.value.split('|').filter_map(|v| field_value(key, v)).collect()),
                 // Not a field after all: `foo:bar` is just text.
@@ -359,7 +377,22 @@ impl Query {
                 q.want.push(check);
             }
         }
+        // A `~` with nothing to describe yet leaves the search as it was.
+        q.only_described = q.similar.is_some() || (tilde && q.free_words().is_some());
         q
+    }
+
+    pub fn only_described(&self) -> bool {
+        self.only_described
+    }
+
+    pub fn similar(&self) -> Option<&str> {
+        self.similar.as_deref()
+    }
+
+    /// For when nothing can look at files: a `~` search goes back to matching names.
+    pub fn without_descriptions(&mut self) {
+        self.only_described = self.similar.is_some();
     }
 
     /// How well `a` fits, lower being better, or `None` if it doesn't.
@@ -369,6 +402,41 @@ impl Query {
         let mut total = 0;
         for check in &self.want { total += check.fit(a, &cx)?; }
         Some(total)
+    }
+
+    /// Whether `a` meets everything here except the free words: a file found by what it looks
+    /// like doesn't have those in its name, but still has to answer to `pack:` or `-rust`.
+    pub fn allows(&self, a: &Asset, facts: &dyn Fn(u64) -> Option<Facts>) -> bool {
+        let cx = Context { now: self.now, facts };
+        if self.reject.iter().any(|c| c.fit(a, &cx).is_some()) { return false }
+        self.want.iter().filter(|c| !c.is_words()).all(|c| c.fit(a, &cx).is_some())
+    }
+
+    /// Every free word, or `None` if they're too few to mean anything.
+    fn free_words(&self) -> Option<String> {
+        const SHORTEST: usize = 3;
+        fn add<'a>(check: &'a Check, words: &mut Vec<&'a str>) {
+            match check {
+                Check::Text(t) => words.push(&t.raw),
+                Check::Any(all) => all.iter().for_each(|c| add(c, words)),
+                _ => {}
+            }
+        }
+        let mut words = Vec::new();
+        for check in &self.want { add(check, &mut words); }
+        let text = words.join(" ");
+        (text.chars().count() >= SHORTEST).then_some(text)
+    }
+
+    /// The free words as a description to look for. In a mixed search, quotes and `either|or` ask
+    /// for something literal instead.
+    pub fn description(&self) -> Option<String> {
+        let literal = |c: &Check| match c {
+            Check::Text(t) => t.exact,
+            other => other.is_words(),
+        };
+        if !self.only_described && self.want.iter().any(literal) { return None }
+        self.free_words()
     }
 
     /// Whether the query names this format, which brings back models hidden behind a better one.

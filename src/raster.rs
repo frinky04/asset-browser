@@ -11,11 +11,19 @@ const SUPER: u32 = 2;
 /// The direction light comes from, shared with the interactive preview.
 pub const LIGHT: Vec3 = Vec3::new(0.45, 0.8, 0.4);
 
+/// The tilt and turn of the thumbnail's three-quarter view, in radians.
+pub const THREE_QUARTER: (f32, f32) = (0.42, -0.65);
+
 /// A three-quarter view of `model` as `size`² straight-alpha RGBA.
 pub fn render_thumb(model: &Model, size: u32) -> Vec<u8> {
+    render_view(model, size, THREE_QUARTER.0, THREE_QUARTER.1)
+}
+
+/// `model` tilted by `pitch` and turned by `yaw` about its centre, as `size`² straight-alpha RGBA.
+pub fn render_view(model: &Model, size: u32, pitch: f32, yaw: f32) -> Vec<u8> {
     let full = size * SUPER;
     let (center, radius) = model.bounds();
-    let view = Mat4::from_rotation_x(0.42) * Mat4::from_rotation_y(-0.65) * Mat4::from_translation(-center);
+    let view = Mat4::from_rotation_x(pitch) * Mat4::from_rotation_y(yaw) * Mat4::from_translation(-center);
     let distance = radius * 3.0;
     let camera = Mat4::from_translation(Vec3::new(0.0, 0.0, -distance));
     let proj = Mat4::perspective_rh(38f32.to_radians(), 1.0, radius * 0.1, distance + radius * 3.0);

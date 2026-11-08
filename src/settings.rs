@@ -4,8 +4,9 @@ use rune::tok::motion;
 use rune::{Color, Cursor, El, Phase, ScrollSpec, Transition, col, el, icon, row, text};
 use rune_kit::ScrollBar;
 
-use crate::app::{App, Motion, Theme, bytes};
-use crate::ui::{BODY, CLOSE, FOLDER, LABEL, PANEL_RADIUS, REFRESH, SMALL, T, TITLE, TRASH, WELL_RADIUS, checkbox, hairline, label, outlined, pick_library_folder, plain, scroll_style, segments, surface};
+use crate::app::{App, Motion, Theme, bytes, commas};
+use crate::smart::{DOWNLOAD_BYTES, Effort, Install};
+use crate::ui::{BODY, CLOSE, DOWNLOAD, FOLDER, LABEL, PANEL_RADIUS, REFRESH, SMALL, T, TITLE, TRASH, WELL_RADIUS, checkbox, hairline, label, outlined, pick_library_folder, plain, scroll_style, segments, surface};
 
 const SHEET_W: f32 = 560.0;
 const HEADER_H: f32 = 56.0;
@@ -57,6 +58,46 @@ fn storage_detail(amount: Option<u64>, what: &str) -> String {
     amount.map_or_else(|| "Measuring".to_owned(), |n| format!("{} of {what}", bytes(n)))
 }
 
+fn indexing_detail(s: &App) -> String {
+    if let Some(note) = &s.smart_status.note { return note.clone() }
+    match s.index_effort {
+        Effort::Paused => "Not running".to_owned(),
+        Effort::Cpu => "A few CPU threads".to_owned(),
+        Effort::Gpu => "Graphics card, in bursts".to_owned(),
+        Effort::Maximum => "Full load, no rests".to_owned(),
+    }
+}
+
+/// Search by description: offered, then downloading, then on and working.
+fn smart_search(s: &App) -> El {
+    const NAME: &str = "Search by description";
+    let offer = format!("Find textures and models by look. {}, stays on this PC", bytes(DOWNLOAD_BYTES));
+    let status = &s.smart_status;
+    let rows = match &status.install {
+        Install::Absent => vec![setting(NAME, Some(offer), outlined("Download", "Download", false, &DOWNLOAD, |s, _| s.download_smart_search()))],
+        Install::Failed(why) => vec![setting(NAME, Some(why.clone()), outlined("Retry", "Retry", false, &REFRESH, |s, _| s.download_smart_search()))],
+        Install::Downloading { done } => vec![setting(NAME, Some(format!("Downloading {} of {}", bytes(*done), bytes(DOWNLOAD_BYTES))), outlined("Cancel", "Cancel", false, &CLOSE, |s, _| s.smart.cancel_install()))],
+        Install::Removing => vec![setting(NAME, Some("Removing".to_owned()), el())],
+        Install::Ready => {
+            let mut rows = vec![switch_row(NAME, "Find textures and models by how they look", s.smart_on, |s| s.set_smart_on(!s.smart_on))];
+            if s.smart_on {
+                let speeds = vec![plain("Paused", Effort::Paused), plain("Gentle", Effort::Cpu), plain("Faster", Effort::Gpu), plain("Maximum", Effort::Maximum)];
+                rows.push(setting("Indexing", Some(indexing_detail(s)), segments("index-effort", speeds, s.index_effort, |s, v, _| s.set_index_effort(v))));
+            }
+            let progress = if status.total > 0 && status.indexed == status.total {
+                format!("{} textures and models indexed", commas(status.total))
+            } else if status.total > 0 {
+                format!("{} of {} textures and models indexed", commas(status.indexed), commas(status.total))
+            } else {
+                "Model and index stay on this PC".to_owned()
+            };
+            rows.push(setting("Stored model", Some(progress), outlined("Remove", "Remove", false, &TRASH, |s, _| s.remove_smart_search())));
+            rows
+        }
+    };
+    section("Smart search", rows)
+}
+
 pub fn sheet(s: &App) -> El {
     let appearance = section("Appearance", vec![
         setting("Theme", None, segments("theme", vec![plain("System", Theme::System), plain("Light", Theme::Light), plain("Dark", Theme::Dark)], s.theme, |s, v, tx| s.set_theme(v, tx))),
@@ -96,7 +137,7 @@ pub fn sheet(s: &App) -> El {
     let body = col().key("settings-body").w_full().max_h((s.window_height - SHEET_MARGIN - HEADER_H).max(200.0)).scroll(ScrollSpec { stick_bottom: false })
         .on_wheel(|s: &mut App, e, tx| s.settings_glide.wheel("settings-body", e, tx))
         .on_scroll_offset(s.settings_glide.watch())
-        .child(col().w_full().px(16.0).pb(16.0).gap(16.0).child(appearance).child(library).child(previews).child(export).child(storage))
+        .child(col().w_full().px(16.0).pb(16.0).gap(16.0).child(appearance).child(library).child(smart_search(s)).child(previews).child(export).child(storage))
         .scroll_bar_styled(scroll_style());
 
     let header = row().w_full().h(HEADER_H).pl(18.0).pr(12.0).items_center().justify_between()
