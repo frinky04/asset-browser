@@ -2,7 +2,7 @@
 
 # Asset Browser
 
-Browse, preview, edit and drag out game assets on Windows. Library files are never changed.
+Browse, preview, edit and drag out game assets on Windows. Library files are never changed. Built with [Rune](https://github.com/anomalyco/rune).
 
 - Textures: png, jpg, bmp, tga, webp
 - Models: glb, gltf, obj, dae, fbx
