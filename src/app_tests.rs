@@ -10,6 +10,51 @@ use crate::app::{self, App, Preview};
 use crate::library::{self, Kind};
 use crate::ui;
 
+/// Points the app's cache and saved window layout away from the real ones, once per run.
+fn isolate() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let dir = std::env::temp_dir().join(format!("ab-isolated-{}", std::process::id()));
+        // SAFETY: set once, before any test here reads them.
+        unsafe {
+            std::env::set_var("ASSET_BROWSER_DATA", dir.join("data"));
+            std::env::set_var("RUNE_PREFS_DIR", dir.join("prefs"));
+        }
+    });
+}
+
+#[test]
+fn the_filter_row_stays_inside_its_panel_at_every_width() {
+    isolate();
+    let mut files = Vec::new();
+    for ext in ["png", "jpg", "jpeg", "bmp", "tga", "webp", "glb", "gltf", "obj", "dae", "wav", "ogg", "mp3", "flac"] {
+        for i in 0..3 { files.push(library::Entry { rel: format!("Pack/{ext}_{i}.{ext}"), size: 1, mtime: 1 }); }
+    }
+    let mut state = app::init();
+    state.lib = Arc::new(library::Library::build(PathBuf::from("Z:/none"), files));
+    state.results = library::search(&state.lib, &state.filter);
+    state.scanning = false;
+    let mut rt = Runtime::new(state, ui::view, (1520.0, 900.0), Env::new(true, 1.0));
+    settle(&mut rt);
+    let rect_of = |rt: &Runtime<App>, suffix: &str| rt.elements().into_iter().find(|e| e.path.ends_with(suffix)).unwrap_or_else(|| panic!("no {suffix}")).rect;
+    for open in [true, false] {
+        rt.state.sidebar_open = open;
+        for inspector in [300.0, 372.0, 520.0, 760.0] {
+            for width in (1200..=2100).step_by(19) {
+                rt.state.resize_inspector(inspector);
+                rt.set_viewport((width as f32, 900.0), 1.0);
+                rt.invalidate();
+                for _ in 0..3 { rt.frame(1.0); }
+                let (main, toggle, group, tabs) = (rect_of(&rt, "panels/main"), rect_of(&rt, "filters/Every format"), rect_of(&rt, "filters/format-group"), rect_of(&rt, "filters/kinds"));
+                let at = format!("window {width}, inspector {inspector}, sidebar {open}, grid {}", rt.state.grid_width);
+                assert!(toggle[0] + toggle[2] <= main[0] + main[2] - 15.0, "toggle past the panel at {at}: {toggle:?} in {main:?}");
+                assert!(group[0] + group[2] <= toggle[0] - 1.0, "formats touch the toggle at {at}: {group:?}, {toggle:?}");
+                assert!(tabs[0] + tabs[2] <= group[0], "tabs overlap the formats at {at}");
+            }
+        }
+    }
+}
+
 fn fixture() -> (PathBuf, Vec<u8>) {
     let dir = std::env::temp_dir().join(format!("ab-app-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -20,12 +65,7 @@ fn fixture() -> (PathBuf, Vec<u8>) {
         image::RgbaImage::from_pixel(800, 400, image::Rgba([i * 20, 40, 60, 255])).save(root.join(format!("Bricks/brick_{i}.png"))).unwrap();
     }
     std::fs::write(root.join("Props/crate.obj"), "v -1 -1 0\nv 1 -1 0\nv 0 1 0\nf 1 2 3\n").unwrap();
-    // SAFETY: only this test reads the variable while it runs; the others use explicit paths.
-    unsafe {
-        std::env::set_var("ASSET_BROWSER_DATA", dir.join("data"));
-        // The window's saved layout belongs to the person using the app, not to this test.
-        std::env::set_var("RUNE_PREFS_DIR", dir.join("prefs"));
-    }
+    isolate();
     let bytes = std::fs::read(root.join("Bricks/brick_0.png")).unwrap();
     (root, bytes)
 }

@@ -32,7 +32,7 @@ pub const INSPECTOR_DEFAULT: f32 = 372.0;
 const INSPECTOR_MIN: f32 = 300.0;
 const INSPECTOR_MAX: f32 = 900.0;
 /// The grid keeps at least this much when the inspector grows.
-const MAIN_MIN_WIDTH: f32 = 600.0;
+const MAIN_MIN_WIDTH: f32 = 620.0;
 const INSPECTOR_PREF: &str = "inspector_width";
 const SIDEBAR_PREF: &str = "sidebar_open";
 const SIDEBAR_SPRING: Spring = Spring::new(0.3, 0.0);

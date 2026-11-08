@@ -197,7 +197,8 @@ fn short_count(n: u32) -> String {
 /// Roughly how wide the kind tabs draw, to know what fits beside them.
 fn kind_tabs_width(s: &App) -> f32 {
     // The tabs share equal columns, and "Textures" with its count slot is always the widest.
-    let count = if s.is_compact() { 0.0 } else { 6.0 + COUNT_SLOT };
+    // Padding, icon and its gap, the name; then the spacer's gap and the slot's.
+    let count = if s.is_compact() { 0.0 } else { 6.0 + 6.0 + COUNT_SLOT };
     GROUP_PAD * 2.0 + (20.0 + 20.0 + 52.0 + count) * 4.0
 }
 
@@ -300,7 +301,10 @@ fn filter_bar(s: &App) -> El {
     // Whole chips only: the rarest formats go behind "+N" when they don't all fit.
     let chip_width = |e: &str| 18.0 + e.len() as f32 * 7.0 + 2.0;
     const MORE_WIDTH: f32 = 42.0;
-    let mut room = s.grid_width - GRID_PAD * 2.0 - 12.0 * 2.0 - kind_tabs_width(s) - 112.0 - 8.0;
+    // What's left beside the tabs and the toggle: the row's padding, three gaps and the
+    // format group's own inset come out of it too.
+    const TOGGLE_WIDTH: f32 = 124.0;
+    let mut room = s.grid_width - GRID_PAD * 2.0 - 12.0 * 3.0 - kind_tabs_width(s) - TOGGLE_WIDTH - GROUP_PAD * 2.0;
     let mut all: Vec<(&'static str, u32)> = s.results.by_ext.clone();
     let total: f32 = all.iter().map(|(e, _)| chip_width(e)).sum();
     if total > room { room -= MORE_WIDTH; }
@@ -332,7 +336,7 @@ fn filter_bar(s: &App) -> El {
         }).help("More formats"));
     }
     let mut filters = row().key("filters").w_full().py(12.0).px(GRID_PAD).gap(12.0).items_center().child(kind_tabs(s));
-    if !all.is_empty() { filters = filters.child(formats.h(CONTROL_H).radius(GROUP_RADIUS).border(1.0, T.line).padding(GROUP_PAD)); }
+    if !all.is_empty() { filters = filters.child(formats.key("format-group").h(CONTROL_H).radius(GROUP_RADIUS).border(1.0, T.line).padding(GROUP_PAD)); }
     filters.child(el().grow(1.0))
         .child(toggle("Every format", s.filter.all_formats, |s, tx| s.toggle_all_formats(tx)).help("Show every copy of a model when a pack ships it as GLB, OBJ and DAE"))
 }
@@ -473,7 +477,7 @@ impl App {
 
     /// A narrow grid drops the counts and captions its controls can live without.
     fn is_compact(&self) -> bool {
-        self.grid_width < 780.0
+        self.grid_width < 830.0
     }
 
     /// Waveforms are wide and thin, so an audio-only view doesn't spend a square on each.
