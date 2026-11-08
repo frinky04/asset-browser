@@ -17,8 +17,10 @@ use crate::stage::{FOV_DEGREES, STAGE_KEY, STAGE_MARK, actual_size_zoom, zoom_ab
 use crate::thumbs::Facts;
 
 pub struct Tokens {
-    bg: Color,
-    panel: Color,
+    pub(crate) bg: Color,
+    pub(crate) panel: Color,
+    /// Over the app behind a modal sheet.
+    pub(crate) scrim: Color,
     well: Color,
     raised: Color,
     pub(crate) line: Color,
@@ -43,6 +45,7 @@ fn color(s: &str) -> Color {
 static DARK: LazyLock<Tokens> = LazyLock::new(|| Tokens {
     bg: color("#090909"),
     panel: color("#151515"),
+    scrim: color("#000000AD"),
     well: color("#1B1B1B"),
     raised: color("#292929"),
     line: color("#2D2D2D"),
@@ -63,6 +66,7 @@ static DARK: LazyLock<Tokens> = LazyLock::new(|| Tokens {
 static LIGHT: LazyLock<Tokens> = LazyLock::new(|| Tokens {
     bg: color("#E4E4E6"),
     panel: color("#F8F8F9"),
+    scrim: color("#00000094"),
     well: color("#EDEDEF"),
     raised: color("#DEDEE1"),
     line: color("#D6D6D9"),

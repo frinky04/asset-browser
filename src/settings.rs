@@ -11,10 +11,11 @@ const SHEET_W: f32 = 560.0;
 const HEADER_H: f32 = 56.0;
 /// The sheet keeps this much of the window around it.
 const SHEET_MARGIN: f32 = 72.0;
+const SCRIM_BLUR: f32 = 14.0;
 
-/// A named group of settings in one hairline card.
+/// A named group of settings on one card, lifted off the sheet the way panels lift off the window.
 fn section(title: &str, rows: Vec<El>) -> El {
-    let mut card = col().w_full().radius(WELL_RADIUS + 1.0).border(1.0, T.line);
+    let mut card = col().w_full().radius(WELL_RADIUS + 1.0).fill(T.panel).border(1.0, T.line).clip_rounded(WELL_RADIUS + 1.0);
     for (i, r) in rows.into_iter().enumerate() {
         if i > 0 { card = card.child(hairline()); }
         card = card.child(r);
@@ -106,6 +107,7 @@ pub fn sheet(s: &App) -> El {
             .child(icon(&CLOSE, 15.0).color(T.muted)));
 
     let card = surface(col().key("settings").role("dialog").label("Settings").w(SHEET_W).radius(PANEL_RADIUS + 2.0))
+        .fill(T.bg)
         .modal(true, |s: &mut App| s.settings_open = false)
         .shadow(18.0, 48.0, Color::BLACK.alpha(0.4))
         .transition(Transition::scale(0.97).combined(Transition::opacity()))
@@ -113,7 +115,7 @@ pub fn sheet(s: &App) -> El {
         .child(header)
         .child(body);
 
-    el().key("settings-scrim").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).center().fill(Color::BLACK.alpha(0.5))
+    el().key("settings-scrim").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).center().backdrop_blur(SCRIM_BLUR).fill(T.scrim)
         .transition(Transition::opacity())
         .child(card)
 }

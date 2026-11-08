@@ -471,6 +471,10 @@ impl App {
             }
             "small" => self.tile_size = 120.0,
             "settings" => self.open_settings(),
+            "settings-over-model" => {
+                self.run_scene("model", tx);
+                self.open_settings();
+            }
             "start" => {}
             "texture" | "tile" | "tile-seams" => {
                 self.set_kind(Some(Kind::Texture), tx);
