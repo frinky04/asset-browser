@@ -70,9 +70,10 @@ codegen-units = 16
 incremental = true
 
 # What dist.ps1 ships: slower to build than release, smaller and faster to run.
+# Thin LTO runs in parallel; fat LTO with one codegen unit took ~6 minutes on CI for little gain.
 [profile.dist]
 inherits = "release"
-codegen-units = 1
+codegen-units = 16
 incremental = false
-lto = "fat"
+lto = "thin"
 strip = true
